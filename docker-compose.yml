@@ -1,0 +1,28 @@
+services:
+  hrm-training:
+    build: .
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    volumes:
+      # mount source code for development
+      - .:/workspace
+      # mount ARC data (read-only)
+      - ./ARC-AGI-2:/workspace/ARC-AGI-2:ro
+      # mount checkpoints and logs
+      - ./checkpoints:/workspace/checkpoints
+      - ./logs:/workspace/logs
+      # mount processed data
+      - ./data:/workspace/data
+    working_dir: /workspace
+    command: /bin/bash
+    stdin_open: true
+    tty: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu] 

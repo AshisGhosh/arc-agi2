@@ -1,0 +1,16 @@
+# augmentation configuration
+
+augmentation:
+  apply_dihedral: true
+  apply_color_perm: true
+  apply_translation: true
+  
+  # dihedral: 8 transforms (id, rot90,180,270, mirror, mirror+rot90,180,270)
+  dihedral_prob: 0.8
+  
+  # color permutation: permute 0-9 colors consistently
+  color_perm_prob: 0.7
+  
+  # translation: small shifts ±2 pixels
+  translation_prob: 0.6
+  max_shift: 2 
