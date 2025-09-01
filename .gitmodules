@@ -1,3 +1,6 @@
 [submodule "ARC-AGI-2"]
 	path = ARC-AGI-2
 	url = git@github.com:arcprize/ARC-AGI-2.git
+[submodule "ARC-AGI"]
+	path = ARC-AGI
+	url = git@github.com:fchollet/ARC-AGI.git
