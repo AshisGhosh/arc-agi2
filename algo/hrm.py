@@ -60,7 +60,7 @@ class GridEncoder(nn.Module):
       max_len: maximum HW length for positional embeddings
     """
 
-    def __init__(self, num_colors: int = 10, d_model: int = 128, max_len: int = 400):
+    def __init__(self, num_colors: int = 10, d_model: int = 128, max_len: int = 900):
         super().__init__()
         self.tok = nn.Embedding(num_colors, d_model)
         self.pos = nn.Embedding(max_len, d_model)
@@ -124,7 +124,7 @@ class HRM(nn.Module):
         d_model: int = 128,
         d_l: int = 160,
         d_h: int = 192,
-        max_len: int = 400,
+        max_len: int = 900,
     ):
         super().__init__()
         self.num_colors = num_colors
@@ -135,7 +135,7 @@ class HRM(nn.Module):
         self.ctx_agg = MLP(in_dim=d_model, hidden=d_model, out_dim=d_model)
 
         # Initializers
-        self.task_token = nn.Parameter(torch.randn(1, d_h))
+        self.task_token = nn.Parameter(torch.randn(1, d_model))
         self.h_init = MLP(
             in_dim=d_model + d_model, hidden=d_h, out_dim=d_h
         )  # [task, agg_support]

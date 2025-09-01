@@ -29,10 +29,12 @@ WORKDIR /workspace
 COPY requirements.txt .
 RUN export PATH="/root/.local/bin:$PATH" && \
     uv venv && \
+    source .venv/bin/activate && \
     uv pip install -r requirements.txt
 
-# set python path
+# set python path and activate venv
 ENV PYTHONPATH="/workspace:$PYTHONPATH"
+ENV PATH="/workspace/.venv/bin:$PATH"
 
 # default command
 CMD ["/bin/bash"] 

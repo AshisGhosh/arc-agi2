@@ -45,9 +45,21 @@ class HRMTrainer:
         os.makedirs("checkpoints", exist_ok=True)
 
     def _load_config(self, config_path: str) -> Dict:
-        """load YAML config"""
+        """load YAML config with type validation"""
         with open(config_path, "r") as f:
-            return yaml.safe_load(f)
+            config = yaml.safe_load(f)
+
+        # validate and convert training params
+        training = config.get("training", {})
+        training["lr"] = float(training["lr"])
+        training["weight_decay"] = float(training["weight_decay"])
+        training["epochs"] = int(training["epochs"])
+        training["batch_size"] = int(training["batch_size"])
+        training["warmup_steps"] = int(training["warmup_steps"])
+        training["grad_clip"] = float(training["grad_clip"])
+
+        config["training"] = training
+        return config
 
     def _warmup_lr(self, step: int):
         """linear warmup for first warmup_steps"""
@@ -63,36 +75,40 @@ class HRMTrainer:
         batch_size: int,
     ) -> FewShotBatch:
         """create few-shot batch from pairs"""
-        # randomly sample batch_size tasks
-        task_indices = torch.randperm(len(pairs))[:batch_size]
+        # randomly sample batch_size * (k_support + 1) pairs
+        # each batch will use k_support pairs for support and 1 for query
+        total_pairs_needed = batch_size * (k_support + 1)
+
+        if len(pairs) < total_pairs_needed:
+            # duplicate pairs if not enough
+            pairs = pairs * (total_pairs_needed // len(pairs) + 1)
+
+        # randomly sample pairs
+        pair_indices = torch.randperm(len(pairs))[:total_pairs_needed]
 
         support_inp = []
         support_out = []
         query_inp = []
         query_out = []
 
-        for task_idx in task_indices:
-            # for each task, randomly sample k_support pairs for support
-            task_pairs = pairs[task_idx]
-            if len(task_pairs) < k_support:
-                # duplicate if not enough pairs
-                task_pairs = task_pairs * (k_support // len(task_pairs) + 1)
+        for batch_idx in range(batch_size):
+            # for each batch, use k_support pairs for support and 1 for query
+            start_idx = batch_idx * (k_support + 1)
 
-            # sample k_support support pairs
-            support_indices = torch.randperm(len(task_pairs))[:k_support]
+            # support pairs
             task_support_inp = []
             task_support_out = []
-
-            for sup_idx in support_indices:
-                inp, out = task_pairs[sup_idx]
+            for i in range(k_support):
+                pair_idx = pair_indices[start_idx + i]
+                inp, out = pairs[pair_idx]
                 # apply augmentation
                 inp_aug, out_aug = augment_pair(inp, out)
                 task_support_inp.append(inp_aug)
                 task_support_out.append(out_aug)
 
-            # sample one pair for query
-            query_idx = torch.randint(0, len(task_pairs), (1,)).item()
-            inp, out = task_pairs[query_idx]
+            # query pair
+            query_idx = pair_indices[start_idx + k_support]
+            inp, out = pairs[query_idx]
             inp_aug, out_aug = augment_pair(inp, out)
 
             support_inp.append(torch.stack(task_support_inp))

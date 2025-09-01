@@ -20,7 +20,7 @@ def main():
         config = yaml.safe_load(f)
 
     # device
-    device = torch.device("cuda" if torch.cuda.isavailable() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"using device: {device}")
 
     # create model

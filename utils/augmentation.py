@@ -38,6 +38,9 @@ def dihedral_transform(grid: torch.Tensor, transform_id: int) -> torch.Tensor:
 
 def color_permutation(grid: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
     """apply color permutation (0-9 colors)"""
+    # ensure perm is on the same device as grid
+    if perm.device != grid.device:
+        perm = perm.to(grid.device)
     return perm[grid]
 
 
@@ -73,7 +76,7 @@ def augment_pair(
         out_2d = dihedral_transform(out_2d, transform_id)
 
     if apply_color_perm:
-        perm = torch.randperm(10)
+        perm = torch.randperm(10, device=inp.device)
         inp_2d = color_permutation(inp_2d, perm)
         out_2d = color_permutation(out_2d, perm)
 
@@ -84,7 +87,7 @@ def augment_pair(
         out_2d = small_translation(out_2d, dx, dy)
 
     # flatten back
-    inp_aug = inp_2d.view(inp.shape)
-    out_aug = out_2d.view(out.shape)
+    inp_aug = inp_2d.reshape(inp.shape)
+    out_aug = out_2d.reshape(out.shape)
 
     return inp_aug, out_aug
