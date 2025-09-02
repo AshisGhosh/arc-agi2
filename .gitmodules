@@ -4,3 +4,6 @@
 [submodule "ARC-AGI"]
 	path = ARC-AGI
 	url = git@github.com:fchollet/ARC-AGI.git
+[submodule "HRM"]
+	path = HRM
+	url = git@github.com:sapientinc/HRM.git
