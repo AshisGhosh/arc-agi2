@@ -1,449 +1,420 @@
 """
-HRM-style Two-Timescale Recurrent Model (Minimal, Low-Param, PyTorch)
-----------------------------------------------------------------------
-This file implements a compact version of the HRM idea with:
-  • Two coupled recurrent modules at different timescales: L (fast), H (slow)
-  • Segment-wise deep supervision (candidate output per cycle)
-  • Optional ACT-style halting head (halt vs continue)
-  • A simple few-shot packing for ARC-like tasks (support pairs + query)
-  • "One-step"-style gradient approximation via detaching inner steps
-
-Design notes (pragmatic version):
-  - We keep the cells tiny (GRU-like) so parameter count stays small.
-  - Inner L-steps are computed with prev_state.detach() → approximates a 1-step
-    fixed-point gradient; segment boundaries also detach for stability & O(1)-ish mem.
-  - The OutputHead decodes from the slow H-state and the embedded test input.
-  - The HaltingHead provides a per-cycle halt/continue logit pair.
-
-This is NOT a full reproduction of any specific paper; it's a faithful scaffold
-for experimentation that captures the schedule and learning signals.
-
-Requires: torch>=2.0
+HRM-style Hierarchical Reasoning Model with ACT
+Recreated using original HRM components but adapted for few-shot learning
 """
 
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Dict
+from typing import Tuple, Dict
+import math
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
-# ------------------------------------------------------------
-# Utility: small MLP
-# ------------------------------------------------------------
-class MLP(nn.Module):
-    def __init__(self, in_dim: int, hidden: int, out_dim: int, *, dropout: float = 0.0):
-        super().__init__()
-        self.fc1 = nn.Linear(in_dim, hidden)
-        self.fc2 = nn.Linear(hidden, out_dim)
-        self.drop = nn.Dropout(dropout)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.fc1(x)
-        x = F.gelu(x)
-        x = self.drop(x)
-        x = self.fc2(x)
-        return x
+from algo.hrm_components import (
+    trunc_normal_init_,
+    rms_norm,
+    SwiGLU,
+    Attention,
+    RotaryEmbedding,
+    CastedEmbedding,
+    CastedLinear,
+    CastedSparseEmbedding,
+    CosSin,
+)
 
 
 # ------------------------------------------------------------
-# Encoders for ARC-like discrete grids (0..9 colors)
-# ------------------------------------------------------------
-class GridEncoder(nn.Module):
-    """Embeds a flattened grid of ints in [0..num_colors-1].
-
-    Args:
-      num_colors: e.g., 10 for ARC
-      d_model: embedding size per token
-      max_len: maximum HW length for positional embeddings
-    """
-
-    def __init__(self, num_colors: int = 10, d_model: int = 128, max_len: int = 900):
-        super().__init__()
-        self.tok = nn.Embedding(num_colors, d_model)
-        self.pos = nn.Embedding(max_len, d_model)
-        nn.init.normal_(self.pos.weight, std=0.02)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x: (B, L) ints
-        returns: (B, L, d_model)
-        """
-        B, L = x.shape
-        pe = self.pos.weight[:L].unsqueeze(0).expand(B, L, -1)
-        return self.tok(x) + pe
-
-    @staticmethod
-    def pool_mean(embed: torch.Tensor) -> torch.Tensor:
-        """Mean-pool over sequence: (B, L, D) -> (B, D)."""
-        return embed.mean(dim=1)
-
-
-# ------------------------------------------------------------
-# Few-shot pack: support examples and a query
+# Data structures
 # ------------------------------------------------------------
 @dataclass
+class HRMInnerCarry:
+    """Inner carry state for H and L levels"""
+
+    z_H: torch.Tensor  # (B, L, hidden_size)
+    z_L: torch.Tensor  # (B, L, hidden_size)
+
+
+@dataclass
+class HRMCarry:
+    """Full carry state with ACT information"""
+
+    inner_carry: HRMInnerCarry
+    steps: torch.Tensor  # (B,) current step count
+    halted: torch.Tensor  # (B,) whether each sequence is halted
+    current_data: Dict[str, torch.Tensor]  # current batch data
+
+
+@dataclass
 class FewShotBatch:
-    support_inp: torch.Tensor  # (B, K, L)
-    support_out: torch.Tensor  # (B, K, L)
-    query_inp: torch.Tensor  # (B, L)
-    query_out: Optional[torch.Tensor] = None  # (B, L), only for training
+    """Few-shot learning batch"""
+
+    support_inp: torch.Tensor  # (B, K, L) where K=2 support examples
+    support_out: torch.Tensor  # (B, K, L) corresponding outputs
+    query_inp: torch.Tensor  # (B, L) query input to solve
+    query_out: torch.Tensor  # (B, L) query output (target)
+    task_id: torch.Tensor  # (B,) task IDs
 
 
 # ------------------------------------------------------------
-# Tiny GRU-like gated cells for L and H
+# Transformer blocks using original HRM components
 # ------------------------------------------------------------
-class GatedCell(nn.Module):
-    """A tiny GRU-ish cell.
+class HRMBlock(nn.Module):
+    """Single transformer block with attention + MLP"""
 
-    L-cell uses inputs: [prev_L, H, context]
-    H-cell uses inputs: [prev_H, L_terminal]
-    """
-
-    def __init__(self, in_dim: int, state_dim: int):
+    def __init__(self, config: Dict):
         super().__init__()
-        self.in_to_gate = nn.Linear(in_dim, state_dim)
-        self.state_to_gate = nn.Linear(state_dim, state_dim)
-        self.in_to_cand = nn.Linear(in_dim, state_dim)
-        self.state_to_cand = nn.Linear(state_dim, state_dim)
+        self.hidden_size = config["hidden_size"]
+        self.num_heads = config["num_heads"]
+        self.expansion = config["expansion"]
+        self.rms_norm_eps = config.get("rms_norm_eps", 1e-5)
 
-    def forward(self, prev: torch.Tensor, inp: torch.Tensor) -> torch.Tensor:
-        gate = torch.sigmoid(self.in_to_gate(inp) + self.state_to_gate(prev))
-        cand = torch.tanh(self.in_to_cand(inp) + self.state_to_cand(prev))
-        return (1 - gate) * prev + gate * cand
-
-
-# ------------------------------------------------------------
-# HRM model: H/L schedule, Output head, Halting head
-# ------------------------------------------------------------
-class HRM(nn.Module):
-    def __init__(
-        self,
-        num_colors: int = 10,
-        d_model: int = 128,
-        d_l: int = 160,
-        d_h: int = 192,
-        max_len: int = 900,
-    ):
-        super().__init__()
-        self.num_colors = num_colors
-        self.enc = GridEncoder(num_colors=num_colors, d_model=d_model, max_len=max_len)
-
-        # Context builders
-        self.ctx_pair = MLP(in_dim=2 * d_model, hidden=d_model, out_dim=d_model)
-        self.ctx_agg = MLP(in_dim=d_model, hidden=d_model, out_dim=d_model)
-
-        # Initializers
-        self.task_token = nn.Parameter(torch.randn(1, d_model))
-        self.h_init = MLP(
-            in_dim=d_model + d_model, hidden=d_h, out_dim=d_h
-        )  # [task, agg_support]
-        self.l_init = MLP(
-            in_dim=d_h + d_model + d_model, hidden=d_l, out_dim=d_l
-        )  # [H, agg_support, query_pool]
-
-        # Cells
-        self.l_cell = GatedCell(in_dim=d_l + d_h + d_model, state_dim=d_l)
-        self.h_cell = GatedCell(in_dim=d_h + d_l, state_dim=d_h)
-
-        # Output & Halting heads
-        self.out_head = MLP(
-            in_dim=d_model + d_h + d_model, hidden=d_model, out_dim=num_colors
+        # Self attention
+        self.self_attn = Attention(
+            hidden_size=self.hidden_size,
+            head_dim=self.hidden_size // self.num_heads,
+            num_heads=self.num_heads,
+            num_key_value_heads=self.num_heads,
+            causal=False,
         )
-        self.halt_head = MLP(in_dim=d_h, hidden=d_h // 2, out_dim=2)
 
-    # ------------- helpers -------------
-    def build_support_context(
-        self, sup_inp_e: torch.Tensor, sup_out_e: torch.Tensor
-    ) -> torch.Tensor:
-        """Compute an aggregated support context from K pairs.
-        sup_inp_e: (B, K, L, D)
-        sup_out_e: (B, K, L, D)
-        returns: (B, D)
-        """
-        B, K, L, D = sup_inp_e.shape
-        # Per-pair difference summary
-        diff = (sup_out_e - sup_inp_e).mean(dim=2)  # (B, K, D)
-        pair_ctx = self.ctx_pair(
-            torch.cat([diff, diff], dim=-1)
-        )  # simple transform (B, K, D)
-        agg = pair_ctx.mean(dim=1)  # (B, D)
-        return self.ctx_agg(agg)  # (B, D)
+        # MLP
+        self.mlp = SwiGLU(
+            hidden_size=self.hidden_size,
+            expansion=self.expansion,
+        )
 
-    def decode_logits(
-        self, H: torch.Tensor, q_inp_e: torch.Tensor, sup_ctx: torch.Tensor
-    ) -> torch.Tensor:
-        """Per-position classification over colors.
-        H: (B, d_h)
-        q_inp_e: (B, L, d_model)
-        sup_ctx: (B, d_model)
-        returns: (B, L, num_colors)
-        """
-        B, L, D = q_inp_e.shape
-        H_rep = H.unsqueeze(1).expand(B, L, -1)
-        C_rep = sup_ctx.unsqueeze(1).expand(B, L, -1)
-        x = torch.cat([q_inp_e, H_rep, C_rep], dim=-1)
-        logits = self.out_head(x)
-        return logits
+    def forward(self, cos_sin: CosSin, hidden_states: torch.Tensor) -> torch.Tensor:
+        # Post Norm + Self Attention
+        hidden_states = rms_norm(
+            hidden_states
+            + self.self_attn(cos_sin=cos_sin, hidden_states=hidden_states),
+            variance_epsilon=self.rms_norm_eps,
+        )
+        # Post Norm + MLP
+        hidden_states = rms_norm(
+            hidden_states + self.mlp(hidden_states), variance_epsilon=self.rms_norm_eps
+        )
+        return hidden_states
 
-    # ------------- core forward -------------
-    @torch.no_grad()
-    def _detach_(self, *tensors: torch.Tensor) -> Tuple[torch.Tensor, ...]:
-        return tuple(t.detach() for t in tensors)
+
+class HRMReasoningModule(nn.Module):
+    """H or L level reasoning module with multiple transformer blocks"""
+
+    def __init__(self, config: Dict, num_layers: int):
+        super().__init__()
+        self.layers = nn.ModuleList([HRMBlock(config) for _ in range(num_layers)])
 
     def forward(
-        self,
-        batch: FewShotBatch,
-        *,
-        cycles: int = 4,
-        inner_steps: int = 3,
-        one_step_grad: bool = True,
-        act_infer: bool = False,
-        act_min: int = 1,
-        act_max: Optional[int] = None,
-        act_thresh: float = 0.5,
-    ) -> Dict[str, torch.Tensor]:
-        """Run the HRM forward pass.
+        self, hidden_states: torch.Tensor, input_injection: torch.Tensor, **kwargs
+    ) -> torch.Tensor:
+        # Input injection (add)
+        hidden_states = hidden_states + input_injection
+        # Apply transformer layers
+        for layer in self.layers:
+            hidden_states = layer(hidden_states=hidden_states, **kwargs)
+        return hidden_states
 
-        Returns dict with:
-          - logits_per_cycle: List[(B, L, num_colors)] stacked as (cycles, B, L, C)
-          - q_per_cycle:      (cycles, B, 2) halting logits
-          - H_last:           (B, d_h)
-        """
-        B, L = batch.query_inp.shape
-        K = batch.support_inp.shape[1]
 
-        # Encode support and query
-        sup_inp_e = self.enc(batch.support_inp.view(B * K, L)).view(B, K, L, -1)
-        sup_out_e = self.enc(batch.support_out.view(B * K, L)).view(B, K, L, -1)
-        q_inp_e = self.enc(batch.query_inp)  # (B, L, D)
+# ------------------------------------------------------------
+# Main HRM model
+# ------------------------------------------------------------
+class HRM(nn.Module):
+    """Hierarchical Reasoning Model with ACT"""
 
-        # Aggregate contexts
-        sup_ctx = self.build_support_context(sup_inp_e, sup_out_e)  # (B, D)
-        q_pool = GridEncoder.pool_mean(q_inp_e)  # (B, D)
+    def __init__(self, config: Dict):
+        super().__init__()
+        self.config = config
 
-        # Initialize H from task token and support summary
-        task_tok = self.task_token.expand(B, -1)
-        H = self.h_init(torch.cat([task_tok, sup_ctx], dim=-1))  # (B, d_h)
+        # Model dimensions
+        self.hidden_size = config["hidden_size"]
+        self.num_colors = config.get("num_colors", 10)
+        self.max_len = config.get("max_len", 900)
+        self.num_tasks = config.get("num_tasks", 1000)
 
-        logits_list: List[torch.Tensor] = []
-        q_list: List[torch.Tensor] = []
+        # ACT parameters
+        self.halt_max_steps = config.get("halt_max_steps", 16)
+        self.halt_exploration_prob = config.get("halt_exploration_prob", 0.1)
 
-        # ACT settings
-        max_cycles = act_max if (act_infer and act_max is not None) else cycles
+        # H/L cycle parameters
+        self.H_cycles = config.get("H_cycles", 2)
+        self.L_cycles = config.get("L_cycles", 2)
+        self.H_layers = config.get("H_layers", 4)
+        self.L_layers = config.get("L_layers", 4)
 
-        for n in range(max_cycles):
-            # Reset/seed L from updated H and contexts
-            L_state = self.l_init(torch.cat([H, sup_ctx, q_pool], dim=-1))  # (B, d_l)
+        # Embedding scale
+        self.embed_scale = math.sqrt(self.hidden_size)
+        embed_init_std = 1.0 / self.embed_scale
 
-            # Inner fast steps: L updates with H frozen
-            for t in range(inner_steps):
-                prev = L_state.detach() if one_step_grad else L_state
-                # Context feature for L step = mean over query positions
-                ctx = q_pool  # (B, D)
-                l_in = torch.cat([prev, H, ctx], dim=-1)
-                L_state = self.l_cell(prev, l_in)  # (B, d_l)
+        # Token embeddings
+        self.embed_tokens = CastedEmbedding(
+            self.num_colors,
+            self.hidden_size,
+            init_std=embed_init_std,
+            cast_to=torch.bfloat16,
+        )
 
-            # Slow update of H using terminal L
-            h_in = torch.cat(
-                [H, L_state.detach() if one_step_grad else L_state], dim=-1
+        # Puzzle embeddings (task-specific embeddings)
+        puzzle_emb_ndim = config.get("puzzle_emb_ndim", self.hidden_size)
+        self.puzzle_emb_len = -(puzzle_emb_ndim // -self.hidden_size)  # ceil div
+        if puzzle_emb_ndim > 0:
+            self.puzzle_emb = CastedSparseEmbedding(
+                self.num_tasks,
+                puzzle_emb_ndim,
+                batch_size=config.get("batch_size", 32),
+                init_std=0,
+                cast_to=torch.bfloat16,
             )
-            H = self.h_cell(H, h_in)  # (B, d_h)
 
-            # Candidate output + halting logits for this cycle
-            logits = self.decode_logits(H, q_inp_e, sup_ctx)  # (B, L, C)
-            q_logits = self.halt_head(H)  # (B, 2)
+        # Positional embeddings
+        pos_encodings = config.get("pos_encodings", "rope")
+        if pos_encodings == "rope":
+            self.rotary_emb = RotaryEmbedding(
+                dim=self.hidden_size // config["num_heads"],
+                max_position_embeddings=self.max_len + self.puzzle_emb_len,
+                base=config.get("rope_theta", 10000.0),
+            )
+        elif pos_encodings == "learned":
+            self.embed_pos = CastedEmbedding(
+                self.max_len + self.puzzle_emb_len,
+                self.hidden_size,
+                init_std=embed_init_std,
+                cast_to=torch.bfloat16,
+            )
+        else:
+            raise ValueError(f"Unknown pos_encodings: {pos_encodings}")
 
-            logits_list.append(logits)
-            q_list.append(q_logits)
+        # Reasoning modules
+        self.H_level = HRMReasoningModule(config, self.H_layers)
+        self.L_level = HRMReasoningModule(config, self.L_layers)
 
-            # Optional online halting at inference
-            if act_infer and (n + 1) >= act_min:
-                prob_halt = torch.softmax(q_logits, dim=-1)[..., 1]  # P(halt)
-                if (prob_halt > act_thresh).all():
-                    break
+        # Initial states
+        self.H_init = nn.Buffer(
+            trunc_normal_init_(
+                torch.empty(self.hidden_size, dtype=torch.bfloat16), std=1
+            ),
+            persistent=True,
+        )
+        self.L_init = nn.Buffer(
+            trunc_normal_init_(
+                torch.empty(self.hidden_size, dtype=torch.bfloat16), std=1
+            ),
+            persistent=True,
+        )
 
-            # Detach between cycles (deep supervision segments)
-            H = H.detach()
+        # Output heads
+        self.lm_head = CastedLinear(self.hidden_size, self.num_colors, bias=False)
+        self.q_head = CastedLinear(self.hidden_size, 2, bias=True)
+
+        # Initialize Q head for faster learning
+        with torch.no_grad():
+            self.q_head.weight.zero_()
+            self.q_head.bias.fill_(-5)
+
+    def _input_embeddings(self, input: torch.Tensor, puzzle_identifiers: torch.Tensor):
+        """Create input embeddings with token + puzzle + positional embeddings"""
+        # Token embedding
+        embedding = self.embed_tokens(input.to(torch.int32))
+
+        # Puzzle embeddings
+        if hasattr(self, "puzzle_emb"):
+            puzzle_embedding = self.puzzle_emb(puzzle_identifiers)
+            pad_count = (
+                self.puzzle_emb_len * self.hidden_size - puzzle_embedding.shape[-1]
+            )
+            if pad_count > 0:
+                puzzle_embedding = F.pad(puzzle_embedding, (0, pad_count))
+            embedding = torch.cat(
+                (
+                    puzzle_embedding.view(-1, self.puzzle_emb_len, self.hidden_size),
+                    embedding,
+                ),
+                dim=-2,
+            )
+
+        # Positional embeddings
+        if hasattr(self, "embed_pos"):
+            # Learned positional embeddings
+            embedding = 0.707106781 * (
+                embedding + self.embed_pos.embedding_weight.to(torch.float32)
+            )
+
+        # Scale
+        return self.embed_scale * embedding
+
+    def empty_carry(
+        self, batch_size: int, device: torch.device = None
+    ) -> HRMInnerCarry:
+        """Create empty carry state"""
+        if device is None:
+            device = next(self.parameters()).device
+        return HRMInnerCarry(
+            z_H=torch.empty(
+                batch_size,
+                self.max_len + self.puzzle_emb_len,
+                self.hidden_size,
+                dtype=torch.bfloat16,
+                device=device,
+            ),
+            z_L=torch.empty(
+                batch_size,
+                self.max_len + self.puzzle_emb_len,
+                self.hidden_size,
+                dtype=torch.bfloat16,
+                device=device,
+            ),
+        )
+
+    def reset_carry(
+        self, reset_flag: torch.Tensor, carry: HRMInnerCarry
+    ) -> HRMInnerCarry:
+        """Reset carry state for halted sequences"""
+        # Move initial states to the same device as the reset_flag
+        H_init = self.H_init.to(reset_flag.device)
+        L_init = self.L_init.to(reset_flag.device)
+        return HRMInnerCarry(
+            z_H=torch.where(reset_flag.view(-1, 1, 1), H_init, carry.z_H),
+            z_L=torch.where(reset_flag.view(-1, 1, 1), L_init, carry.z_L),
+        )
+
+    def forward(self, batch: FewShotBatch) -> Dict[str, torch.Tensor]:
+        """Forward pass with few-shot learning and ACT"""
+        B = batch.support_inp.shape[0]
+        K = batch.support_inp.shape[1]  # should be 2
+        L = batch.support_inp.shape[2]  # should be 900 (30*30)
+
+        # Create puzzle identifiers (use task_id for now)
+        puzzle_identifiers = batch.task_id
+
+        # Encode support pairs to build context
+        sup_inp_e = self._input_embeddings(
+            batch.support_inp.view(B * K, L), puzzle_identifiers.repeat_interleave(K)
+        )  # (B*K, L, hidden_size)
+        sup_out_e = self._input_embeddings(
+            batch.support_out.view(B * K, L), puzzle_identifiers.repeat_interleave(K)
+        )  # (B*K, L, hidden_size)
+
+        # Build support context (mean pool over sequence)
+        sup_inp_pool = sup_inp_e.mean(dim=1)  # (B*K, hidden_size)
+        sup_out_pool = sup_out_e.mean(dim=1)  # (B*K, hidden_size)
+
+        # Reshape and combine support context
+        sup_inp_pool = sup_inp_pool.view(B, K, -1)  # (B, K, hidden_size)
+        sup_out_pool = sup_out_pool.view(B, K, -1)  # (B, K, hidden_size)
+        support_context = torch.cat([sup_inp_pool, sup_out_pool], dim=-1).mean(
+            dim=1
+        )  # (B, 2*hidden_size)
+
+        # Encode query input
+        query_inp_e = self._input_embeddings(
+            batch.query_inp, puzzle_identifiers
+        )  # (B, L, hidden_size)
+
+        # Project support context to hidden_size
+        support_proj = CastedLinear(
+            2 * self.hidden_size, self.hidden_size, bias=True
+        ).to(query_inp_e.device)
+        support_context_proj = support_proj(support_context)  # (B, hidden_size)
+
+        # Initialize carry
+        carry = self.empty_carry(B, device=query_inp_e.device)
+        carry = self.reset_carry(
+            torch.ones(B, dtype=torch.bool, device=query_inp_e.device), carry
+        )
+
+        # Prepare sequence info for attention
+        seq_info = dict(
+            cos_sin=self.rotary_emb() if hasattr(self, "rotary_emb") else None,
+        )
+
+        # Forward iterations (H/L schedule)
+        with torch.no_grad():
+            z_H, z_L = carry.z_H, carry.z_L
+
+            for _H_step in range(self.H_cycles):
+                for _L_step in range(self.L_cycles):
+                    if not (
+                        (_H_step == self.H_cycles - 1)
+                        and (_L_step == self.L_cycles - 1)
+                    ):
+                        # L level update
+                        l_input = query_inp_e + support_context_proj.unsqueeze(1)
+                        z_L = self.L_level(z_L, l_input, **seq_info)
+
+                if not (_H_step == self.H_cycles - 1):
+                    # H level update
+                    h_input = z_L
+                    z_H = self.H_level(z_H, h_input, **seq_info)
+
+        # 1-step gradient update
+        l_input = query_inp_e + support_context_proj.unsqueeze(1)
+        z_L = self.L_level(z_L, l_input, **seq_info)
+        h_input = z_L
+        z_H = self.H_level(z_H, h_input, **seq_info)
+
+        # Outputs
+        logits = self.lm_head(z_H)[
+            :, self.puzzle_emb_len :
+        ]  # Remove puzzle embedding part
+        q_logits = self.q_head(z_H[:, 0]).to(
+            torch.float32
+        )  # Use first token for Q-values
 
         return {
-            "logits_per_cycle": torch.stack(
-                logits_list, dim=0
-            ),  # (C, B, L, num_colors)
-            "q_per_cycle": torch.stack(q_list, dim=0),  # (C, B, 2)
-            "H_last": H,
+            "logits": logits,
+            "q_halt_logits": q_logits[..., 0],
+            "q_continue_logits": q_logits[..., 1],
         }
 
 
 # ------------------------------------------------------------
-# Losses: deep supervision + simple ACT auxiliary
+# Loss function with ACT
 # ------------------------------------------------------------
-@dataclass
-class HRMLossCfg:
-    ds_weight: float = 1.0  # weight per cycle (uniform)
-    ds_decay: float = 0.0  # optional geometric decay across cycles
-    act_weight: float = 0.1  # BCE on halting signal
-
-
 def hrm_loss(
     outputs: Dict[str, torch.Tensor],
     target: torch.Tensor,  # (B, L) ints
-    cfg: HRMLossCfg = HRMLossCfg(),
+    config: Dict = None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
-    """Compute deep-supervision CE + simple ACT loss.
+    """HRM loss with ACT Q-learning"""
 
-    ACT target heuristic: a cycle is "correct" if its argmax == target on all positions.
-    Then we set y_halt=1 for that cycle and 0 otherwise. You can replace this with a
-    proper return-based target if you implement an episodic signal.
-    """
-    logits_c = outputs["logits_per_cycle"]  # (C, B, L, C)
-    q_c = outputs["q_per_cycle"]  # (C, B, 2)
-    C, B, L, V = logits_c.shape
+    if config is None:
+        config = {"act_weight": 0.1}
 
-    total_ce = 0.0
-    weights = []
-    for i in range(C):
-        w = cfg.ds_weight * ((1.0 - cfg.ds_decay) ** (C - 1 - i))
-        weights.append(w)
-        ce = F.cross_entropy(logits_c[i].view(B * L, V), target.view(B * L))
-        total_ce = total_ce + w * ce
-    total_ce = total_ce / sum(weights)
+    # Cross-entropy loss
+    logits = outputs["logits"]  # (B, L, num_colors)
+    ce_loss = F.cross_entropy(logits.view(-1, logits.shape[-1]), target.view(-1))
 
-    # ACT target: 1 if perfect match, else 0
-    with torch.no_grad():
-        correct_mask = logits_c.argmax(-1) == target.unsqueeze(0)  # (C, B, L)
-        perfect = correct_mask.all(dim=-1).float()  # (C, B)
-    q_logits = q_c.view(C * B, 2)
-    y_halt = perfect.view(C * B)
-    act_ce = F.binary_cross_entropy_with_logits(q_logits[:, 1], y_halt)
+    # ACT Q-learning loss (simplified for now)
+    q_halt = outputs["q_halt_logits"]  # (B,)
+    q_continue = outputs["q_continue_logits"]  # (B,)
 
-    loss = total_ce + cfg.act_weight * act_ce
-    metrics = {
-        "loss": float(loss.item()),
-        "ce": float(total_ce.item()),
-        "act_bce": float(act_ce.item()),
-        "perfect@last": float(perfect[-1].float().mean().item()),
-    }
-    return loss, metrics
+    # Simple Q-loss: encourage halt when task is solved
+    pred = logits.argmax(-1)  # (B, L)
+    task_solved = (pred == target).all(dim=1).float()  # (B,)
 
+    # Target: halt if solved, continue if not
+    target_halt = task_solved
+    target_continue = 1.0 - task_solved
 
-# ------------------------------------------------------------
-# Example training step
-# ------------------------------------------------------------
-class HRMSystem:
-    def __init__(self, model: HRM, lr: float = 2e-3, weight_decay: float = 1e-4):
-        self.model = model
-        self.opt = torch.optim.AdamW(
-            model.parameters(), lr=lr, weight_decay=weight_decay
-        )
-
-    def train_step(
-        self, batch: FewShotBatch, cfg: HRMLossCfg, *, cycles=4, inner_steps=3
-    ) -> Dict[str, float]:
-        self.model.train()
-        out = self.model(
-            batch, cycles=cycles, inner_steps=inner_steps, one_step_grad=True
-        )
-        assert batch.query_out is not None, "query_out required for training"
-        loss, metrics = hrm_loss(out, batch.query_out, cfg)
-        self.opt.zero_grad(set_to_none=True)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-        self.opt.step()
-        return metrics
-
-    @torch.inference_mode()
-    def infer(
-        self, batch: FewShotBatch, *, act_min=1, act_max=6, act_thresh=0.7
-    ) -> torch.Tensor:
-        self.model.eval()
-        out = self.model(
-            batch,
-            act_infer=True,
-            act_min=act_min,
-            act_max=act_max,
-            act_thresh=act_thresh,
-        )
-        # Use last cycle (or halted) prediction
-        logits = out["logits_per_cycle"][-1]  # (B, L, V)
-        return logits.argmax(-1)
-
-
-# ------------------------------------------------------------
-# Minimal demo with synthetic data (shapes only)
-# ------------------------------------------------------------
-if __name__ == "__main__":
-    torch.manual_seed(0)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Create a toy batch: recolor 1→2 task on 6×6 grids
-    B, K, H, W, V = 4, 2, 6, 6, 10
-    L = H * W
-
-    def make_recolor_batch(B: int, K: int, H: int, W: int) -> FewShotBatch:
-        # Inputs: random zeros with some 1s; outputs: recolor 1→2
-        x_sup = torch.zeros(B, K, H, W, dtype=torch.long)
-        y_sup = torch.zeros(B, K, H, W, dtype=torch.long)
-        x_q = torch.zeros(B, H, W, dtype=torch.long)
-        y_q = torch.zeros(B, H, W, dtype=torch.long)
-        for b in range(B):
-            for k in range(K):
-                m = torch.rand(H, W) > 0.7
-                x = torch.zeros(H, W, dtype=torch.long)
-                x[m] = 1
-                y = x.clone()
-                y[y == 1] = 2
-                x_sup[b, k] = x
-                y_sup[b, k] = y
-            # query
-            m = torch.rand(H, W) > 0.7
-            x = torch.zeros(H, W, dtype=torch.long)
-            x[m] = 1
-            y = x.clone()
-            y[y == 1] = 2
-            x_q[b] = x
-            y_q[b] = y
-        return FewShotBatch(
-            support_inp=x_sup.view(B, K, L),
-            support_out=y_sup.view(B, K, L),
-            query_inp=x_q.view(B, L),
-            query_out=y_q.view(B, L),
-        )
-
-    batch = make_recolor_batch(B, K, H, W)
-
-    model = HRM(num_colors=V, d_model=64, d_l=80, d_h=96, max_len=L).to(device)
-    sys = HRMSystem(model, lr=3e-3)
-
-    # Move to device
-    batch = FewShotBatch(
-        support_inp=batch.support_inp.to(device),
-        support_out=batch.support_out.to(device),
-        query_inp=batch.query_inp.to(device),
-        query_out=batch.query_out.to(device),
+    q_loss = F.mse_loss(torch.sigmoid(q_halt), target_halt) + F.mse_loss(
+        torch.sigmoid(q_continue), target_continue
     )
 
-    # Quick training loop
-    cfg = HRMLossCfg(ds_weight=1.0, ds_decay=0.0, act_weight=0.05)
-    for step in range(200):
-        metrics = sys.train_step(batch, cfg, cycles=3, inner_steps=2)
-        if (step + 1) % 50 == 0:
-            print(
-                f"step {step + 1}: loss={metrics['loss']:.4f} ce={metrics['ce']:.4f} act={metrics['act_bce']:.4f} perf@last={metrics['perfect@last']:.3f}"
-            )
+    # Total loss
+    total_loss = ce_loss + config.get("act_weight", 0.1) * q_loss
 
-    # Inference (ACT enabled)
+    # Metrics
     with torch.no_grad():
-        pred = sys.infer(
-            FewShotBatch(
-                support_inp=batch.support_inp,
-                support_out=batch.support_out,
-                query_inp=batch.query_inp,
-                query_out=None,
-            ),
-            act_min=1,
-            act_max=5,
-            act_thresh=0.6,
-        )
-        print("Pred correct rate:", (pred == batch.query_out).float().mean().item())
+        cell_acc = (pred == target).float().mean()
+        perfect_acc = task_solved.mean()
+
+    metrics = {
+        "loss": float(total_loss.item()),
+        "ce_loss": float(ce_loss.item()),
+        "q_loss": float(q_loss.item()),
+        "cell_acc": cell_acc,
+        "perfect_acc": perfect_acc,
+    }
+
+    return total_loss, metrics

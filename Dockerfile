@@ -27,14 +27,23 @@ WORKDIR /workspace
 
 # copy requirements and install dependencies
 COPY requirements.txt .
+# base requirements
 RUN export PATH="/root/.local/bin:$PATH" && \
-    uv venv && \
-    source .venv/bin/activate && \
-    uv pip install -r requirements.txt
+    uv venv .venv && \
+    . .venv/bin/activate && \
+    uv pip install torch>=2.0.0 numpy pyyaml && \
+    uv pip install flash-attn --no-build-isolation && \
+    uv pip install adam-atan2 einops
+
+# additional requirements
+RUN export PATH="/root/.local/bin:$PATH" && \
+    uv venv .venv && \
+    . .venv/bin/activate && \
+    uv pip install tqdm
 
 # set python path and activate venv
 ENV PYTHONPATH="/workspace:$PYTHONPATH"
 ENV PATH="/workspace/.venv/bin:$PATH"
 
 # default command
-CMD ["/bin/bash"] 
+CMD ["/bin/bash"]

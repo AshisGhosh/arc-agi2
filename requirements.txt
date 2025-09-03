@@ -1,3 +1,6 @@
 torch>=2.0.0
 numpy
-pyyaml 
+pyyaml
+adam-atan2
+einops
+flash-attn

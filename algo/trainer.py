@@ -1,300 +1,291 @@
-import os
-import yaml
 import torch
-from typing import Dict, List, Tuple
+from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.utils.data import DataLoader
+from typing import Dict
+import os
+from tqdm import tqdm
 
-from .hrm import HRM, FewShotBatch, HRMLossCfg, hrm_loss
-from utils.metrics import compute_cycle_metrics
-from utils.augmentation import augment_pair
+from .hrm import HRM, FewShotBatch, hrm_loss
 
 
 class HRMTrainer:
-    """extended HRMSystem with training infrastructure"""
+    """HRM trainer with ACT support"""
 
-    def __init__(self, model: HRM, config_path: str):
+    def __init__(self, model: HRM, config: Dict):
         self.model = model
-        self.config = self._load_config(config_path)
+        self.config = config
+        self.device = next(model.parameters()).device
 
-        # optimizer and scheduler
-        self.optimizer = torch.optim.AdamW(
-            model.parameters(),
-            lr=self.config["training"]["lr"],
-            weight_decay=self.config["training"]["weight_decay"],
+        # separate optimizers for main model and puzzle embeddings
+        main_params = []
+        puzzle_emb_params = []
+
+        for name, param in model.named_parameters():
+            if "puzzle_emb" in name:
+                puzzle_emb_params.append(param)
+            else:
+                main_params.append(param)
+
+        # main optimizer
+        self.optimizer = AdamW(
+            main_params, lr=config["training"]["lr"], weight_decay=0.1
         )
 
-        # cosine scheduler with warmup
+        # puzzle embedding optimizer (higher learning rate)
+        if puzzle_emb_params:
+            self.puzzle_emb_optimizer = AdamW(
+                puzzle_emb_params,
+                lr=config["training"]["puzzle_emb_lr"],
+                weight_decay=0.1,
+            )
+        else:
+            self.puzzle_emb_optimizer = None
+
+        # per-epoch cosine annealing
         self.scheduler = CosineAnnealingLR(
-            self.optimizer, T_max=self.config["training"]["epochs"], eta_min=1e-6
+            self.optimizer, T_max=config["training"]["epochs"], eta_min=1e-6
         )
 
         # training state
         self.epoch = 0
+        self.best_val_loss = float("inf")
         self.best_val_perfect = 0.0
-        self.patience_counter = 0
-        self.patience = 15
-
-        # loss config
-        self.loss_cfg = HRMLossCfg(
-            ds_weight=self.config["loss"]["ds_weight"],
-            ds_decay=self.config["loss"]["ds_decay"],
-            act_weight=self.config["loss"]["act_weight"],
-        )
 
         # create checkpoint directory
         os.makedirs("checkpoints", exist_ok=True)
 
-    def _load_config(self, config_path: str) -> Dict:
-        """load YAML config with type validation"""
-        with open(config_path, "r") as f:
-            config = yaml.safe_load(f)
-
-        # validate and convert training params
-        training = config.get("training", {})
-        training["lr"] = float(training["lr"])
-        training["weight_decay"] = float(training["weight_decay"])
-        training["epochs"] = int(training["epochs"])
-        training["batch_size"] = int(training["batch_size"])
-        training["warmup_steps"] = int(training["warmup_steps"])
-        training["grad_clip"] = float(training["grad_clip"])
-
-        config["training"] = training
-        return config
-
-    def _warmup_lr(self, step: int):
-        """linear warmup for first warmup_steps"""
-        if step < self.config["training"]["warmup_steps"]:
-            warmup_factor = step / self.config["training"]["warmup_steps"]
-            for param_group in self.optimizer.param_groups:
-                param_group["lr"] = self.config["training"]["lr"] * warmup_factor
-
-    def _create_few_shot_batch(
-        self,
-        pairs: List[Tuple[torch.Tensor, torch.Tensor]],
-        k_support: int,
-        batch_size: int,
-    ) -> FewShotBatch:
-        """create few-shot batch from pairs"""
-        # randomly sample batch_size * (k_support + 1) pairs
-        # each batch will use k_support pairs for support and 1 for query
-        total_pairs_needed = batch_size * (k_support + 1)
-
-        if len(pairs) < total_pairs_needed:
-            # duplicate pairs if not enough
-            pairs = pairs * (total_pairs_needed // len(pairs) + 1)
-
-        # randomly sample pairs
-        pair_indices = torch.randperm(len(pairs))[:total_pairs_needed]
-
-        support_inp = []
-        support_out = []
-        query_inp = []
-        query_out = []
-
-        for batch_idx in range(batch_size):
-            # for each batch, use k_support pairs for support and 1 for query
-            start_idx = batch_idx * (k_support + 1)
-
-            # support pairs
-            task_support_inp = []
-            task_support_out = []
-            for i in range(k_support):
-                pair_idx = pair_indices[start_idx + i]
-                inp, out = pairs[pair_idx]
-                # apply augmentation
-                inp_aug, out_aug = augment_pair(inp, out)
-                task_support_inp.append(inp_aug)
-                task_support_out.append(out_aug)
-
-            # query pair
-            query_idx = pair_indices[start_idx + k_support]
-            inp, out = pairs[query_idx]
-            inp_aug, out_aug = augment_pair(inp, out)
-
-            support_inp.append(torch.stack(task_support_inp))
-            support_out.append(torch.stack(task_support_out))
-            query_inp.append(inp_aug)
-            query_out.append(out_aug)
-
-        return FewShotBatch(
-            support_inp=torch.stack(support_inp),  # (B, K, L)
-            support_out=torch.stack(support_out),  # (B, K, L)
-            query_inp=torch.stack(query_inp),  # (B, L)
-            query_out=torch.stack(query_out),  # (B, L)
-        )
-
-    def train_epoch(
-        self, train_pairs: List[Tuple[torch.Tensor, torch.Tensor]]
-    ) -> Dict[str, float]:
+    def train_epoch(self, train_loader: DataLoader) -> Dict[str, float]:
         """train for one epoch"""
         self.model.train()
-
-        batch_size = self.config["training"]["batch_size"]
-        k_support = self.config["data"]["k_support"]
-        cycles = self.config["hrm"]["cycles"]
-        inner_steps = self.config["hrm"]["inner_steps"]
-
-        # create batches
-        n_batches = len(train_pairs) // batch_size
         total_loss = 0.0
-        total_metrics = {}
+        total_ce_loss = 0.0
+        total_q_loss = 0.0
+        total_cell_acc = 0.0
+        total_perfect_acc = 0.0
+        num_batches = 0
 
-        for batch_idx in range(n_batches):
+        for batch_data in tqdm(train_loader, desc="Training", total=len(train_loader)):
+            # unpack batch data
+            (
+                support_inp,
+                support_out,
+                query_inp,
+                query_out,
+                task_id,
+                support_sources,
+                query_source,
+            ) = batch_data
+
+            # move to device
+            support_inp = support_inp.to(self.device)
+            support_out = support_out.to(self.device)
+            query_inp = query_inp.to(self.device)
+            query_out = query_out.to(self.device)
+            task_id = task_id.to(self.device)
+
             # create few-shot batch
-            batch = self._create_few_shot_batch(train_pairs, k_support, batch_size)
-
-            # forward pass
-            outputs = self.model(
-                batch,
-                cycles=cycles,
-                inner_steps=inner_steps,
-                one_step_grad=self.config["hrm"]["one_step_grad"],
+            batch = FewShotBatch(
+                support_inp=support_inp,
+                support_out=support_out,
+                query_inp=query_inp,
+                query_out=query_out,
+                task_id=task_id,
             )
 
+            # forward pass
+            outputs = self.model(batch)
+
             # compute loss
-            loss, metrics = hrm_loss(outputs, batch.query_out, self.loss_cfg)
+            loss, metrics = hrm_loss(outputs, query_out, self.config["loss"])
 
             # backward pass
             self.optimizer.zero_grad()
+            if self.puzzle_emb_optimizer:
+                self.puzzle_emb_optimizer.zero_grad()
+
             loss.backward()
+
+            # gradient clipping
             torch.nn.utils.clip_grad_norm_(
                 self.model.parameters(), self.config["training"]["grad_clip"]
             )
-            self.optimizer.step()
 
-            # update scheduler
-            step = self.epoch * n_batches + batch_idx
-            self._warmup_lr(step)
-            if step >= self.config["training"]["warmup_steps"]:
-                self.scheduler.step()
+            self.optimizer.step()
+            if self.puzzle_emb_optimizer:
+                self.puzzle_emb_optimizer.step()
 
             # accumulate metrics
-            total_loss += loss.item()
-            for key, value in metrics.items():
-                if key not in total_metrics:
-                    total_metrics[key] = 0.0
-                total_metrics[key] += value
+            total_loss += metrics["loss"]
+            total_ce_loss += metrics["ce_loss"]
+            total_q_loss += metrics["q_loss"]
+            total_cell_acc += metrics["cell_acc"]
+            total_perfect_acc += metrics["perfect_acc"]
+            num_batches += 1
 
-        # average metrics
-        avg_metrics = {key: value / n_batches for key, value in total_metrics.items()}
-        avg_metrics["loss"] = total_loss / n_batches
+        return {
+            "train_loss": total_loss / num_batches,
+            "train_ce_loss": total_ce_loss / num_batches,
+            "train_q_loss": total_q_loss / num_batches,
+            "train_cell_acc": total_cell_acc / num_batches,
+            "train_perfect_acc": total_perfect_acc / num_batches,
+        }
 
-        return avg_metrics
-
-    def validate(
-        self, val_pairs: List[Tuple[torch.Tensor, torch.Tensor]]
-    ) -> Dict[str, float]:
+    def validate(self, val_loader: DataLoader) -> Dict[str, float]:
         """validate model"""
         self.model.eval()
-
-        batch_size = self.config["training"]["batch_size"]
-        k_support = self.config["data"]["k_support"]
-        cycles = self.config["hrm"]["cycles"]
-        inner_steps = self.config["hrm"]["inner_steps"]
-
-        # create validation batch
-        batch = self._create_few_shot_batch(val_pairs, k_support, batch_size)
+        total_loss = 0.0
+        total_ce_loss = 0.0
+        total_q_loss = 0.0
+        total_cell_acc = 0.0
+        total_perfect_acc = 0.0
+        num_batches = 0
 
         with torch.no_grad():
-            outputs = self.model(
-                batch,
-                cycles=cycles,
-                inner_steps=inner_steps,
-                one_step_grad=False,  # no gradient needed for validation
+            for batch_data in tqdm(val_loader):
+                # unpack batch data
+                (
+                    support_inp,
+                    support_out,
+                    query_inp,
+                    query_out,
+                    task_id,
+                    support_sources,
+                    query_source,
+                ) = batch_data
+
+                # move to device
+                support_inp = support_inp.to(self.device)
+                support_out = support_out.to(self.device)
+                query_inp = query_inp.to(self.device)
+                query_out = query_out.to(self.device)
+                task_id = task_id.to(self.device)
+
+                # create few-shot batch
+                batch = FewShotBatch(
+                    support_inp=support_inp,
+                    support_out=support_out,
+                    query_inp=query_inp,
+                    query_out=query_out,
+                    task_id=task_id,
+                )
+
+                # forward pass
+                outputs = self.model(batch)
+
+                # compute loss
+                loss, metrics = hrm_loss(outputs, query_out, self.config["loss"])
+
+                # accumulate metrics
+                total_loss += metrics["loss"]
+                total_ce_loss += metrics["ce_loss"]
+                total_q_loss += metrics["q_loss"]
+                total_cell_acc += metrics["cell_acc"]
+                total_perfect_acc += metrics["perfect_acc"]
+                num_batches += 1
+
+        return {
+            "val_loss": total_loss / num_batches,
+            "val_ce_loss": total_ce_loss / num_batches,
+            "val_q_loss": total_q_loss / num_batches,
+            "val_cell_acc": total_cell_acc / num_batches,
+            "val_perfect_acc": total_perfect_acc / num_batches,
+            "cell_acc_last": total_cell_acc / num_batches,
+            "perfect_grid_acc_last": total_perfect_acc / num_batches,
+        }
+
+    def train(self, train_loader: DataLoader, val_loader: DataLoader) -> Dict:
+        """full training loop"""
+        history = {
+            "train_loss": [],
+            "train_ce_loss": [],
+            "train_q_loss": [],
+            "train_cell_acc": [],
+            "train_perfect_acc": [],
+            "val_loss": [],
+            "val_ce_loss": [],
+            "val_q_loss": [],
+            "val_cell_acc": [],
+            "val_perfect_acc": [],
+        }
+
+        for epoch in range(self.config["training"]["epochs"]):
+            self.epoch = epoch
+
+            # train
+            train_metrics = self.train_epoch(train_loader)
+
+            # validate
+            val_metrics = self.validate(val_loader)
+
+            # update scheduler
+            self.scheduler.step()
+
+            # update history
+            for key in history:
+                if key.startswith("train_"):
+                    history[key].append(train_metrics[key])
+                elif key.startswith("val_"):
+                    history[key].append(val_metrics[key])
+
+            # print progress
+            print(
+                f"epoch {epoch + 1}/{self.config['training']['epochs']}: "
+                f"train_loss={train_metrics['train_loss']:.4f}, "
+                f"val_loss={val_metrics['val_loss']:.4f}, "
+                f"val_perfect={val_metrics['val_perfect_acc']:.3f}"
             )
 
-            # compute metrics
-            metrics = compute_cycle_metrics(
-                outputs["logits_per_cycle"], batch.query_out
-            )
+            # save checkpoint if best
+            if val_metrics["val_loss"] < self.best_val_loss:
+                self.best_val_loss = val_metrics["val_loss"]
+                self.best_val_perfect = val_metrics["val_perfect_acc"]
+                self.save_checkpoint("best.pt")
 
-            # add loss
-            loss, loss_metrics = hrm_loss(outputs, batch.query_out, self.loss_cfg)
-            metrics["val_loss"] = loss.item()
-            metrics.update(loss_metrics)
+            # save latest checkpoint
+            self.save_checkpoint("latest.pt")
 
-        return metrics
+        return history
 
-    def save_checkpoint(self, is_best: bool = False):
+    def save_checkpoint(self, filename: str):
         """save model checkpoint"""
         checkpoint = {
             "epoch": self.epoch,
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "scheduler_state_dict": self.scheduler.state_dict(),
+            "best_val_loss": self.best_val_loss,
             "best_val_perfect": self.best_val_perfect,
             "config": self.config,
         }
 
-        # save latest
-        torch.save(checkpoint, "checkpoints/latest.pt")
+        if self.puzzle_emb_optimizer:
+            checkpoint["puzzle_emb_optimizer_state_dict"] = (
+                self.puzzle_emb_optimizer.state_dict()
+            )
 
-        # save best if better
-        if is_best:
-            torch.save(checkpoint, "checkpoints/best.pt")
+        torch.save(checkpoint, f"checkpoints/{filename}")
 
-    def load_checkpoint(self, checkpoint_path: str):
+    def load_checkpoint(self, filename: str):
         """load model checkpoint"""
-        checkpoint = torch.load(checkpoint_path)
+        checkpoint = torch.load(f"checkpoints/{filename}", map_location=self.device)
 
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-        self.epoch = checkpoint["epoch"]
-        self.best_val_perfect = checkpoint["best_val_perfect"]
 
-    def train(
-        self,
-        train_pairs: List[Tuple[torch.Tensor, torch.Tensor]],
-        val_pairs: List[Tuple[torch.Tensor, torch.Tensor]],
-    ) -> Dict[str, List[float]]:
-        """main training loop"""
-        history = {"train_loss": [], "val_loss": [], "val_perfect_grid_last": []}
-
-        for epoch in range(self.config["training"]["epochs"]):
-            self.epoch = epoch
-
-            # training
-            train_metrics = self.train_epoch(train_pairs)
-
-            # validation
-            val_metrics = self.validate(val_pairs)
-
-            # update learning rate
-            if epoch >= self.config["training"]["warmup_steps"]:
-                self.scheduler.step()
-
-            # early stopping check
-            val_perfect = val_metrics["perfect_grid_acc_last"]
-            is_best = val_perfect > self.best_val_perfect
-
-            if is_best:
-                self.best_val_perfect = val_perfect
-                self.patience_counter = 0
-                self.save_checkpoint(is_best=True)
-            else:
-                self.patience_counter += 1
-
-            # save checkpoint
-            self.save_checkpoint()
-
-            # log metrics
-            print(
-                f"epoch {epoch + 1:3d}: "
-                f"train_loss={train_metrics['loss']:.4f} "
-                f"val_loss={val_metrics['val_loss']:.4f} "
-                f"val_perfect={val_perfect:.3f} "
-                f"lr={self.optimizer.param_groups[0]['lr']:.6f}"
+        if (
+            self.puzzle_emb_optimizer
+            and "puzzle_emb_optimizer_state_dict" in checkpoint
+        ):
+            self.puzzle_emb_optimizer.load_state_dict(
+                checkpoint["puzzle_emb_optimizer_state_dict"]
             )
 
-            # store history
-            history["train_loss"].append(train_metrics["loss"])
-            history["val_loss"].append(val_metrics["val_loss"])
-            history["val_perfect_grid_last"].append(val_perfect)
+        self.epoch = checkpoint["epoch"]
+        self.best_val_loss = checkpoint["best_val_loss"]
+        self.best_val_perfect = checkpoint["best_val_perfect"]
 
-            # early stopping
-            if self.patience_counter >= self.patience:
-                print(f"early stopping at epoch {epoch + 1}")
-                break
-
-        return history
+        print(f"loaded checkpoint from epoch {self.epoch}")
+        print(f"best validation loss: {self.best_val_loss:.4f}")
+        print(f"best validation perfect: {self.best_val_perfect:.3f}")

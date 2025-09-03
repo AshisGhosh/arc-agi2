@@ -7,9 +7,11 @@ help:
 	@echo "  make run        - start container and open shell"
 	@echo "  make stop       - stop container"
 	@echo "  make shell      - open shell in running container"
-	@echo "  make preprocess - run data preprocessing"
-	@echo "  make train      - run training"
-	@echo "  make evaluate   - run evaluation"
+	@echo "  make preprocess - run data preprocessing for both agi1 and agi2"
+	@echo "  make train      - run training on agi2 (default)"
+	@echo "  make train dataset=agi1 - run training on agi1"
+	@echo "  make evaluate   - run evaluation on agi2 (default)"
+	@echo "  make evaluate dataset=agi1 - run evaluation on agi1"
 	@echo "  make clean      - clean up containers and images"
 	@echo "  make lint       - run linting"
 
@@ -30,17 +32,17 @@ stop:
 shell:
 	docker compose exec hrm-training bash
 
-# run preprocessing
+# run preprocessing (both datasets)
 preprocess:
 	docker compose exec hrm-training python scripts/preprocess.py
 
-# run training
+# run training (default: agi2)
 train:
-	docker compose exec hrm-training python scripts/train.py
+	docker compose exec hrm-training python scripts/train.py --dataset $(or $(dataset),agi2)
 
-# run evaluation
+# run evaluation (default: agi2)
 evaluate:
-	docker compose exec hrm-training python scripts/evaluate.py
+	docker compose exec hrm-training python scripts/evaluate.py --dataset $(or $(dataset),agi2)
 
 # clean up
 clean:
@@ -48,5 +50,5 @@ clean:
 	docker system prune -f 
 
 lint:
-	ruff check --fix .
-	ruff format
+	ruff check --fix . --exclude HRM,ARC-AGI,ARC-AGI2
+	ruff format --exclude HRM,ARC-AGI,ARC-AGI2

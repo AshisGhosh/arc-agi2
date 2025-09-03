@@ -1,0 +1,49 @@
+# HRM Configuration - using original HRM nomenclature
+
+# Model architecture
+model:
+  num_colors: 10
+  max_len: 900
+  num_tasks: 1000  # will be set dynamically from task_id_map.json
+  batch_size: 32   # for puzzle embeddings
+
+# HRM specific parameters
+H_cycles: 4
+L_cycles: 2
+H_layers: 2
+L_layers: 2
+
+# Transformer config
+hidden_size: 512
+num_heads: 8
+expansion: 4
+pos_encodings: rope  # "rope" or "learned"
+rope_theta: 10000.0
+rms_norm_eps: 0.00001  # 1e-5 as decimal
+
+# Puzzle embeddings (disabled for now)
+puzzle_emb_ndim: 0
+
+# ACT system
+halt_max_steps: 16
+halt_exploration_prob: 0.1
+
+# Training
+training:
+  batch_size: 32
+  lr: 0.0001  # 1e-4 as decimal
+  puzzle_emb_lr: 0.01  # 1e-2 as decimal
+  epochs: 100
+  grad_clip: 1.0
+
+# Loss
+loss:
+  act_weight: 0.1
+
+# Evaluation
+evaluation:
+  tta_enabled: false
+  num_augmentations: 8
+  voting_strategy: "majority"
+  tta_dihedral: true
+  tta_color_perm: true
