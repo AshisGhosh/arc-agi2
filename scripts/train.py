@@ -13,7 +13,18 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from algo.hrm import HRM
 from algo.trainer import HRMTrainer
-from utils.few_shot_dataset import FewShotDataset
+from utils.hrm_dataset import HRMDataset
+
+
+def custom_collate_fn(batch):
+    """custom collate function to properly handle support_pairs and file_names"""
+    inputs = torch.stack([item[0] for item in batch])
+    labels = torch.stack([item[1] for item in batch])
+    puzzle_identifiers = torch.tensor([item[2] for item in batch])  # convert to tensor
+    support_pairs_list = [item[3] for item in batch]  # keep as list of lists
+    file_names = [item[4] for item in batch]  # keep as list of strings
+    
+    return inputs, labels, puzzle_identifiers, support_pairs_list, file_names
 
 
 def main():
@@ -51,12 +62,12 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"using device: {device}")
 
-    # create model with correct num_tasks
+    # create model with correct parameters
     model = HRM(
         {
-            "num_colors": config["model"]["num_colors"],
-            "max_len": config["model"]["max_len"],
-            "num_tasks": num_tasks,
+            "vocab_size": config["model"]["num_colors"],
+            "seq_len": config["model"]["max_len"],
+            "num_puzzle_identifiers": num_tasks,
             "batch_size": config["model"]["batch_size"],
             "H_cycles": config["H_cycles"],
             "L_cycles": config["L_cycles"],
@@ -78,20 +89,22 @@ def main():
 
     # build data loaders
     print("building data loaders...")
-    train_ds = FewShotDataset(root="data", split="train", dataset=args.dataset)
-    val_ds = FewShotDataset(root="data", split="val", dataset=args.dataset)
+    train_ds = HRMDataset(root="data", split="train", dataset=args.dataset)
+    val_ds = HRMDataset(root="data", split="val", dataset=args.dataset)
 
     train_loader = DataLoader(
         train_ds,
         batch_size=config["training"]["batch_size"],
         shuffle=True,
         drop_last=True,
+        collate_fn=custom_collate_fn,
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=config["training"]["batch_size"],
         shuffle=False,
         drop_last=False,
+        collate_fn=custom_collate_fn,
     )
 
     print(f"train examples: {len(train_ds)}")

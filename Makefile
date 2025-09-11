@@ -1,4 +1,4 @@
-.PHONY: build run stop shell preprocess train evaluate help
+.PHONY: build run stop shell preprocess train evaluate streamlit help
 
 # default target
 help:
@@ -12,6 +12,7 @@ help:
 	@echo "  make train dataset=agi1 - run training on agi1"
 	@echo "  make evaluate   - run evaluation on agi2 (default)"
 	@echo "  make evaluate dataset=agi1 - run evaluation on agi1"
+	@echo "  make streamlit  - start streamlit testing interface"
 	@echo "  make clean      - clean up containers and images"
 	@echo "  make lint       - run linting"
 
@@ -43,6 +44,10 @@ train:
 # run evaluation (default: agi2)
 evaluate:
 	docker compose exec hrm-training python scripts/evaluate.py --dataset $(or $(dataset),agi2)
+
+# start streamlit testing interface
+streamlit:
+	docker compose up hrm-streamlit
 
 # clean up
 clean:

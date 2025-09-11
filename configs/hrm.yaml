@@ -9,23 +9,23 @@ model:
 
 # HRM specific parameters
 H_cycles: 4
-L_cycles: 2
-H_layers: 2
-L_layers: 2
+L_cycles: 4
+H_layers: 4
+L_layers: 4
 
 # Transformer config
-hidden_size: 512
-num_heads: 8
+hidden_size: 256
+num_heads: 4
 expansion: 4
 pos_encodings: rope  # "rope" or "learned"
 rope_theta: 10000.0
 rms_norm_eps: 0.00001  # 1e-5 as decimal
 
 # Puzzle embeddings (disabled for now)
-puzzle_emb_ndim: 0
+puzzle_emb_ndim: 128
 
 # ACT system
-halt_max_steps: 16
+halt_max_steps: 4
 halt_exploration_prob: 0.1
 
 # Training
@@ -36,13 +36,18 @@ training:
   epochs: 100
   grad_clip: 1.0
 
+# Scheduler
+warmup_steps: 1000  # linear warmup steps before cosine annealing
+
 # Loss
 loss:
-  act_weight: 0.1
+  act_weight: 1.0
 
 # Evaluation
 evaluation:
-  tta_enabled: false
+  few_shot_enabled: false  # enable few-shot adaptation on support examples
+  inner_steps: 3  # number of adaptation steps on support examples
+  tta_enabled: false  # now properly implemented with augmentation.py
   num_augmentations: 8
   voting_strategy: "majority"
   tta_dihedral: true

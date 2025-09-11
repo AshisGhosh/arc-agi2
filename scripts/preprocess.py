@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""preprocess ARC JSON files into few-shot learning format"""
+"""preprocess ARC JSON files into HRM training format"""
 
 import os
 import sys
@@ -17,9 +17,7 @@ from utils.data_loader import load_arc_json, pad_grid_center
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="preprocess ARC data for few-shot learning"
-    )
+    parser = argparse.ArgumentParser(description="preprocess ARC data for HRM training")
     parser.add_argument("--seed", type=int, default=42, help="random seed")
     parser.add_argument(
         "--val-ratio", type=float, default=0.2, help="validation split ratio"

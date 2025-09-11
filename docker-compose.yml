@@ -19,4 +19,26 @@ services:
           devices:
             - driver: nvidia
               count: all
+              capabilities: [gpu]
+
+  hrm-streamlit:
+    build: .
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - VIRTUAL_ENV=/workspace/.venv
+      - PATH=/workspace/.venv/bin:$PATH
+    volumes:
+      - .:/workspace/src
+    working_dir: /workspace/src
+    ports:
+      - "8501:8501"
+    command: streamlit run streamlit_testing_app.py --server.port 8501 --server.address 0.0.0.0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
               capabilities: [gpu] 

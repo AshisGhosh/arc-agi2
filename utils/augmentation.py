@@ -91,12 +91,12 @@ def augment_pair(
     out_aug = out_2d.reshape(out.shape)
 
     # post-augmentation asserts to ensure values stay in [0..9]
-    assert inp_aug.min() >= 0 and inp_aug.max() <= 9, (
-        f"input values {inp_aug.min()}-{inp_aug.max()}, expected [0..9]"
-    )
-    assert out_aug.min() >= 0 and out_aug.max() <= 9, (
-        f"output values {out_aug.min()}-{out_aug.max()}, expected [0..9]"
-    )
+    assert (
+        inp_aug.min() >= 0 and inp_aug.max() <= 9
+    ), f"input values {inp_aug.min()}-{inp_aug.max()}, expected [0..9]"
+    assert (
+        out_aug.min() >= 0 and out_aug.max() <= 9
+    ), f"output values {out_aug.min()}-{out_aug.max()}, expected [0..9]"
 
     return inp_aug, out_aug
 
