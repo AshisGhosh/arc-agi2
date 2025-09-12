@@ -1,3 +1,6 @@
-torch>=2.0.0
+torch
 numpy
 pyyaml 
+torchvision
+tqdm
+Pillow
