@@ -17,21 +17,21 @@ RUN apt-get update && apt-get install -y \
 # create symlink for python
 RUN ln -s /usr/bin/python3.11 /usr/bin/python
 
-# install uv and add to PATH in the same RUN command
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
-    export PATH="/root/.local/bin:$PATH" && \
-    uv --version
+# install uv and add to PATH
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
 
 # set working directory
 WORKDIR /workspace
 
 # copy requirements and install dependencies
 COPY requirements.txt .
-RUN export PATH="/root/.local/bin:$PATH" && \
-    uv venv && \
-    uv pip install -r requirements.txt
+RUN uv venv .venv && \
+    uv pip install -r requirements.txt --python .venv/bin/python
 
-# set python path
+# activate the virtual environment and set python path
+ENV VIRTUAL_ENV="/workspace/.venv"
+ENV PATH="/workspace/.venv/bin:$PATH"
 ENV PYTHONPATH="/workspace:$PYTHONPATH"
 
 # default command

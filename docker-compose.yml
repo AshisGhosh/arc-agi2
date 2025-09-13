@@ -6,8 +6,9 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     volumes:
-      # mount source code for development
+      # mount source code for development (excluding .venv)
       - .:/workspace
+      - /workspace/.venv  # exclude .venv from host mount
       # mount ARC data (read-only)
       - ./ARC-AGI-2:/workspace/ARC-AGI-2:ro
       # mount checkpoints and logs
@@ -25,4 +26,4 @@ services:
           devices:
             - driver: nvidia
               count: all
-              capabilities: [gpu] 
+              capabilities: [gpu]
