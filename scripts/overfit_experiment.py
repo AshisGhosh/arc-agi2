@@ -348,7 +348,6 @@ class OverfitExperiment:
                     * batch_size
                 )
 
-
                 # per-task results for detailed analysis
                 for i in range(batch_size):
                     task_idx = (
@@ -434,7 +433,7 @@ def main():
     """main experiment function."""
     parser = argparse.ArgumentParser(description="n-task overfitting experiment")
     parser.add_argument(
-        "--n_tasks", "-n", type=int, default=10, help="number of tasks to overfit on"
+        "--n_tasks", "-n", type=int, default=50, help="number of tasks to overfit on"
     )
     parser.add_argument(
         "--task-indices", type=int, nargs="+", help="specific task indices to use"

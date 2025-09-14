@@ -276,7 +276,6 @@ def evaluate_model(
                 * batch_size
             )
 
-
     # Calculate final metrics
     metrics = {
         "perfect_accuracy": perfect_matches / total_samples,

@@ -9,12 +9,10 @@ import streamlit as st
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.patches as patches
 import json
 import pandas as pd
 from pathlib import Path
 from typing import Dict, Any, List, Tuple
-from tqdm import tqdm
 
 from algo.config import Config
 from algo.data import ARCDataset
@@ -233,11 +231,13 @@ def load_model_checkpoint(checkpoint_path: str, config: Config) -> SimpleARCMode
 
 
 def get_available_experiments(logs_dir: Path) -> List[Tuple[str, Path]]:
-    """get list of available overfitting experiments."""
+    """get list of available experiments (overfitting and training)."""
     experiments = []
 
     for item in logs_dir.iterdir():
-        if item.is_dir() and item.name.startswith("overfit_"):
+        if item.is_dir() and (
+            item.name.startswith("overfit_") or item.name.startswith("train_")
+        ):
             # check if it has a model checkpoint
             if (item / "best_model.pt").exists():
                 experiments.append((item.name, item))
@@ -281,17 +281,20 @@ def calculate_accuracy_metrics(
 def evaluate_model_on_tasks(model, dataset, config, progress_bar=None):
     """evaluate model on all tasks in dataset and return results."""
     results = []
-    
+
     with torch.no_grad():
         for i, batch in enumerate(dataset):
             if progress_bar:
                 progress_bar.progress((i + 1) / len(dataset))
-            
+
             # ensure batch has proper structure
             if isinstance(batch, dict):
                 # single sample, add batch dimension
-                batch = {k: v.unsqueeze(0) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
-            
+                batch = {
+                    k: v.unsqueeze(0) if isinstance(v, torch.Tensor) else v
+                    for k, v in batch.items()
+                }
+
             # run model inference
             logits = model(
                 batch["example1_input"],
@@ -300,25 +303,28 @@ def evaluate_model_on_tasks(model, dataset, config, progress_bar=None):
                 batch["example2_output"],
                 batch["target_input"],
             )
-            
+
             # convert to predictions
             predictions = torch.argmax(logits, dim=1).squeeze(0)
-            
+
             # calculate metrics
             metrics = calculate_accuracy_metrics(predictions, batch["target_output"])
-            
+
             # store results
-            results.append({
-                "task_idx": i,
-                "perfect_accuracy": metrics["perfect_accuracy"],
-                "pixel_accuracy": metrics["pixel_accuracy"],
-                "near_miss_accuracy": metrics["near_miss_accuracy"],
-                "batch": batch,
-                "predictions": predictions,
-                "logits": logits
-            })
-    
+            results.append(
+                {
+                    "task_idx": i,
+                    "perfect_accuracy": metrics["perfect_accuracy"],
+                    "pixel_accuracy": metrics["pixel_accuracy"],
+                    "near_miss_accuracy": metrics["near_miss_accuracy"],
+                    "batch": batch,
+                    "predictions": predictions,
+                    "logits": logits,
+                }
+            )
+
     return results
+
 
 def main():
     """main streamlit app."""
@@ -357,9 +363,17 @@ def main():
         st.sidebar.write(
             f"**best epoch:** {exp_info['training'].get('best_epoch', 'n/a')}"
         )
-        st.sidebar.write(
-            f"**best loss:** {exp_info['training'].get('best_loss', 'n/a'):.4f}"
-        )
+        best_loss = exp_info["training"].get("best_loss", "n/a")
+        if (
+            best_loss is not None
+            and best_loss != "n/a"
+            and isinstance(best_loss, (int, float))
+        ):
+            st.sidebar.write(f"**best loss:** {best_loss:.4f}")
+        else:
+            st.sidebar.write(
+                f"**best loss:** {best_loss if best_loss is not None else 'n/a'}"
+            )
         st.sidebar.write(
             f"**total epochs:** {exp_info['training'].get('total_epochs', 'n/a')}"
         )
@@ -387,7 +401,7 @@ def main():
     try:
         config = Config()
         model = SimpleARCModel(config)
-        
+
         # load checkpoint with weights_only=False for compatibility
         checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
         model.load_state_dict(checkpoint["model_state_dict"])
@@ -417,19 +431,19 @@ def main():
         # create progress bar
         progress_bar = st.progress(0)
         status_text = st.empty()
-        
+
         status_text.text("evaluating model on tasks...")
-        
+
         # evaluate model
         results = evaluate_model_on_tasks(model, dataset, config, progress_bar)
-        
+
         # store results in session state
         st.session_state.evaluation_results = results
         st.session_state.task_set = task_set
-        
+
         progress_bar.empty()
         status_text.text("evaluation complete!")
-        
+
         # auto-rerun to show results
         st.rerun()
 
@@ -437,72 +451,81 @@ def main():
     if "evaluation_results" in st.session_state:
         results = st.session_state.evaluation_results
         current_task_set = st.session_state.get("task_set", "unknown")
-        
+
         st.subheader(f"📊 evaluation results ({current_task_set})")
-        
+
         # create results dataframe
         df_data = []
         for result in results:
-            df_data.append({
-                "task": result["task_idx"],
-                "perfect": f"{result['perfect_accuracy']:.3f}",
-                "pixel": f"{result['pixel_accuracy']:.3f}",
-                "near_miss": f"{result['near_miss_accuracy']:.3f}",
-                "status": "✅ perfect" if result['perfect_accuracy'] > 0.99 else "⚠️ partial" if result['pixel_accuracy'] > 0.5 else "❌ failed"
-            })
-        
+            df_data.append(
+                {
+                    "task": result["task_idx"],
+                    "perfect": f"{result['perfect_accuracy']:.3f}",
+                    "pixel": f"{result['pixel_accuracy']:.3f}",
+                    "near_miss": f"{result['near_miss_accuracy']:.3f}",
+                    "status": "✅ perfect"
+                    if result["perfect_accuracy"] > 0.99
+                    else "⚠️ partial"
+                    if result["pixel_accuracy"] > 0.5
+                    else "❌ failed",
+                }
+            )
+
         df = pd.DataFrame(df_data)
-        
+
         # display summary stats
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.metric("total tasks", len(results))
         with col2:
-            perfect_count = sum(1 for r in results if r['perfect_accuracy'] > 0.99)
+            perfect_count = sum(1 for r in results if r["perfect_accuracy"] > 0.99)
             st.metric("perfect tasks", f"{perfect_count}/{len(results)}")
         with col3:
-            avg_pixel = np.mean([r['pixel_accuracy'] for r in results])
+            avg_pixel = np.mean([r["pixel_accuracy"] for r in results])
             st.metric("avg pixel accuracy", f"{avg_pixel:.3f}")
         with col4:
-            avg_near_miss = np.mean([r['near_miss_accuracy'] for r in results])
+            avg_near_miss = np.mean([r["near_miss_accuracy"] for r in results])
             st.metric("avg near-miss", f"{avg_near_miss:.3f}")
-        
+
         # interactive table
         st.subheader("📋 task results table")
         st.markdown("click on a row to visualize that task")
-        
+
         # use st.dataframe with selection
         selected_rows = st.dataframe(
             df,
             use_container_width=True,
             hide_index=True,
             on_select="rerun",
-            selection_mode="single-row"
+            selection_mode="single-row",
         )
-        
+
         # handle row selection
         if selected_rows.selection.rows:
             selected_idx = selected_rows.selection.rows[0]
             selected_task = results[selected_idx]
-            
+
             st.subheader(f"🔍 visualizing task {selected_task['task_idx']}")
-            
+
             # visualize the selected task
             fig = visualize_prediction_comparison(
-                selected_task["batch"], 
-                selected_task["predictions"]
+                selected_task["batch"], selected_task["predictions"]
             )
             st.pyplot(fig)
-            
+
             # show detailed metrics
             st.subheader("📈 detailed metrics")
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("perfect accuracy", f"{selected_task['perfect_accuracy']:.3f}")
+                st.metric(
+                    "perfect accuracy", f"{selected_task['perfect_accuracy']:.3f}"
+                )
             with col2:
                 st.metric("pixel accuracy", f"{selected_task['pixel_accuracy']:.3f}")
             with col3:
-                st.metric("near miss accuracy", f"{selected_task['near_miss_accuracy']:.3f}")
+                st.metric(
+                    "near miss accuracy", f"{selected_task['near_miss_accuracy']:.3f}"
+                )
     else:
         st.info("👆 click 'evaluate model' to run evaluation and see results")
 

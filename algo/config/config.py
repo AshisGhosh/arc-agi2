@@ -19,7 +19,7 @@ class Config:
     batch_size: int = 32
     learning_rate: float = 1e-4
     weight_decay: float = 1e-5
-    num_epochs: int = 100
+    num_epochs: int = 1000
     max_grad_norm: float = 1.0
     dropout: float = 0.1
 
@@ -40,6 +40,9 @@ class Config:
     log_dir: str = "logs"
     log_interval: int = 2
     save_interval: int = 10
+
+    # Early stopping
+    early_stopping_patience: int = 50
 
     # Device
     device: str = "cuda" if os.environ.get("CUDA_VISIBLE_DEVICES") else "cpu"
