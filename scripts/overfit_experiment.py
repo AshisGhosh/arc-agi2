@@ -24,6 +24,9 @@ from scripts.evaluate import (
     calculate_perfect_accuracy,
     calculate_pixel_accuracy,
     calculate_near_miss_accuracy,
+    calculate_perfect_accuracy_foreground,
+    calculate_pixel_accuracy_foreground,
+    calculate_near_miss_accuracy_foreground,
 )
 
 
@@ -285,6 +288,11 @@ class OverfitExperiment:
         total_l1_loss = 0.0
         total_l2_loss = 0.0
 
+        # foreground metrics
+        perfect_matches_foreground = 0
+        pixel_correct_foreground = 0
+        near_miss_correct_foreground = 0
+
         # per-task results
         per_task_results = []
 
@@ -322,6 +330,28 @@ class OverfitExperiment:
                     * batch_size
                 )
 
+                # foreground metrics
+                perfect_matches_foreground += (
+                    calculate_perfect_accuracy_foreground(
+                        solution, batch["target_output"]
+                    )
+                    * batch_size
+                )
+
+                pixel_correct_foreground += (
+                    calculate_pixel_accuracy_foreground(
+                        solution, batch["target_output"]
+                    )
+                    * batch_size
+                )
+
+                near_miss_correct_foreground += (
+                    calculate_near_miss_accuracy_foreground(
+                        solution, batch["target_output"]
+                    )
+                    * batch_size
+                )
+
                 # losses
                 l1_loss = torch.nn.functional.l1_loss(solution, batch["target_output"])
                 l2_loss = torch.nn.functional.mse_loss(solution, batch["target_output"])
@@ -352,6 +382,15 @@ class OverfitExperiment:
                             "near_miss_accuracy": calculate_near_miss_accuracy(
                                 sample_solution, sample_target
                             ),
+                            "perfect_match_foreground": calculate_perfect_accuracy_foreground(
+                                sample_solution, sample_target
+                            ),
+                            "pixel_accuracy_foreground": calculate_pixel_accuracy_foreground(
+                                sample_solution, sample_target
+                            ),
+                            "near_miss_accuracy_foreground": calculate_near_miss_accuracy_foreground(
+                                sample_solution, sample_target
+                            ),
                             "l1_loss": l1_loss.item(),
                             "l2_loss": l2_loss.item(),
                         }
@@ -366,6 +405,11 @@ class OverfitExperiment:
             "l2_loss": total_l2_loss / total_samples,
             "total_samples": total_samples,
             "per_task_results": per_task_results,
+            # foreground metrics
+            "perfect_accuracy_foreground": perfect_matches_foreground / total_samples,
+            "pixel_accuracy_foreground": pixel_correct_foreground / total_samples,
+            "near_miss_accuracy_foreground": near_miss_correct_foreground
+            / total_samples,
         }
 
         # save results
@@ -386,6 +430,17 @@ class OverfitExperiment:
         print(f"  l1 loss: {results['l1_loss']:.4f}")
         print(f"  l2 loss: {results['l2_loss']:.4f}")
         print(f"  total samples: {results['total_samples']}")
+
+        print("\nforeground results (non-background pixels only):")
+        print(
+            f"  perfect accuracy (foreground): {results['perfect_accuracy_foreground']:.4f} ({results['perfect_accuracy_foreground']*100:.2f}%)"
+        )
+        print(
+            f"  pixel accuracy (foreground): {results['pixel_accuracy_foreground']:.4f} ({results['pixel_accuracy_foreground']*100:.2f}%)"
+        )
+        print(
+            f"  near-miss accuracy (foreground): {results['near_miss_accuracy_foreground']:.4f} ({results['near_miss_accuracy_foreground']*100:.2f}%)"
+        )
 
         return results
 

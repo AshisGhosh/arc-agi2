@@ -79,6 +79,121 @@ def calculate_near_miss_accuracy(
     return near_misses.mean().item()
 
 
+def calculate_perfect_accuracy_foreground(
+    pred: torch.Tensor, target: torch.Tensor, background_value: float = 0.0
+) -> float:
+    """
+    Calculate perfect accuracy for foreground (non-background) pixels only.
+
+    Args:
+        pred: Predicted values [B, 1, 30, 30]
+        target: Target values [B, 1, 30, 30]
+        background_value: Value considered as background (default: 0.0)
+
+    Returns:
+        Perfect accuracy for foreground pixels (0.0 to 1.0)
+    """
+    # Round predictions to nearest integer
+    pred_rounded = torch.round(pred)
+
+    # Create mask for foreground pixels in target
+    target_foreground_mask = target != background_value
+
+    # If no foreground pixels in target, check if prediction also has no foreground
+    if not target_foreground_mask.any():
+        pred_foreground_mask = pred_rounded != background_value
+        return (not pred_foreground_mask.any()).float().item()
+
+    # Check for exact matches only on foreground pixels
+    exact_matches = pred_rounded == target
+    foreground_matches = exact_matches & target_foreground_mask
+
+    # Calculate accuracy as: correct foreground pixels / total foreground pixels
+    foreground_accuracy = (
+        foreground_matches.sum().float() / target_foreground_mask.sum().float()
+    )
+
+    return foreground_accuracy.item()
+
+
+def calculate_pixel_accuracy_foreground(
+    pred: torch.Tensor, target: torch.Tensor, background_value: float = 0.0
+) -> float:
+    """
+    Calculate pixel-level accuracy for foreground (non-background) pixels only.
+
+    Args:
+        pred: Predicted values [B, 1, 30, 30]
+        target: Target values [B, 1, 30, 30]
+        background_value: Value considered as background (default: 0.0)
+
+    Returns:
+        Pixel accuracy for foreground pixels (0.0 to 1.0)
+    """
+    # Round predictions to nearest integer
+    pred_rounded = torch.round(pred)
+
+    # Create mask for foreground pixels in target
+    target_foreground_mask = target != background_value
+
+    # If no foreground pixels in target, check if prediction also has no foreground
+    if not target_foreground_mask.any():
+        pred_foreground_mask = pred_rounded != background_value
+        return (not pred_foreground_mask.any()).float().item()
+
+    # Calculate pixel-level matches only on foreground pixels
+    pixel_matches = pred_rounded == target
+    foreground_pixel_matches = pixel_matches & target_foreground_mask
+
+    # Calculate accuracy as: correct foreground pixels / total foreground pixels
+    foreground_accuracy = (
+        foreground_pixel_matches.sum().float() / target_foreground_mask.sum().float()
+    )
+
+    return foreground_accuracy.item()
+
+
+def calculate_near_miss_accuracy_foreground(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    threshold: float = 2.0,
+    background_value: float = 0.0,
+) -> float:
+    """
+    Calculate near-miss accuracy for foreground (non-background) pixels only.
+
+    Args:
+        pred: Predicted values [B, 1, 30, 30]
+        target: Target values [B, 1, 30, 30]
+        threshold: Maximum distance for near-miss
+        background_value: Value considered as background (default: 0.0)
+
+    Returns:
+        Near-miss accuracy for foreground pixels (0.0 to 1.0)
+    """
+    # Calculate absolute difference
+    diff = torch.abs(pred - target)
+
+    # Create mask for foreground pixels in target
+    target_foreground_mask = target != background_value
+
+    # If no foreground pixels in target, check if prediction also has no foreground
+    if not target_foreground_mask.any():
+        pred_foreground_mask = pred != background_value
+        return (not pred_foreground_mask.any()).float().item()
+
+    # Check if within threshold only on foreground pixels
+    near_misses = diff <= threshold
+    foreground_near_misses = near_misses & target_foreground_mask
+
+    # Calculate accuracy as: near-miss foreground pixels / total foreground pixels
+    foreground_accuracy = (
+        foreground_near_misses.sum().float() / target_foreground_mask.sum().float()
+    )
+
+    return foreground_accuracy.item()
+
+
 def evaluate_model(
     model: SimpleARCModel, data_loader: DataLoader, config: Config
 ) -> dict:
@@ -101,6 +216,11 @@ def evaluate_model(
     near_miss_correct = 0
     total_l1_loss = 0.0
     total_l2_loss = 0.0
+
+    # foreground metrics
+    perfect_matches_foreground = 0
+    pixel_correct_foreground = 0
+    near_miss_correct_foreground = 0
 
     with torch.no_grad():
         for batch in data_loader:
@@ -137,6 +257,24 @@ def evaluate_model(
                 * batch_size
             )
 
+            # Foreground metrics
+            perfect_matches_foreground += (
+                calculate_perfect_accuracy_foreground(solution, batch["target_output"])
+                * batch_size
+            )
+
+            pixel_correct_foreground += (
+                calculate_pixel_accuracy_foreground(solution, batch["target_output"])
+                * batch_size
+            )
+
+            near_miss_correct_foreground += (
+                calculate_near_miss_accuracy_foreground(
+                    solution, batch["target_output"]
+                )
+                * batch_size
+            )
+
             # Losses
             l1_loss = torch.nn.functional.l1_loss(solution, batch["target_output"])
             l2_loss = torch.nn.functional.mse_loss(solution, batch["target_output"])
@@ -152,6 +290,10 @@ def evaluate_model(
         "l1_loss": total_l1_loss / total_samples,
         "l2_loss": total_l2_loss / total_samples,
         "total_samples": total_samples,
+        # Foreground metrics
+        "perfect_accuracy_foreground": perfect_matches_foreground / total_samples,
+        "pixel_accuracy_foreground": pixel_correct_foreground / total_samples,
+        "near_miss_accuracy_foreground": near_miss_correct_foreground / total_samples,
     }
 
     return metrics
@@ -235,6 +377,17 @@ def main():
     print(f"  L1 Loss: {metrics['l1_loss']:.4f}")
     print(f"  L2 Loss: {metrics['l2_loss']:.4f}")
     print(f"  Total Samples: {metrics['total_samples']}")
+
+    print("\nForeground Results (non-background pixels only):")
+    print(
+        f"  Perfect Accuracy (foreground): {metrics['perfect_accuracy_foreground']:.4f} ({metrics['perfect_accuracy_foreground']*100:.2f}%)"
+    )
+    print(
+        f"  Pixel Accuracy (foreground): {metrics['pixel_accuracy_foreground']:.4f} ({metrics['pixel_accuracy_foreground']*100:.2f}%)"
+    )
+    print(
+        f"  Near-Miss Accuracy (foreground): {metrics['near_miss_accuracy_foreground']:.4f} ({metrics['near_miss_accuracy_foreground']*100:.2f}%)"
+    )
 
     # Save results
     results_file = Path("logs/evaluation_results.json")
