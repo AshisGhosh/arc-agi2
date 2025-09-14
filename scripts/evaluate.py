@@ -13,7 +13,7 @@ import json
 
 from algo.config import Config
 from algo.models import SimpleARCModel
-from algo.data import ARCDataset
+from algo.data import ARCDataset, custom_collate_fn
 
 
 def calculate_perfect_accuracy(logits: torch.Tensor, target: torch.Tensor) -> float:
@@ -105,7 +105,7 @@ def calculate_perfect_accuracy_foreground(
     # If no foreground pixels in target, check if prediction also has no foreground
     if not target_foreground_mask.any():
         pred_foreground_mask = predictions != background_value
-        return (not pred_foreground_mask.any()).float().item()
+        return (~pred_foreground_mask.any()).float().item()
 
     # Check for exact matches only on foreground pixels
     exact_matches = predictions == target
@@ -142,7 +142,7 @@ def calculate_pixel_accuracy_foreground(
     # If no foreground pixels in target, check if prediction also has no foreground
     if not target_foreground_mask.any():
         pred_foreground_mask = predictions != background_value
-        return (not pred_foreground_mask.any()).float().item()
+        return (~pred_foreground_mask.any()).float().item()
 
     # Calculate pixel-level matches only on foreground pixels
     pixel_matches = predictions == target
@@ -186,7 +186,7 @@ def calculate_near_miss_accuracy_foreground(
     # If no foreground pixels in target, check if prediction also has no foreground
     if not target_foreground_mask.any():
         pred_foreground_mask = predictions != background_value
-        return (not pred_foreground_mask.any()).float().item()
+        return (~pred_foreground_mask.any()).float().item()
 
     # Check if within threshold only on foreground pixels
     near_misses = diff <= threshold
@@ -316,18 +316,24 @@ def main():
     if args.batch_size:
         config.batch_size = args.batch_size
 
+    # Determine data directory
+    data_dir = args.data_dir if args.data_dir else config.arc_agi1_dir
+
     print("Evaluation Configuration:")
     print(f"  Device: {config.device}")
     print(f"  Batch size: {config.batch_size}")
-    print(f"  Data directory: {config.processed_dir}")
+    print(f"  Data directory: {data_dir}")
     print(f"  Checkpoint: {args.checkpoint}")
 
-    # Load dataset
-    dataset = ARCDataset(config.processed_dir, config)
+    # Load dataset - use the correct data directory
+    dataset = ARCDataset(
+        data_dir, config, holdout=True, use_first_combination_only=True
+    )
     data_loader = DataLoader(
         dataset,
         batch_size=config.batch_size,
         shuffle=False,
+        collate_fn=custom_collate_fn,
         num_workers=2,
         pin_memory=True,
     )

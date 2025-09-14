@@ -100,64 +100,100 @@ def visualize_arc_image(img_tensor, title, is_rgb=True, figsize=(4, 4)):
     return fig
 
 
-def visualize_batch(batch, batch_idx=0):
-    """Visualize a single sample from a batch."""
-    sample = {k: v[batch_idx] for k, v in batch.items()}
+def visualize_task(task, task_idx=0, show_holdout=False):
+    """Visualize a single task."""
+    # Determine grid size based on whether we have holdout data
+    if show_holdout and task.get("holdout_target") is not None:
+        # 2x4 grid to include holdout
+        fig, axes = plt.subplots(2, 4, figsize=(16, 8))
+        fig.suptitle(f"ARC Task {task_idx} (with Holdout)", fontsize=16)
+    else:
+        # 2x3 grid for normal view
+        fig, axes = plt.subplots(2, 3, figsize=(12, 8))
+        fig.suptitle(f"ARC Task {task_idx}", fontsize=16)
 
-    # Create figure with 2x3 grid
-    fig, axes = plt.subplots(2, 3, figsize=(12, 8))
-    fig.suptitle(f"ARC Task Sample {batch_idx}", fontsize=16)
-
-    # Example 1
+    # Rule latent inputs (2 examples)
     axes[0, 0].set_title("Example 1 Input", fontsize=12)
-    img1 = denormalize_rgb(sample["example1_input"])
+    img1 = denormalize_rgb(task["rule_latent_inputs"][0]["input"])
     img1_np = tensor_to_numpy(img1)
     axes[0, 0].imshow(img1_np)
     axes[0, 0].axis("off")
 
     axes[0, 1].set_title("Example 1 Output", fontsize=12)
-    img2 = denormalize_rgb(sample["example1_output"])
+    img2 = denormalize_rgb(task["rule_latent_inputs"][0]["output"])
     img2_np = tensor_to_numpy(img2)
     axes[0, 1].imshow(img2_np)
     axes[0, 1].axis("off")
 
     # Example 2
     axes[0, 2].set_title("Example 2 Input", fontsize=12)
-    img3 = denormalize_rgb(sample["example2_input"])
+    img3 = denormalize_rgb(task["rule_latent_inputs"][1]["input"])
     img3_np = tensor_to_numpy(img3)
     axes[0, 2].imshow(img3_np)
     axes[0, 2].axis("off")
 
     axes[1, 0].set_title("Example 2 Output", fontsize=12)
-    img4 = denormalize_rgb(sample["example2_output"])
+    img4 = denormalize_rgb(task["rule_latent_inputs"][1]["output"])
     img4_np = tensor_to_numpy(img4)
     axes[1, 0].imshow(img4_np)
     axes[1, 0].axis("off")
 
-    # Target
-    axes[1, 1].set_title("Target Input", fontsize=12)
-    target_input_np = tensor_to_grayscale_numpy(sample["target_input"])
-    rgb_target_input = np.zeros((*target_input_np.shape, 3))
+    # Test target (last in training_targets)
+    axes[1, 1].set_title("Test Input", fontsize=12)
+    test_input_np = tensor_to_grayscale_numpy(task["training_targets"][-1]["input"])
+    rgb_test_input = np.zeros((*test_input_np.shape, 3))
     for i, color in enumerate(ARC_COLORS):
-        mask = target_input_np == i
-        rgb_target_input[mask] = (
+        mask = test_input_np == i
+        rgb_test_input[mask] = (
             np.array([int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)])
             / 255.0
         )
-    axes[1, 1].imshow(rgb_target_input)
+    axes[1, 1].imshow(rgb_test_input)
     axes[1, 1].axis("off")
 
-    axes[1, 2].set_title("Target Output", fontsize=12)
-    target_output_np = tensor_to_grayscale_numpy(sample["target_output"])
-    rgb_target_output = np.zeros((*target_output_np.shape, 3))
+    axes[1, 2].set_title("Test Output", fontsize=12)
+    test_output_np = tensor_to_grayscale_numpy(task["training_targets"][-1]["output"])
+    rgb_test_output = np.zeros((*test_output_np.shape, 3))
     for i, color in enumerate(ARC_COLORS):
-        mask = target_output_np == i
-        rgb_target_output[mask] = (
+        mask = test_output_np == i
+        rgb_test_output[mask] = (
             np.array([int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)])
             / 255.0
         )
-    axes[1, 2].imshow(rgb_target_output)
+    axes[1, 2].imshow(rgb_test_output)
     axes[1, 2].axis("off")
+
+    # Add holdout visualization if available
+    if show_holdout and task.get("holdout_target") is not None:
+        # Holdout input in position 4 (row 0, col 3)
+        axes[0, 3].set_title("Holdout Input", fontsize=12)
+        holdout_input_np = tensor_to_grayscale_numpy(task["holdout_target"]["input"])
+        rgb_holdout_input = np.zeros((*holdout_input_np.shape, 3))
+        for i, color in enumerate(ARC_COLORS):
+            mask = holdout_input_np == i
+            rgb_holdout_input[mask] = (
+                np.array(
+                    [int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)]
+                )
+                / 255.0
+            )
+        axes[0, 3].imshow(rgb_holdout_input)
+        axes[0, 3].axis("off")
+
+        # Holdout output in position 8 (row 1, col 3)
+        axes[1, 3].set_title("Holdout Output", fontsize=12)
+        holdout_output_np = tensor_to_grayscale_numpy(task["holdout_target"]["output"])
+        rgb_holdout_output = np.zeros((*holdout_output_np.shape, 3))
+        for i, color in enumerate(ARC_COLORS):
+            mask = holdout_output_np == i
+            rgb_holdout_output[mask] = (
+                np.array(
+                    [int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)]
+                )
+                / 255.0
+            )
+        axes[1, 3].imshow(rgb_holdout_output)
+        axes[1, 3].axis("off")
 
     # Add grid to all subplots
     for ax in axes.flat:
@@ -211,14 +247,11 @@ def main():
         "Select Dataset", ["arc_agi1", "arc_agi2"], index=0
     )
 
-    # Batch size selection
-    batch_size = st.sidebar.slider(
-        "Batch Size", min_value=1, max_value=32, value=4, step=1
-    )
-
-    # Sample selection within batch
-    sample_idx = st.sidebar.slider(
-        "Sample Index in Batch", min_value=0, max_value=batch_size - 1, value=0, step=1
+    # Holdout mode
+    holdout_mode = st.sidebar.checkbox(
+        "Enable Holdout Mode",
+        value=True,
+        help="When enabled, tasks with 3+ train examples will have holdout data",
     )
 
     # Load dataset
@@ -227,176 +260,199 @@ def main():
         config.training_dataset = dataset_choice
 
         with st.spinner(f"Loading {dataset_choice} dataset..."):
-            dataset = ARCDataset(config.processed_dir, config)
-            dataloader = torch.utils.data.DataLoader(
-                dataset, batch_size=batch_size, shuffle=True
-            )
+            if dataset_choice == "arc_agi1":
+                dataset = ARCDataset(config.arc_agi1_dir, config, holdout=holdout_mode)
+            else:
+                dataset = ARCDataset(config.processed_dir, config)
 
         st.success(f"✅ Loaded {len(dataset)} samples from {dataset_choice}")
+
+        # Task selection (after dataset is loaded)
+        task_idx = st.sidebar.number_input(
+            "Task Index",
+            min_value=0,
+            max_value=len(dataset) - 1,
+            value=0,
+            step=1,
+            help=f"Enter task index (0 to {len(dataset) - 1})",
+        )
 
         # Dataset info
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("Total Samples", len(dataset))
+            st.metric("Total Tasks", len(dataset))
         with col2:
-            st.metric("Batch Size", batch_size)
+            st.metric("Current Task", task_idx)
         with col3:
-            st.metric("Batches", len(dataloader))
+            if holdout_mode and dataset_choice == "arc_agi1":
+                # Count tasks with holdout data
+                holdout_count = 0
+                for i in range(min(100, len(dataset))):  # Check first 100 samples
+                    sample = dataset[i]
+                    if sample.get("holdout_target") is not None:
+                        holdout_count += 1
+                st.metric("Tasks w/ Holdout", f"{holdout_count}/100")
+            else:
+                st.metric("Holdout Mode", "Disabled")
 
     except Exception as e:
         st.error(f"❌ Error loading dataset: {e}")
         st.stop()
 
-    # Load a batch
+    # Load a task
     try:
-        batch = next(iter(dataloader))
-        st.success(f"✅ Loaded batch with {len(batch['example1_input'])} samples")
+        task = dataset[task_idx]
+        st.success(f"✅ Loaded task {task_idx}")
     except Exception as e:
-        st.error(f"❌ Error loading batch: {e}")
+        st.error(f"❌ Error loading task: {e}")
         st.stop()
 
     # Main content
-    st.header("📊 Batch Visualization")
+    st.header("📊 Task Visualization")
 
     # Color palette
     st.subheader("🎨 ARC Color Palette")
     palette_fig = show_color_palette()
     st.pyplot(palette_fig)
 
-    # Sample visualization
-    st.subheader(f"🔍 Sample {sample_idx} in Current Batch")
+    # Task visualization
+    st.subheader(f"🔍 Task {task_idx}")
 
-    if sample_idx >= len(batch["example1_input"]):
-        st.warning(
-            f"Sample index {sample_idx} is out of range for batch size {len(batch['example1_input'])}"
-        )
-        sample_idx = 0
+    # Check if this task has holdout data
+    has_holdout = task.get("holdout_target") is not None
 
-    sample_fig = visualize_batch(batch, sample_idx)
-    st.pyplot(sample_fig)
+    if has_holdout:
+        st.info(f"✅ Task {task_idx} has holdout data")
+    else:
+        st.info(f"ℹ️ Task {task_idx} has no holdout data")
 
-    # Batch grid view
-    st.subheader("📋 Batch Grid View")
+    task_fig = visualize_task(task, task_idx, show_holdout=has_holdout)
+    st.pyplot(task_fig)
 
-    # Show all samples in batch as thumbnails (6 images per sample)
-    for i in range(min(4, batch_size)):  # Show max 4 samples
-        st.write(f"**Sample {i}**")
-        sample = {k: v[i] for k, v in batch.items()}
+    # Holdout vs Test comparison
+    if has_holdout and holdout_mode and dataset_choice == "arc_agi1":
+        st.subheader("🔄 Holdout vs Test Comparison")
 
-        # Create 6-column grid for all images
-        cols = st.columns(6)
+        col1, col2 = st.columns(2)
 
-        # Example 1 Input
-        with cols[0]:
-            st.write("**Ex1 In**")
-            img1 = denormalize_rgb(sample["example1_input"])
-            img1_np = tensor_to_numpy(img1)
-            fig, ax = plt.subplots(1, 1, figsize=(2, 2))
-            ax.imshow(img1_np)
-            ax.set_title("Ex1 Input", fontsize=8)
-            ax.axis("off")
-            st.pyplot(fig)
-            plt.close(fig)
-
-        # Example 1 Output
-        with cols[1]:
-            st.write("**Ex1 Out**")
-            img2 = denormalize_rgb(sample["example1_output"])
-            img2_np = tensor_to_numpy(img2)
-            fig, ax = plt.subplots(1, 1, figsize=(2, 2))
-            ax.imshow(img2_np)
-            ax.set_title("Ex1 Output", fontsize=8)
-            ax.axis("off")
-            st.pyplot(fig)
-            plt.close(fig)
-
-        # Example 2 Input
-        with cols[2]:
-            st.write("**Ex2 In**")
-            img3 = denormalize_rgb(sample["example2_input"])
-            img3_np = tensor_to_numpy(img3)
-            fig, ax = plt.subplots(1, 1, figsize=(2, 2))
-            ax.imshow(img3_np)
-            ax.set_title("Ex2 Input", fontsize=8)
-            ax.axis("off")
-            st.pyplot(fig)
-            plt.close(fig)
-
-        # Example 2 Output
-        with cols[3]:
-            st.write("**Ex2 Out**")
-            img4 = denormalize_rgb(sample["example2_output"])
-            img4_np = tensor_to_numpy(img4)
-            fig, ax = plt.subplots(1, 1, figsize=(2, 2))
-            ax.imshow(img4_np)
-            ax.set_title("Ex2 Output", fontsize=8)
-            ax.axis("off")
-            st.pyplot(fig)
-            plt.close(fig)
-
-        # Target Input
-        with cols[4]:
-            st.write("**Target In**")
-            target_input_np = tensor_to_grayscale_numpy(sample["target_input"])
-            rgb_target_input = np.zeros((*target_input_np.shape, 3))
-            for j, color in enumerate(ARC_COLORS):
-                mask = target_input_np == j
-                rgb_target_input[mask] = (
+        with col1:
+            st.write("**Test Input**")
+            test_input_np = tensor_to_grayscale_numpy(
+                task["training_targets"][-1]["input"]
+            )
+            rgb_test_input = np.zeros((*test_input_np.shape, 3))
+            for i, color in enumerate(ARC_COLORS):
+                mask = test_input_np == i
+                rgb_test_input[mask] = (
                     np.array(
                         [int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)]
                     )
                     / 255.0
                 )
-            fig, ax = plt.subplots(1, 1, figsize=(2, 2))
-            ax.imshow(rgb_target_input)
-            ax.set_title("Target Input", fontsize=8)
+            fig, ax = plt.subplots(1, 1, figsize=(4, 4))
+            ax.imshow(rgb_test_input)
+            ax.set_title("Test Input", fontsize=12)
             ax.axis("off")
             st.pyplot(fig)
             plt.close(fig)
 
-        # Target Output
-        with cols[5]:
-            st.write("**Target Out**")
-            target_output_np = tensor_to_grayscale_numpy(sample["target_output"])
-            rgb_target_output = np.zeros((*target_output_np.shape, 3))
-            for j, color in enumerate(ARC_COLORS):
-                mask = target_output_np == j
-                rgb_target_output[mask] = (
+        with col2:
+            st.write("**Holdout Input**")
+            holdout_input_np = tensor_to_grayscale_numpy(
+                task["holdout_target"]["input"]
+            )
+            rgb_holdout_input = np.zeros((*holdout_input_np.shape, 3))
+            for i, color in enumerate(ARC_COLORS):
+                mask = holdout_input_np == i
+                rgb_holdout_input[mask] = (
                     np.array(
                         [int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)]
                     )
                     / 255.0
                 )
-            fig, ax = plt.subplots(1, 1, figsize=(2, 2))
-            ax.imshow(rgb_target_output)
-            ax.set_title("Target Output", fontsize=8)
+            fig, ax = plt.subplots(1, 1, figsize=(4, 4))
+            ax.imshow(rgb_holdout_input)
+            ax.set_title("Holdout Input", fontsize=12)
             ax.axis("off")
             st.pyplot(fig)
             plt.close(fig)
 
-        st.markdown("---")  # Separator between samples
+        # Check if they're the same
+        test_input = task["training_targets"][-1]["input"]
+        holdout_input = task["holdout_target"]["input"]
+        are_same = torch.equal(test_input, holdout_input)
+
+        if are_same:
+            st.error("⚠️ Holdout and Test inputs are the same! This indicates a bug.")
+        else:
+            st.success(
+                "✅ Holdout and Test inputs are different - holdout is working correctly!"
+            )
+
+    # Task information
+    st.subheader("📋 Task Information")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.write("**Training Examples**")
+        st.write(f"Number: {len(task['training_targets'])}")
+        st.write(f"Rule latent pairs: {len(task['rule_latent_inputs'])}")
+
+    with col2:
+        st.write("**Holdout Status**")
+        if has_holdout:
+            st.write("✅ Has holdout data")
+            st.write(f"Holdout input shape: {task['holdout_target']['input'].shape}")
+        else:
+            st.write("❌ No holdout data")
+
+    with col3:
+        st.write("**Combination Info**")
+        if "combination_info" in task:
+            combo_info = task["combination_info"]
+            st.write(f"Task ID: {combo_info.get('task_id', 'N/A')}")
+            st.write(f"Combination: {combo_info.get('pair_indices', 'N/A')}")
+            st.write(
+                f"Total combinations: {combo_info.get('total_combinations', 'N/A')}"
+            )
+        else:
+            st.write("No combination info")
 
     # Data statistics
     st.subheader("📈 Data Statistics")
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
 
     with col1:
-        st.write("**Example Images (RGB)**")
-        example_img = batch["example1_input"][0]
+        st.write("**Rule Latent Images (RGB)**")
+        example_img = task["rule_latent_inputs"][0]["input"]
         st.write(f"- Shape: {example_img.shape}")
         st.write(f"- Data type: {example_img.dtype}")
         st.write(f"- Value range: [{example_img.min():.3f}, {example_img.max():.3f}]")
 
     with col2:
-        st.write("**Target Images (Grayscale)**")
-        target_img = batch["target_input"][0]
-        st.write(f"- Shape: {target_img.shape}")
-        st.write(f"- Data type: {target_img.dtype}")
-        st.write(f"- Value range: [{target_img.min():.0f}, {target_img.max():.0f}]")
+        st.write("**Test Images (Grayscale)**")
+        test_img = task["training_targets"][-1]["input"]
+        st.write(f"- Shape: {test_img.shape}")
+        st.write(f"- Data type: {test_img.dtype}")
+        st.write(f"- Value range: [{test_img.min():.0f}, {test_img.max():.0f}]")
+
+    with col3:
+        if has_holdout:
+            st.write("**Holdout Images (Grayscale)**")
+            holdout_img = task["holdout_target"]["input"]
+            st.write(f"- Shape: {holdout_img.shape}")
+            st.write(f"- Data type: {holdout_img.dtype}")
+            st.write(
+                f"- Value range: [{holdout_img.min():.0f}, {holdout_img.max():.0f}]"
+            )
+        else:
+            st.write("**Holdout Status**")
+            st.write("No holdout data available")
 
     # Refresh button
-    if st.button("🔄 Load New Batch"):
+    if st.button("🔄 Refresh Task"):
         st.rerun()
 
 

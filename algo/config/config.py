@@ -19,7 +19,7 @@ class Config:
     batch_size: int = 32
     learning_rate: float = 1e-4
     weight_decay: float = 1e-5
-    num_epochs: int = 1000
+    num_epochs: int = 2000
     max_grad_norm: float = 1.0
     dropout: float = 0.1
 
@@ -50,6 +50,11 @@ class Config:
     # Deterministic training
     random_seed: int = 42
     deterministic: bool = True
+
+    # Color augmentation
+    use_color_relabeling: bool = False
+    augmentation_variants: int = 1  # Number of augmented versions per original example
+    preserve_background: bool = True  # Keep background color (0) unchanged
 
     # Color palette (ARC official 10 colors)
     color_palette: List[List[float]] = None

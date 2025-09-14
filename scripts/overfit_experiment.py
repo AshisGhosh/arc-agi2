@@ -18,7 +18,7 @@ from datetime import datetime
 
 from algo.config import Config
 from algo.models import SimpleARCModel
-from algo.data import ARCDataset
+from algo.data import ARCDataset, custom_collate_fn
 from algo.training import ARCTrainer
 from scripts.evaluate import (
     calculate_perfect_accuracy,
@@ -63,8 +63,8 @@ class OverfitExperiment:
         returns:
             list of selected task indices
         """
-        # load full dataset to get total number of tasks
-        full_dataset = ARCDataset(self.config.processed_dir, self.config)
+        # load full dataset to get total number of tasks with holdout capability
+        full_dataset = ARCDataset(self.config.arc_agi1_dir, self.config, holdout=True)
         total_tasks = len(full_dataset)
 
         if task_indices is not None:
@@ -103,7 +103,12 @@ class OverfitExperiment:
 
     def create_task_subset(self, task_indices: List[int]) -> ARCDataset:
         """create dataset subset with only selected tasks."""
-        full_dataset = ARCDataset(self.config.processed_dir, self.config)
+        full_dataset = ARCDataset(
+            self.config.arc_agi1_dir,
+            self.config,
+            holdout=True,
+            use_first_combination_only=True,
+        )
         subset = Subset(full_dataset, task_indices)
 
         # wrap in custom dataset class to maintain interface
@@ -112,9 +117,8 @@ class OverfitExperiment:
                 self.subset = subset
                 self.original_dataset = original_dataset
                 self.config = original_dataset.config
-                self.processed_dir = original_dataset.processed_dir
-                self.dataset_name = original_dataset.dataset_name
-                self.dataset_path = original_dataset.dataset_path
+                self.raw_data_dir = original_dataset.raw_data_dir
+                self.holdout = original_dataset.holdout
 
             def __len__(self):
                 return len(self.subset)
@@ -153,6 +157,7 @@ class OverfitExperiment:
             shuffle=True,
             num_workers=2,
             pin_memory=True,
+            collate_fn=custom_collate_fn,
         )
 
         # create model
@@ -179,8 +184,8 @@ class OverfitExperiment:
             # update trainer's current epoch for proper logging
             trainer.current_epoch = epoch
 
-            # train one epoch using existing trainer method
-            train_metrics = trainer.train_epoch(train_loader)
+            # train one epoch using rule latent training method
+            train_metrics = trainer.train_epoch_rule_latent(train_loader)
             avg_loss = train_metrics["total_loss"]
 
             # update scheduler
@@ -189,12 +194,16 @@ class OverfitExperiment:
             # log progress
             if epoch % 10 == 0 or epoch < 10:
                 elapsed = time.time() - start_time
+                current_lr = trainer.optimizer.param_groups[0]["lr"]
                 print(
-                    f"epoch {epoch:4d}: loss={avg_loss:.6f} (elapsed: {elapsed:.1f}s)"
+                    f"epoch {epoch:4d}: loss={avg_loss:.6f}, lr={current_lr:.2e} (elapsed: {elapsed:.1f}s)"
                 )
 
             # save best model
             if avg_loss < best_loss:
+                print(
+                    f"  New best! {avg_loss:.6f} < {best_loss:.6f} (improvement: {best_loss - avg_loss:.6f})"
+                )
                 best_loss = avg_loss
                 best_epoch = epoch
                 patience_counter = 0
@@ -236,7 +245,10 @@ class OverfitExperiment:
             "total_epochs": epoch + 1,
             "training_time_seconds": training_time,
             "early_stopping_patience": early_stopping_patience,
-            "task_indices": task_indices,
+            "tasks": {
+                "n_tasks": len(task_indices),
+                "task_indices": task_indices,
+            },
         }
 
         with open(self.experiment_dir / "training_info.json", "w") as f:
@@ -269,6 +281,7 @@ class OverfitExperiment:
             shuffle=False,
             num_workers=2,
             pin_memory=True,
+            collate_fn=custom_collate_fn,
         )
 
         # create model and load checkpoint
@@ -296,69 +309,116 @@ class OverfitExperiment:
 
         with torch.no_grad():
             for batch_idx, batch in enumerate(eval_loader):
-                # move batch to device
-                batch = {k: v.to(self.config.device) for k, v in batch.items()}
+                # Move batch to device
+                device = next(model.parameters()).device
+                rule_latent_inputs = batch["rule_latent_inputs"].to(device)
+                all_train_inputs = batch["all_train_inputs"].to(device)
+                test_inputs = batch["test_inputs"].to(device)
+                test_outputs = batch["test_outputs"].to(device)
+                holdout_inputs = batch["holdout_inputs"].to(device)
+                holdout_outputs = batch["holdout_outputs"].to(device)
+                num_train = batch["num_train"].to(device)
+                has_holdout = batch["has_holdout"].to(device)
 
-                # forward pass
-                logits = model(
-                    batch["example1_input"],
-                    batch["example1_output"],
-                    batch["example2_input"],
-                    batch["example2_output"],
-                    batch["target_input"],
+                # Forward pass with batched rule latent training
+                outputs = model.forward_rule_latent_training(
+                    rule_latent_inputs, all_train_inputs, num_train
                 )
 
-                # calculate metrics using existing functions
-                batch_size = logits.size(0)
-                total_samples += batch_size
-
-                # use existing accuracy functions
-                perfect_matches += (
-                    calculate_perfect_accuracy(logits, batch["target_output"])
-                    * batch_size
-                )
-
-                pixel_correct += (
-                    calculate_pixel_accuracy(logits, batch["target_output"])
-                    * batch_size
-                )
-
-                near_miss_correct += (
-                    calculate_near_miss_accuracy(logits, batch["target_output"])
-                    * batch_size
-                )
-
-                # foreground metrics
-                perfect_matches_foreground += (
-                    calculate_perfect_accuracy_foreground(
-                        logits, batch["target_output"]
+                # Process each task in the batch
+                for i in range(rule_latent_inputs.size(0)):
+                    # Evaluate on test target
+                    test_logits = model.decoder(
+                        outputs["rule_latents"][i : i + 1], test_inputs[i : i + 1]
                     )
-                    * batch_size
-                )
+                    test_target = test_outputs[i : i + 1]
 
-                pixel_correct_foreground += (
-                    calculate_pixel_accuracy_foreground(logits, batch["target_output"])
-                    * batch_size
-                )
+                    # calculate metrics using existing functions
+                    batch_size = test_logits.size(0)
+                    total_samples += batch_size
 
-                near_miss_correct_foreground += (
-                    calculate_near_miss_accuracy_foreground(
-                        logits, batch["target_output"]
+                    # use existing accuracy functions
+                    perfect_matches += (
+                        calculate_perfect_accuracy(test_logits, test_target)
+                        * batch_size
                     )
-                    * batch_size
-                )
 
-                # per-task results for detailed analysis
-                for i in range(batch_size):
+                    pixel_correct += (
+                        calculate_pixel_accuracy(test_logits, test_target) * batch_size
+                    )
+
+                    near_miss_correct += (
+                        calculate_near_miss_accuracy(test_logits, test_target)
+                        * batch_size
+                    )
+
+                    # foreground metrics
+                    perfect_matches_foreground += (
+                        calculate_perfect_accuracy_foreground(test_logits, test_target)
+                        * batch_size
+                    )
+
+                    pixel_correct_foreground += (
+                        calculate_pixel_accuracy_foreground(test_logits, test_target)
+                        * batch_size
+                    )
+
+                    near_miss_correct_foreground += (
+                        calculate_near_miss_accuracy_foreground(
+                            test_logits, test_target
+                        )
+                        * batch_size
+                    )
+
+                    # evaluate on holdout target (if available)
+                    if has_holdout[i]:
+                        holdout_logits = model.decoder(
+                            outputs["rule_latents"][i : i + 1],
+                            holdout_inputs[i : i + 1],
+                        )
+                        holdout_target = holdout_outputs[i : i + 1]
+
+                        # calculate holdout metrics
+                        holdout_perfect = calculate_perfect_accuracy(
+                            holdout_logits, holdout_target
+                        )
+                        holdout_pixel = calculate_pixel_accuracy(
+                            holdout_logits, holdout_target
+                        )
+                        holdout_near_miss = calculate_near_miss_accuracy(
+                            holdout_logits, holdout_target
+                        )
+
+                        # store holdout metrics for this batch
+                        if not hasattr(self, "holdout_metrics"):
+                            self.holdout_metrics = {
+                                "perfect_matches": 0,
+                                "pixel_correct": 0,
+                                "near_miss_correct": 0,
+                                "total_samples": 0,
+                            }
+
+                        self.holdout_metrics["perfect_matches"] += (
+                            holdout_perfect * batch_size
+                        )
+                        self.holdout_metrics["pixel_correct"] += (
+                            holdout_pixel * batch_size
+                        )
+                        self.holdout_metrics["near_miss_correct"] += (
+                            holdout_near_miss * batch_size
+                        )
+                        self.holdout_metrics["total_samples"] += batch_size
+
+                    # per-task results for detailed analysis
                     task_idx = (
                         task_indices[batch_idx * self.config.batch_size + i]
                         if batch_idx * self.config.batch_size + i < len(task_indices)
                         else batch_idx
                     )
 
-                    # calculate per-sample metrics
-                    sample_logits = logits[i : i + 1]
-                    sample_target = batch["target_output"][i : i + 1]
+                    # calculate per-sample metrics using test target
+                    sample_logits = test_logits[0:1]  # [1, 10, 30, 30]
+                    sample_target = test_target[0:1]  # [1, 1, 30, 30]
 
                     per_task_results.append(
                         {
@@ -398,6 +458,25 @@ class OverfitExperiment:
             / total_samples,
         }
 
+        # add holdout metrics if available
+        if (
+            hasattr(self, "holdout_metrics")
+            and self.holdout_metrics["total_samples"] > 0
+        ):
+            results.update(
+                {
+                    "holdout_perfect_accuracy": self.holdout_metrics["perfect_matches"]
+                    / self.holdout_metrics["total_samples"],
+                    "holdout_pixel_accuracy": self.holdout_metrics["pixel_correct"]
+                    / self.holdout_metrics["total_samples"],
+                    "holdout_near_miss_accuracy": self.holdout_metrics[
+                        "near_miss_correct"
+                    ]
+                    / self.holdout_metrics["total_samples"],
+                    "holdout_total_samples": self.holdout_metrics["total_samples"],
+                }
+            )
+
         # save results
         with open(self.experiment_dir / "evaluation_results.json", "w") as f:
             json.dump(results, f, indent=2)
@@ -426,28 +505,111 @@ class OverfitExperiment:
             f"  near-miss accuracy (foreground): {results['near_miss_accuracy_foreground']:.4f} ({results['near_miss_accuracy_foreground']*100:.2f}%)"
         )
 
+        # print holdout results if available
+        if "holdout_perfect_accuracy" in results:
+            print("\nholdout validation results:")
+            print(
+                f"  perfect accuracy (holdout): {results['holdout_perfect_accuracy']:.4f} ({results['holdout_perfect_accuracy']*100:.2f}%)"
+            )
+            print(
+                f"  pixel accuracy (holdout): {results['holdout_pixel_accuracy']:.4f} ({results['holdout_pixel_accuracy']*100:.2f}%)"
+            )
+            print(
+                f"  near-miss accuracy (holdout): {results['holdout_near_miss_accuracy']:.4f} ({results['holdout_near_miss_accuracy']*100:.2f}%)"
+            )
+            print(f"  holdout samples: {results['holdout_total_samples']}")
+
         return results
+
+
+def evaluate_existing_checkpoint(experiment_dir: str, config: Config):
+    """evaluate an existing checkpoint from an experiment directory."""
+    experiment_path = Path(experiment_dir)
+    if not experiment_path.exists():
+        print(f"experiment directory not found: {experiment_dir}")
+        return
+
+    checkpoint_path = experiment_path / "best_model.pt"
+    if not checkpoint_path.exists():
+        print(f"checkpoint not found: {checkpoint_path}")
+        return
+
+    print(f"evaluating checkpoint: {checkpoint_path}")
+
+    # create experiment instance to use existing evaluation logic
+    experiment = OverfitExperiment(config, experiment_path.name)
+
+    # load the task selection from the experiment
+    task_selection_file = experiment_path / "task_selection.json"
+    if task_selection_file.exists():
+        with open(task_selection_file, "r") as f:
+            task_data = json.load(f)
+        task_indices = task_data.get(
+            "task_indices", list(range(10))
+        )  # fallback to first 10 tasks
+    else:
+        # if no task selection file, evaluate on first 10 tasks
+        task_indices = list(range(10))
+
+    print(f"evaluating on {len(task_indices)} tasks...")
+
+    # use existing evaluation function
+    results = experiment.evaluate_on_tasks(task_indices, str(checkpoint_path))
+
+    # print results
+    print("\nevaluation results:")
+    print(
+        f"  perfect accuracy: {results['perfect_accuracy']:.4f} ({results['perfect_accuracy']*100:.2f}%)"
+    )
+    print(
+        f"  pixel accuracy: {results['pixel_accuracy']:.4f} ({results['pixel_accuracy']*100:.2f}%)"
+    )
+    print(
+        f"  near-miss accuracy: {results['near_miss_accuracy']:.4f} ({results['near_miss_accuracy']*100:.2f}%)"
+    )
+    print(f"  total samples: {results['total_samples']}")
+
+    print("\nforeground results (non-background pixels only):")
+    print(
+        f"  perfect accuracy (foreground): {results['perfect_accuracy_foreground']:.4f} ({results['perfect_accuracy_foreground']*100:.2f}%)"
+    )
+    print(
+        f"  pixel accuracy (foreground): {results['pixel_accuracy_foreground']:.4f} ({results['pixel_accuracy_foreground']*100:.2f}%)"
+    )
+    print(
+        f"  near-miss accuracy (foreground): {results['near_miss_accuracy_foreground']:.4f} ({results['near_miss_accuracy_foreground']*100:.2f}%)"
+    )
+
+    # save results
+    results_file = experiment_path / "evaluation_results.json"
+    with open(results_file, "w") as f:
+        json.dump(results, f, indent=2)
+
+    print(f"\nresults saved to: {results_file}")
 
 
 def main():
     """main experiment function."""
     parser = argparse.ArgumentParser(description="n-task overfitting experiment")
     parser.add_argument(
-        "--n_tasks", "-n", type=int, default=50, help="number of tasks to overfit on"
+        "--n_tasks", "-n", type=int, default=10, help="number of tasks to overfit on"
     )
     parser.add_argument(
         "--task-indices", type=int, nargs="+", help="specific task indices to use"
     )
-    parser.add_argument("--epochs", type=int, default=1000, help="maximum epochs")
-    parser.add_argument(
-        "--patience", type=int, default=50, help="early stopping patience"
-    )
+    parser.add_argument("--epochs", type=int, help="maximum epochs")
+    parser.add_argument("--patience", type=int, help="early stopping patience")
     parser.add_argument("--experiment-name", type=str, help="experiment name")
     parser.add_argument(
         "--config", type=str, default="config.yaml", help="config file path"
     )
     parser.add_argument("--batch-size", type=int, help="override batch size")
     parser.add_argument("--lr", type=float, help="override learning rate")
+    parser.add_argument(
+        "--evaluate",
+        type=str,
+        help="evaluate existing checkpoint (path to experiment directory)",
+    )
 
     args = parser.parse_args()
 
@@ -460,16 +622,26 @@ def main():
     if args.lr:
         config.learning_rate = args.lr
 
+    if args.epochs:
+        config.num_epochs = args.epochs
+    if args.patience:
+        config.early_stopping_patience = args.patience
+
     # set up deterministic training
     config.set_deterministic_training()
+
+    # handle evaluation mode
+    if args.evaluate:
+        evaluate_existing_checkpoint(args.evaluate, config)
+        return
 
     print(f"overfitting experiment: {args.n_tasks} tasks")
     print("configuration:")
     print(f"  device: {config.device}")
     print(f"  batch size: {config.batch_size}")
     print(f"  learning rate: {config.learning_rate}")
-    print(f"  max epochs: {args.epochs}")
-    print(f"  early stopping patience: {args.patience}")
+    print(f"  max epochs: {config.num_epochs}")
+    print(f"  early stopping patience: {config.early_stopping_patience}")
 
     # create experiment
     experiment = OverfitExperiment(config, args.experiment_name)
@@ -481,7 +653,7 @@ def main():
 
     # train on selected tasks
     checkpoint_path = experiment.train_on_tasks(
-        task_indices, args.epochs, args.patience
+        task_indices, config.num_epochs, config.early_stopping_patience
     )
 
     # evaluate on same tasks

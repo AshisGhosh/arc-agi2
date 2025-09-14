@@ -12,6 +12,9 @@ import torch
 import numpy as np
 from io import BytesIO
 import matplotlib.pyplot as plt
+import json
+from pathlib import Path
+from collections import Counter
 
 
 class HTMLReportBuilder:
@@ -104,18 +107,75 @@ class HTMLReportBuilder:
         """
         self.sections.append(pipeline_html)
 
-    def add_data_specs_section(self, data: List[Dict[str, torch.Tensor]]):
+    def add_data_specs_section(self, data: List[Dict[str, Any]]):
         """Add data specifications section."""
         if not data:
             return
 
-        # Get shapes from first sample
+        # Get shapes from first sample - handle nested structure
         sample = data[0]
-        shapes = {key: list(tensor.shape) for key, tensor in sample.items()}
+        shapes = {}
+
+        # Extract tensor shapes from the nested structure
+        if "train_examples" in sample and sample["train_examples"]:
+            train_example = sample["train_examples"][0]
+            if "input" in train_example and hasattr(train_example["input"], "shape"):
+                shapes["train_input"] = list(train_example["input"].shape)
+            if "output" in train_example and hasattr(train_example["output"], "shape"):
+                shapes["train_output"] = list(train_example["output"].shape)
+
+        if "test_example" in sample:
+            test_example = sample["test_example"]
+            if "input" in test_example and hasattr(test_example["input"], "shape"):
+                shapes["test_input"] = list(test_example["input"].shape)
+            if "output" in test_example and hasattr(test_example["output"], "shape"):
+                shapes["test_output"] = list(test_example["output"].shape)
 
         # Calculate memory usage
         memory_per_task = 4 * 3 * 64 * 64 * 4 + 2 * 1 * 30 * 30 * 4  # bytes
         total_memory = len(data) * memory_per_task / (1024 * 1024)  # MB
+
+        # Build shapes info safely
+        shapes_info = []
+        if "train_input" in shapes:
+            shapes_info.append(
+                f"<li><strong>Train input:</strong> {shapes['train_input']} (RGB, 64×64)</li>"
+            )
+        if "train_output" in shapes:
+            shapes_info.append(
+                f"<li><strong>Train output:</strong> {shapes['train_output']} (Grayscale, 30×30)</li>"
+            )
+        if "test_input" in shapes:
+            shapes_info.append(
+                f"<li><strong>Test input:</strong> {shapes['test_input']} (Grayscale, 30×30)</li>"
+            )
+        if "test_output" in shapes:
+            shapes_info.append(
+                f"<li><strong>Test output:</strong> {shapes['test_output']} (Grayscale, 30×30)</li>"
+            )
+
+        # Build data types info safely
+        dtype_info = []
+        if "train_examples" in sample and sample["train_examples"]:
+            train_example = sample["train_examples"][0]
+            if "input" in train_example and hasattr(train_example["input"], "dtype"):
+                dtype_info.append(
+                    f"<li><strong>Train input:</strong> {train_example['input'].dtype}</li>"
+                )
+            if "output" in train_example and hasattr(train_example["output"], "dtype"):
+                dtype_info.append(
+                    f"<li><strong>Train output:</strong> {train_example['output'].dtype}</li>"
+                )
+        if "test_example" in sample:
+            test_example = sample["test_example"]
+            if "input" in test_example and hasattr(test_example["input"], "dtype"):
+                dtype_info.append(
+                    f"<li><strong>Test input:</strong> {test_example['input'].dtype}</li>"
+                )
+            if "output" in test_example and hasattr(test_example["output"], "dtype"):
+                dtype_info.append(
+                    f"<li><strong>Test output:</strong> {test_example['output'].dtype}</li>"
+                )
 
         specs_html = f"""
         <div class="section">
@@ -124,15 +184,13 @@ class HTMLReportBuilder:
                 <div class="spec-card">
                     <h3>Image Dimensions</h3>
                     <ul>
-                        <li><strong>Example images:</strong> {shapes['example1_input']} (RGB, 64×64)</li>
-                        <li><strong>Target images:</strong> {shapes['target_input']} (Grayscale, 30×30)</li>
+                        {''.join(shapes_info)}
                     </ul>
                 </div>
                 <div class="spec-card">
                     <h3>Data Types</h3>
                     <ul>
-                        <li><strong>Example images:</strong> {sample['example1_input'].dtype}</li>
-                        <li><strong>Target images:</strong> {sample['target_input'].dtype}</li>
+                        {''.join(dtype_info)}
                     </ul>
                 </div>
                 <div class="spec-card">
@@ -148,7 +206,7 @@ class HTMLReportBuilder:
         self.sections.append(specs_html)
 
     def add_sample_images_section(
-        self, data: List[Dict[str, torch.Tensor]], num_samples: int = 4
+        self, data: List[Dict[str, Any]], num_samples: int = 4
     ):
         """Add sample images visualization."""
         if not data:
@@ -164,12 +222,66 @@ class HTMLReportBuilder:
         for i in range(min(num_samples, len(data))):
             sample = data[i]
 
-            # Convert tensors to images
-            example1_input = self._tensor_to_image(sample["example1_input"])
-            example1_output = self._tensor_to_image(sample["example1_output"])
-            target_input = self._tensor_to_image(sample["target_input"], is_target=True)
-            target_output = self._tensor_to_image(
-                sample["target_output"], is_target=True
+            # Convert tensors to images - handle new data structure
+            if "train_examples" in sample and len(sample["train_examples"]) >= 2:
+                example1_input = self._tensor_to_image(
+                    sample["train_examples"][0]["input"]
+                )
+                example1_output = self._tensor_to_image(
+                    sample["train_examples"][0]["output"]
+                )
+                example2_input = self._tensor_to_image(
+                    sample["train_examples"][1]["input"]
+                )
+                example2_output = self._tensor_to_image(
+                    sample["train_examples"][1]["output"]
+                )
+            else:
+                # Fallback if not enough train examples
+                example1_input = example1_output = example2_input = example2_output = (
+                    "No data"
+                )
+
+            if "test_example" in sample:
+                target_input = self._tensor_to_image(
+                    sample["test_example"]["input"], is_target=True
+                )
+                target_output = self._tensor_to_image(
+                    sample["test_example"]["output"], is_target=True
+                )
+            else:
+                target_input = target_output = "No data"
+
+            # Handle case where images might be "No data"
+            example1_img = (
+                f'<img src="data:image/png;base64,{example1_input}" alt="Input">'
+                if example1_input != "No data"
+                else '<div class="no-data">No data</div>'
+            )
+            example1_out_img = (
+                f'<img src="data:image/png;base64,{example1_output}" alt="Output">'
+                if example1_output != "No data"
+                else '<div class="no-data">No data</div>'
+            )
+            example2_img = (
+                f'<img src="data:image/png;base64,{example2_input}" alt="Input">'
+                if example2_input != "No data"
+                else '<div class="no-data">No data</div>'
+            )
+            example2_out_img = (
+                f'<img src="data:image/png;base64,{example2_output}" alt="Output">'
+                if example2_output != "No data"
+                else '<div class="no-data">No data</div>'
+            )
+            target_img = (
+                f'<img src="data:image/png;base64,{target_input}" alt="Target Input">'
+                if target_input != "No data"
+                else '<div class="no-data">No data</div>'
+            )
+            target_out_img = (
+                f'<img src="data:image/png;base64,{target_output}" alt="Target Output">'
+                if target_output != "No data"
+                else '<div class="no-data">No data</div>'
             )
 
             sample_html += f"""
@@ -179,17 +291,25 @@ class HTMLReportBuilder:
                         <div class="image-pair">
                             <h4>Example 1</h4>
                             <div class="image-container">
-                                <img src="data:image/png;base64,{example1_input}" alt="Input">
+                                {example1_img}
                                 <span class="arrow">→</span>
-                                <img src="data:image/png;base64,{example1_output}" alt="Output">
+                                {example1_out_img}
+                            </div>
+                        </div>
+                        <div class="image-pair">
+                            <h4>Example 2</h4>
+                            <div class="image-container">
+                                {example2_img}
+                                <span class="arrow">→</span>
+                                {example2_out_img}
                             </div>
                         </div>
                         <div class="image-pair">
                             <h4>Target</h4>
                             <div class="image-container">
-                                <img src="data:image/png;base64,{target_input}" alt="Target Input">
+                                {target_img}
                                 <span class="arrow">→</span>
-                                <img src="data:image/png;base64,{target_output}" alt="Target Output">
+                                {target_out_img}
                             </div>
                         </div>
                     </div>
@@ -202,7 +322,7 @@ class HTMLReportBuilder:
         """
         self.sections.append(sample_html)
 
-    def add_color_distribution_section(self, data: List[Dict[str, torch.Tensor]]):
+    def add_color_distribution_section(self, data: List[Dict[str, Any]]):
         """Add color distribution analysis."""
         if not data:
             return
@@ -210,26 +330,37 @@ class HTMLReportBuilder:
         # Analyze color distributions
         sample = data[0]
 
-        # Example image colors (RGB)
+        # Example image colors (RGB) - handle new data structure
         example_colors = {}
-        for key in [
-            "example1_input",
-            "example1_output",
-            "example2_input",
-            "example2_output",
-        ]:
-            if key in sample:
-                img = (sample[key] + 1) / 2  # Convert from [-1,1] to [0,1]
-                unique_vals, counts = torch.unique(img.flatten(), return_counts=True)
-                example_colors[key] = {
+        if "train_examples" in sample and len(sample["train_examples"]) >= 2:
+            train_examples = sample["train_examples"]
+            for i, example in enumerate(train_examples[:2]):  # First 2 examples
+                for img_type in ["input", "output"]:
+                    if img_type in example and hasattr(example[img_type], "flatten"):
+                        key = f"example{i+1}_{img_type}"
+                        img = (
+                            example[img_type] + 1
+                        ) / 2  # Convert from [-1,1] to [0,1]
+                        unique_vals, counts = torch.unique(
+                            img.flatten(), return_counts=True
+                        )
+                        example_colors[key] = {
+                            "values": unique_vals.tolist(),
+                            "counts": counts.tolist(),
+                        }
+
+        # Target image colors (grayscale 0-9)
+        target_colors = {"values": [], "counts": []}
+        if "test_example" in sample and "input" in sample["test_example"]:
+            target_img = sample["test_example"]["input"]
+            if hasattr(target_img, "flatten"):
+                unique_vals, counts = torch.unique(
+                    target_img.flatten(), return_counts=True
+                )
+                target_colors = {
                     "values": unique_vals.tolist(),
                     "counts": counts.tolist(),
                 }
-
-        # Target image colors (grayscale 0-9)
-        target_img = sample["target_input"]
-        unique_vals, counts = torch.unique(target_img.flatten(), return_counts=True)
-        target_colors = {"values": unique_vals.tolist(), "counts": counts.tolist()}
 
         colors_html = """
         <div class="section">
@@ -277,6 +408,215 @@ class HTMLReportBuilder:
         </div>
         """
         self.sections.append(colors_html)
+
+    def add_data_distribution_section(self, raw_data_dir: str = None):
+        """Add data distribution analysis section with histograms."""
+        if not raw_data_dir:
+            return
+
+        # analyze raw data distribution
+        stats = self._analyze_raw_data_distribution(raw_data_dir)
+
+        # create histogram
+        histogram_base64 = self._create_distribution_histogram(stats)
+
+        # create section html
+        distribution_html = f"""
+        <div class="section">
+            <h2>📊 data distribution analysis</h2>
+            
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-number">{stats['total_tasks']}</div>
+                    <div class="stat-label">total tasks</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number">{stats['suitable_for_holdout']}</div>
+                    <div class="stat-label">suitable for holdout (3+ train pairs)</div>
+                </div>
+                <div class="stat-card success">
+                    <div class="stat-number">{stats['suitable_for_holdout'] / stats['successfully_processed'] * 100:.1f}%</div>
+                    <div class="stat-label">holdout suitability rate</div>
+                </div>
+            </div>
+            
+            <div class="image-gallery">
+                <div class="sample-group">
+                    <h3>distribution histograms</h3>
+                    <div class="image-container">
+                        <img src="data:image/png;base64,{histogram_base64}" alt="data distribution histograms" style="max-width: 100%; height: auto;">
+                    </div>
+                </div>
+            </div>
+            
+            <div class="specs-grid">
+                <div class="spec-card">
+                    <h3>train pairs distribution</h3>
+                    <ul>
+                        {''.join([f'<li>{count} pairs: {freq} tasks</li>' for count, freq in sorted(stats['train_pair_distribution'].items())])}
+                    </ul>
+                </div>
+                <div class="spec-card">
+                    <h3>test pairs distribution</h3>
+                    <ul>
+                        {''.join([f'<li>{count} pairs: {freq} tasks</li>' for count, freq in sorted(stats['test_pair_distribution'].items())])}
+                    </ul>
+                </div>
+            </div>
+            
+            <div class="spec-card">
+                <h3>suitable tasks for holdout validation</h3>
+                <p>tasks with 3+ train pairs that can be used for rule latent validation:</p>
+                <ul>
+                    {''.join([f'<li>{task["file"]}: {task["train_pairs"]} train, {task["test_pairs"]} test pairs</li>' for task in stats['suitable_tasks'][:20]])}
+                    {f'<li>... and {len(stats["suitable_tasks"]) - 20} more tasks</li>' if len(stats['suitable_tasks']) > 20 else ''}
+                </ul>
+            </div>
+        </div>
+        """
+        self.sections.append(distribution_html)
+
+    def _analyze_raw_data_distribution(self, data_dir: str) -> Dict[str, Any]:
+        """analyze the distribution of train/test pairs in raw arc-agi1 dataset."""
+        data_path = Path(data_dir)
+        train_files = list(data_path.glob("*.json"))
+
+        train_counts = []
+        test_counts = []
+        total_pairs = []
+        task_info = []
+
+        for file_path in train_files:
+            try:
+                with open(file_path, "r") as f:
+                    data = json.load(f)
+
+                train_pairs = len(data.get("train", []))
+                test_pairs = len(data.get("test", []))
+                total_task_pairs = train_pairs + test_pairs
+
+                train_counts.append(train_pairs)
+                test_counts.append(test_pairs)
+                total_pairs.append(total_task_pairs)
+
+                task_info.append(
+                    {
+                        "file": file_path.name,
+                        "train_pairs": train_pairs,
+                        "test_pairs": test_pairs,
+                        "total_pairs": total_task_pairs,
+                    }
+                )
+
+            except Exception as e:
+                print(f"error processing {file_path}: {e}")
+                continue
+
+        # calculate statistics
+        train_counter = Counter(train_counts)
+        test_counter = Counter(test_counts)
+        total_counter = Counter(total_pairs)
+
+        # find tasks suitable for holdout validation (3+ train pairs)
+        suitable_tasks = [task for task in task_info if task["train_pairs"] >= 3]
+
+        stats = {
+            "total_tasks": len(train_files),
+            "successfully_processed": len(task_info),
+            "train_pair_distribution": dict(train_counter),
+            "test_pair_distribution": dict(test_counter),
+            "total_pair_distribution": dict(total_counter),
+            "suitable_for_holdout": len(suitable_tasks),
+            "suitable_tasks": suitable_tasks,
+            "train_counts": train_counts,
+            "test_counts": test_counts,
+            "total_pairs": total_pairs,
+        }
+
+        return stats
+
+    def _create_distribution_histogram(self, stats: Dict[str, Any]) -> str:
+        """create histogram plots and return as base64 encoded image."""
+
+        # check if we have data
+        if not stats["train_counts"] or not stats["test_counts"]:
+            # create empty plot
+            fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+            ax.text(
+                0.5, 0.5, "no data available", ha="center", va="center", fontsize=16
+            )
+            ax.set_title("arc-agi1 data distribution analysis")
+        else:
+            # create figure with subplots
+            fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+            fig.suptitle(
+                "arc-agi1 data distribution analysis", fontsize=16, fontweight="bold"
+            )
+
+            # train pairs histogram
+            axes[0, 0].hist(
+                stats["train_counts"],
+                bins=range(min(stats["train_counts"]), max(stats["train_counts"]) + 2),
+                alpha=0.7,
+                color="skyblue",
+                edgecolor="black",
+            )
+            axes[0, 0].set_title("train pairs per task")
+            axes[0, 0].set_xlabel("number of train pairs")
+            axes[0, 0].set_ylabel("number of tasks")
+            axes[0, 0].grid(True, alpha=0.3)
+
+            # test pairs histogram
+            axes[0, 1].hist(
+                stats["test_counts"],
+                bins=range(min(stats["test_counts"]), max(stats["test_counts"]) + 2),
+                alpha=0.7,
+                color="lightcoral",
+                edgecolor="black",
+            )
+            axes[0, 1].set_title("test pairs per task")
+            axes[0, 1].set_xlabel("number of test pairs")
+            axes[0, 1].set_ylabel("number of tasks")
+            axes[0, 1].grid(True, alpha=0.3)
+
+            # total pairs histogram
+            axes[1, 0].hist(
+                stats["total_pairs"],
+                bins=range(min(stats["total_pairs"]), max(stats["total_pairs"]) + 2),
+                alpha=0.7,
+                color="lightgreen",
+                edgecolor="black",
+            )
+            axes[1, 0].set_title("total pairs per task")
+            axes[1, 0].set_xlabel("number of total pairs")
+            axes[1, 0].set_ylabel("number of tasks")
+            axes[1, 0].grid(True, alpha=0.3)
+
+            # holdout suitability pie chart
+            suitable = stats["suitable_for_holdout"]
+            unsuitable = stats["successfully_processed"] - suitable
+            labels = [
+                "suitable for holdout (3+ train pairs)",
+                "not suitable (< 3 train pairs)",
+            ]
+            sizes = [suitable, unsuitable]
+            colors = ["lightgreen", "lightcoral"]
+
+            axes[1, 1].pie(
+                sizes, labels=labels, colors=colors, autopct="%1.1f%%", startangle=90
+            )
+            axes[1, 1].set_title("holdout validation suitability")
+
+            plt.tight_layout()
+
+        # convert to base64
+        buffer = BytesIO()
+        plt.savefig(buffer, format="png", dpi=300, bbox_inches="tight")
+        buffer.seek(0)
+        image_base64 = base64.b64encode(buffer.getvalue()).decode()
+        plt.close()
+
+        return image_base64
 
     def _tensor_to_image(self, tensor: torch.Tensor, is_target: bool = False) -> str:
         """Convert tensor to base64 encoded image."""
@@ -613,10 +953,11 @@ class HTMLReportBuilder:
 
 
 def generate_html_report(
-    data: List[Dict[str, torch.Tensor]],
+    data: List[Dict[str, Any]],
     total_raw_tasks: int,
     filtered_tasks: int,
     dataset_name: str,
+    raw_data_dir: str = None,
 ) -> str:
     """
     Generate a complete HTML report for preprocessed data.
@@ -626,6 +967,7 @@ def generate_html_report(
         total_raw_tasks: Total number of raw tasks loaded
         filtered_tasks: Number of tasks after filtering
         dataset_name: Name of the dataset
+        raw_data_dir: Path to raw data directory for distribution analysis
 
     Returns:
         HTML report as string
@@ -648,5 +990,9 @@ def generate_html_report(
     builder.add_data_specs_section(data)
     builder.add_sample_images_section(data)
     builder.add_color_distribution_section(data)
+
+    # Add data distribution analysis if raw data directory provided
+    if raw_data_dir:
+        builder.add_data_distribution_section(raw_data_dir)
 
     return builder.build()
