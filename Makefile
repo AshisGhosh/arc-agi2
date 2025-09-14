@@ -54,5 +54,5 @@ clean:
 	docker system prune -f 
 
 lint:
-	ruff check --fix .
-	ruff format
+	ruff check --fix . --exclude HRM
+	ruff format --exclude HRM

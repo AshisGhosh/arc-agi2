@@ -5,38 +5,38 @@ HTML report generator for ARC-AGI data preprocessing.
 Generates interactive HTML reports with visualizations and statistics.
 """
 
-import json
 import base64
 from datetime import datetime
-from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 import torch
 import numpy as np
 from io import BytesIO
 import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-from matplotlib.colors import ListedColormap
+
 
 class HTMLReportBuilder:
     """Builder class for generating HTML reports with visualizations."""
-    
+
     def __init__(self, title: str = "ARC-AGI Data Processing Report"):
         self.title = title
         self.sections = []
         self.charts = []
         self.metadata = {}
-        
+
     def set_metadata(self, dataset_name: str, generated_at: str = None):
         """Set report metadata."""
         self.metadata = {
-            'dataset_name': dataset_name,
-            'generated_at': generated_at or datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            "dataset_name": dataset_name,
+            "generated_at": generated_at
+            or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
-    
+
     def add_overview_section(self, stats: Dict[str, Any]):
         """Add overview statistics section."""
-        success_rate = (stats['successfully_processed'] / stats['total_raw_tasks']) * 100
-        
+        success_rate = (
+            stats["successfully_processed"] / stats["total_raw_tasks"]
+        ) * 100
+
         overview_html = f"""
         <div class="section">
             <h2>📊 Processing Overview</h2>
@@ -61,7 +61,7 @@ class HTMLReportBuilder:
         </div>
         """
         self.sections.append(overview_html)
-    
+
     def add_processing_pipeline_section(self):
         """Add processing pipeline visualization."""
         pipeline_html = """
@@ -103,20 +103,20 @@ class HTMLReportBuilder:
         </div>
         """
         self.sections.append(pipeline_html)
-    
+
     def add_data_specs_section(self, data: List[Dict[str, torch.Tensor]]):
         """Add data specifications section."""
         if not data:
             return
-            
+
         # Get shapes from first sample
         sample = data[0]
         shapes = {key: list(tensor.shape) for key, tensor in sample.items()}
-        
+
         # Calculate memory usage
         memory_per_task = 4 * 3 * 64 * 64 * 4 + 2 * 1 * 30 * 30 * 4  # bytes
         total_memory = len(data) * memory_per_task / (1024 * 1024)  # MB
-        
+
         specs_html = f"""
         <div class="section">
             <h2>📋 Data Specifications</h2>
@@ -146,28 +146,32 @@ class HTMLReportBuilder:
         </div>
         """
         self.sections.append(specs_html)
-    
-    def add_sample_images_section(self, data: List[Dict[str, torch.Tensor]], num_samples: int = 4):
+
+    def add_sample_images_section(
+        self, data: List[Dict[str, torch.Tensor]], num_samples: int = 4
+    ):
         """Add sample images visualization."""
         if not data:
             return
-            
+
         # Create sample images
         sample_html = """
         <div class="section">
             <h2>🖼️ Sample Images</h2>
             <div class="image-gallery">
         """
-        
+
         for i in range(min(num_samples, len(data))):
             sample = data[i]
-            
+
             # Convert tensors to images
-            example1_input = self._tensor_to_image(sample['example1_input'])
-            example1_output = self._tensor_to_image(sample['example1_output'])
-            target_input = self._tensor_to_image(sample['target_input'], is_target=True)
-            target_output = self._tensor_to_image(sample['target_output'], is_target=True)
-            
+            example1_input = self._tensor_to_image(sample["example1_input"])
+            example1_output = self._tensor_to_image(sample["example1_output"])
+            target_input = self._tensor_to_image(sample["target_input"], is_target=True)
+            target_output = self._tensor_to_image(
+                sample["target_output"], is_target=True
+            )
+
             sample_html += f"""
                 <div class="sample-group">
                     <h3>Sample {i+1}</h3>
@@ -191,41 +195,43 @@ class HTMLReportBuilder:
                     </div>
                 </div>
             """
-        
+
         sample_html += """
             </div>
         </div>
         """
         self.sections.append(sample_html)
-    
+
     def add_color_distribution_section(self, data: List[Dict[str, torch.Tensor]]):
         """Add color distribution analysis."""
         if not data:
             return
-            
+
         # Analyze color distributions
         sample = data[0]
-        
+
         # Example image colors (RGB)
         example_colors = {}
-        for key in ['example1_input', 'example1_output', 'example2_input', 'example2_output']:
+        for key in [
+            "example1_input",
+            "example1_output",
+            "example2_input",
+            "example2_output",
+        ]:
             if key in sample:
                 img = (sample[key] + 1) / 2  # Convert from [-1,1] to [0,1]
                 unique_vals, counts = torch.unique(img.flatten(), return_counts=True)
                 example_colors[key] = {
-                    'values': unique_vals.tolist(),
-                    'counts': counts.tolist()
+                    "values": unique_vals.tolist(),
+                    "counts": counts.tolist(),
                 }
-        
+
         # Target image colors (grayscale 0-9)
-        target_img = sample['target_input']
+        target_img = sample["target_input"]
         unique_vals, counts = torch.unique(target_img.flatten(), return_counts=True)
-        target_colors = {
-            'values': unique_vals.tolist(),
-            'counts': counts.tolist()
-        }
-        
-        colors_html = f"""
+        target_colors = {"values": unique_vals.tolist(), "counts": counts.tolist()}
+
+        colors_html = """
         <div class="section">
             <h2>🎨 Color Distribution</h2>
             <div class="color-analysis">
@@ -233,18 +239,20 @@ class HTMLReportBuilder:
                     <h3>Example Images (RGB)</h3>
                     <div class="color-bars">
         """
-        
+
         for key, colors in example_colors.items():
             colors_html += f"""
                         <div class="color-bar">
                             <h4>{key.replace('_', ' ').title()}</h4>
                             <div class="color-values">
             """
-            for val, count in zip(colors['values'], colors['counts']):
-                colors_html += f'<span class="color-value">Value {val:.3f}: {count} pixels</span>'
+            for val, count in zip(colors["values"], colors["counts"]):
+                colors_html += (
+                    f'<span class="color-value">Value {val:.3f}: {count} pixels</span>'
+                )
             colors_html += "</div></div>"
-        
-        colors_html += f"""
+
+        colors_html += """
                     </div>
                 </div>
                 <div class="color-section">
@@ -253,11 +261,13 @@ class HTMLReportBuilder:
                         <div class="color-bar">
                             <div class="color-values">
         """
-        
-        for val, count in zip(target_colors['values'], target_colors['counts']):
-            val_int = val.item() if hasattr(val, 'item') else val
-            colors_html += f'<span class="color-value">Color {val_int}: {count} pixels</span>'
-        
+
+        for val, count in zip(target_colors["values"], target_colors["counts"]):
+            val_int = val.item() if hasattr(val, "item") else val
+            colors_html += (
+                f'<span class="color-value">Color {val_int}: {count} pixels</span>'
+            )
+
         colors_html += """
                             </div>
                         </div>
@@ -267,7 +277,7 @@ class HTMLReportBuilder:
         </div>
         """
         self.sections.append(colors_html)
-    
+
     def _tensor_to_image(self, tensor: torch.Tensor, is_target: bool = False) -> str:
         """Convert tensor to base64 encoded image."""
         if is_target:
@@ -277,42 +287,44 @@ class HTMLReportBuilder:
             if len(img_array.shape) == 3 and img_array.shape[0] == 1:
                 img_array = img_array.squeeze(0)
             # Use ARC color palette
-            colors = np.array([
-                [0, 0, 0],      # 0: black
-                [255, 255, 255], # 1: white
-                [255, 0, 0],     # 2: red
-                [0, 255, 0],     # 3: green
-                [0, 0, 255],     # 4: blue
-                [255, 255, 0],   # 5: yellow
-                [255, 0, 255],   # 6: magenta
-                [0, 255, 255],   # 7: cyan
-                [128, 128, 128], # 8: gray
-                [255, 128, 0]    # 9: orange
-            ])
+            colors = np.array(
+                [
+                    [0, 0, 0],  # 0: black
+                    [255, 255, 255],  # 1: white
+                    [255, 0, 0],  # 2: red
+                    [0, 255, 0],  # 3: green
+                    [0, 0, 255],  # 4: blue
+                    [255, 255, 0],  # 5: yellow
+                    [255, 0, 255],  # 6: magenta
+                    [0, 255, 255],  # 7: cyan
+                    [128, 128, 128],  # 8: gray
+                    [255, 128, 0],  # 9: orange
+                ]
+            )
             rgb_array = colors[img_array.astype(int)]
         else:
             # Example image: RGB normalized [-1, 1]
             img_array = ((tensor + 1) / 2 * 255).numpy().astype(np.uint8)
             rgb_array = img_array.transpose(1, 2, 0)
-        
+
         # Create matplotlib figure
         fig, ax = plt.subplots(1, 1, figsize=(2, 2))
         ax.imshow(rgb_array)
-        ax.axis('off')
-        
+        ax.axis("off")
+
         # Convert to base64
         buffer = BytesIO()
-        plt.savefig(buffer, format='png', bbox_inches='tight', dpi=100)
+        plt.savefig(buffer, format="png", bbox_inches="tight", dpi=100)
         buffer.seek(0)
         image_base64 = base64.b64encode(buffer.getvalue()).decode()
         plt.close(fig)
-        
+
         return image_base64
-    
+
     def build(self) -> str:
         """Build the complete HTML report."""
-        sections_html = '\n'.join(self.sections)
-        
+        sections_html = "\n".join(self.sections)
+
         html = f"""
 <!DOCTYPE html>
 <html lang="en">
@@ -346,7 +358,7 @@ class HTMLReportBuilder:
 </html>
         """
         return html
-    
+
     def _get_css(self) -> str:
         """Get CSS styles for the report."""
         return """
@@ -599,39 +611,42 @@ class HTMLReportBuilder:
         }
         """
 
-def generate_html_report(data: List[Dict[str, torch.Tensor]], 
-                        total_raw_tasks: int, 
-                        filtered_tasks: int, 
-                        dataset_name: str) -> str:
+
+def generate_html_report(
+    data: List[Dict[str, torch.Tensor]],
+    total_raw_tasks: int,
+    filtered_tasks: int,
+    dataset_name: str,
+) -> str:
     """
     Generate a complete HTML report for preprocessed data.
-    
+
     Args:
         data: List of preprocessed tasks
         total_raw_tasks: Total number of raw tasks loaded
         filtered_tasks: Number of tasks after filtering
         dataset_name: Name of the dataset
-        
+
     Returns:
         HTML report as string
     """
     builder = HTMLReportBuilder()
-    
+
     # Set metadata
     builder.set_metadata(dataset_name)
-    
+
     # Calculate statistics
     stats = {
-        'total_raw_tasks': total_raw_tasks,
-        'tasks_filtered_out': total_raw_tasks - filtered_tasks,
-        'successfully_processed': len(data)
+        "total_raw_tasks": total_raw_tasks,
+        "tasks_filtered_out": total_raw_tasks - filtered_tasks,
+        "successfully_processed": len(data),
     }
-    
+
     # Add sections
     builder.add_overview_section(stats)
     builder.add_processing_pipeline_section()
     builder.add_data_specs_section(data)
     builder.add_sample_images_section(data)
     builder.add_color_distribution_section(data)
-    
+
     return builder.build()
