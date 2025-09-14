@@ -4,3 +4,5 @@ pyyaml
 torchvision
 tqdm
 Pillow
+streamlit
+matplotlib

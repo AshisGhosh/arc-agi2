@@ -20,6 +20,8 @@ services:
     command: /bin/bash
     stdin_open: true
     tty: true
+    ports:
+      - "8502:8502"  # Streamlit dataset viewer
     deploy:
       resources:
         reservations:
