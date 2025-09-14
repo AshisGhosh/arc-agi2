@@ -8,7 +8,7 @@ import json
 
 from ..config import Config
 from ..models import SimpleARCModel
-from .losses import calculate_combined_loss
+from .losses import calculate_classification_loss
 
 
 class ARCTrainer:
@@ -64,7 +64,7 @@ class ARCTrainer:
         """
         self.model.train()
         total_loss = 0.0
-        loss_components = {"l1_loss": 0.0, "l2_loss": 0.0, "partial_credit": 0.0}
+        loss_components = {"cross_entropy_loss": 0.0, "accuracy": 0.0}
 
         # Progress bar
         pbar = tqdm(train_loader, desc=f"Epoch {self.current_epoch}")
@@ -74,7 +74,7 @@ class ARCTrainer:
             batch = {k: v.to(self.device) for k, v in batch.items()}
 
             # Forward pass
-            solution = self.model(
+            logits = self.model(
                 batch["example1_input"],
                 batch["example1_output"],
                 batch["example2_input"],
@@ -83,8 +83,8 @@ class ARCTrainer:
             )
 
             # Calculate loss
-            loss, components = calculate_combined_loss(
-                solution, batch["target_output"], self.config
+            loss, components = calculate_classification_loss(
+                logits, batch["target_output"], self.config
             )
 
             # Backward pass
@@ -128,7 +128,7 @@ class ARCTrainer:
         """
         self.model.eval()
         total_loss = 0.0
-        loss_components = {"l1_loss": 0.0, "l2_loss": 0.0, "partial_credit": 0.0}
+        loss_components = {"cross_entropy_loss": 0.0, "accuracy": 0.0}
 
         with torch.no_grad():
             for batch in val_loader:
@@ -136,7 +136,7 @@ class ARCTrainer:
                 batch = {k: v.to(self.device) for k, v in batch.items()}
 
                 # Forward pass
-                solution = self.model(
+                logits = self.model(
                     batch["example1_input"],
                     batch["example1_output"],
                     batch["example2_input"],
@@ -145,8 +145,8 @@ class ARCTrainer:
                 )
 
                 # Calculate loss
-                loss, components = calculate_combined_loss(
-                    solution, batch["target_output"], self.config
+                loss, components = calculate_classification_loss(
+                    logits, batch["target_output"], self.config
                 )
 
                 # Update metrics
@@ -261,11 +261,8 @@ class ARCTrainer:
         print(f"\nEpoch {epoch}:")
         print(f"  Train Loss: {train_metrics['total_loss']:.4f}")
         print(f"  Val Loss: {val_metrics['total_loss']:.4f}")
-        print(f"  L1: {train_metrics['l1_loss']:.4f} / {val_metrics['l1_loss']:.4f}")
-        print(f"  L2: {train_metrics['l2_loss']:.4f} / {val_metrics['l2_loss']:.4f}")
-        print(
-            f"  Partial Credit: {train_metrics['partial_credit']:.4f} / {val_metrics['partial_credit']:.4f}"
-        )
+        print(f"  Cross-Entropy: {train_metrics['cross_entropy_loss']:.4f} / {val_metrics['cross_entropy_loss']:.4f}")
+        print(f"  Accuracy: {train_metrics['accuracy']:.4f} / {val_metrics['accuracy']:.4f}")
         print(f"  Learning Rate: {self.optimizer.param_groups[0]['lr']:.6f}")
 
         # Save to log file

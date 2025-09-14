@@ -23,13 +23,6 @@ class Config:
     max_grad_norm: float = 1.0
     dropout: float = 0.1
 
-    # Loss function weights
-    l1_weight: float = 1.0
-    l2_weight: float = 0.5
-    partial_credit_weight: float = 0.3
-    partial_credit_max_distance: float = 2.0
-    partial_credit_decay: float = 0.5
-
     # Data paths
     data_dir: str = "data/raw"
     processed_dir: str = "data/processed"

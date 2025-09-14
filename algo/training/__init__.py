@@ -1,4 +1,4 @@
 from .trainer import ARCTrainer
-from .losses import partial_credit_loss
+from .losses import calculate_classification_loss
 
-__all__ = ["ARCTrainer", "partial_credit_loss"]
+__all__ = ["ARCTrainer", "calculate_classification_loss"]
