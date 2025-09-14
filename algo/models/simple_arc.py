@@ -39,14 +39,14 @@ class SimpleARCModel(nn.Module):
             target_input: Target input image [B, 1, 30, 30]
 
         Returns:
-            Solution image [B, 1, 30, 30]
+            Classification logits [B, 10, 30, 30] for each pixel and color class
         """
         # Extract rule latent from example pairs
         rule_latent = self.encoder(
             example1_input, example1_output, example2_input, example2_output
         )  # [B, 128]
 
-        # Generate solution from rule latent and target input
-        solution = self.decoder(rule_latent, target_input)  # [B, 1, 30, 30]
+        # Generate solution logits from rule latent and target input
+        logits = self.decoder(rule_latent, target_input)  # [B, 10, 30, 30]
 
-        return solution
+        return logits

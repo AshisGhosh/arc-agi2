@@ -9,6 +9,8 @@ import torch
 from torch.utils.data import DataLoader, random_split
 import argparse
 from pathlib import Path
+import json
+from datetime import datetime
 
 from algo.config import Config
 from algo.models import SimpleARCModel
@@ -62,6 +64,48 @@ def create_data_loaders(config: Config) -> tuple[DataLoader, DataLoader]:
     return train_loader, val_loader
 
 
+def create_experiment_directory(config: Config, dataset_name: str) -> Path:
+    """create experiment directory with timestamp."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    experiment_name = f"train_{dataset_name}_{timestamp}"
+    experiment_dir = Path("logs") / experiment_name
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+    return experiment_dir
+
+
+def save_training_info(
+    experiment_dir: Path,
+    config: Config,
+    dataset_name: str,
+    train_size: int,
+    val_size: int,
+    total_params: int,
+) -> None:
+    """save training information to json file."""
+    training_info = {
+        "dataset": dataset_name,
+        "config": {
+            "batch_size": config.batch_size,
+            "learning_rate": config.learning_rate,
+            "num_epochs": config.num_epochs,
+            "rule_dim": config.rule_dim,
+            "device": str(config.device),
+        },
+        "data_split": {
+            "train_size": train_size,
+            "val_size": val_size,
+            "total_size": train_size + val_size,
+        },
+        "model_info": {
+            "total_parameters": total_params,
+        },
+        "timestamp": datetime.now().isoformat(),
+    }
+
+    with open(experiment_dir / "training_info.json", "w") as f:
+        json.dump(training_info, f, indent=2)
+
+
 def main():
     """Main training function."""
     parser = argparse.ArgumentParser(description="Train SimpleARC model")
@@ -108,6 +152,10 @@ def main():
     print(f"  Epochs: {config.num_epochs}")
     print(f"  Rule dimension: {config.rule_dim}")
 
+    # Create experiment directory
+    experiment_dir = create_experiment_directory(config, args.dataset)
+    print(f"\nExperiment directory: {experiment_dir}")
+
     # Create data loaders
     train_loader, val_loader = create_data_loaders(config)
 
@@ -123,8 +171,18 @@ def main():
     print(f"  Trainable parameters: {trainable_params:,}")
     print(f"  Frozen parameters: {total_params - trainable_params:,}")
 
-    # Create trainer
+    # Save training info
+    train_size = len(train_loader.dataset)
+    val_size = len(val_loader.dataset)
+    save_training_info(
+        experiment_dir, config, args.dataset, train_size, val_size, total_params
+    )
+
+    # Create trainer with custom checkpoint path
     trainer = ARCTrainer(model, config)
+
+    # Override the checkpoint directory to save in experiment directory
+    trainer.checkpoint_dir = experiment_dir
 
     # Resume from checkpoint if specified
     if args.resume:
@@ -138,6 +196,8 @@ def main():
     trainer.train(train_loader, val_loader)
 
     print("Training completed!")
+    print(f"Experiment saved to: {experiment_dir}")
+    print("You can now view this model in the Streamlit app!")
 
 
 if __name__ == "__main__":

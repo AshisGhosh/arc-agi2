@@ -8,7 +8,7 @@ import json
 
 from ..config import Config
 from ..models import SimpleARCModel
-from .losses import calculate_combined_loss
+from .losses import calculate_classification_loss
 
 
 class ARCTrainer:
@@ -51,6 +51,8 @@ class ARCTrainer:
         # Training state
         self.current_epoch = 0
         self.best_loss = float("inf")
+        self.best_epoch = 0
+        self.patience_counter = 0
 
     def train_epoch(self, train_loader: DataLoader) -> Dict[str, float]:
         """
@@ -64,7 +66,7 @@ class ARCTrainer:
         """
         self.model.train()
         total_loss = 0.0
-        loss_components = {"l1_loss": 0.0, "l2_loss": 0.0, "partial_credit": 0.0}
+        loss_components = {"cross_entropy_loss": 0.0, "accuracy": 0.0}
 
         # Progress bar
         pbar = tqdm(train_loader, desc=f"Epoch {self.current_epoch}")
@@ -74,7 +76,7 @@ class ARCTrainer:
             batch = {k: v.to(self.device) for k, v in batch.items()}
 
             # Forward pass
-            solution = self.model(
+            logits = self.model(
                 batch["example1_input"],
                 batch["example1_output"],
                 batch["example2_input"],
@@ -83,8 +85,8 @@ class ARCTrainer:
             )
 
             # Calculate loss
-            loss, components = calculate_combined_loss(
-                solution, batch["target_output"], self.config
+            loss, components = calculate_classification_loss(
+                logits, batch["target_output"], self.config
             )
 
             # Backward pass
@@ -128,7 +130,7 @@ class ARCTrainer:
         """
         self.model.eval()
         total_loss = 0.0
-        loss_components = {"l1_loss": 0.0, "l2_loss": 0.0, "partial_credit": 0.0}
+        loss_components = {"cross_entropy_loss": 0.0, "accuracy": 0.0}
 
         with torch.no_grad():
             for batch in val_loader:
@@ -136,7 +138,7 @@ class ARCTrainer:
                 batch = {k: v.to(self.device) for k, v in batch.items()}
 
                 # Forward pass
-                solution = self.model(
+                logits = self.model(
                     batch["example1_input"],
                     batch["example1_output"],
                     batch["example2_input"],
@@ -145,8 +147,8 @@ class ARCTrainer:
                 )
 
                 # Calculate loss
-                loss, components = calculate_combined_loss(
-                    solution, batch["target_output"], self.config
+                loss, components = calculate_classification_loss(
+                    logits, batch["target_output"], self.config
                 )
 
                 # Update metrics
@@ -177,6 +179,8 @@ class ARCTrainer:
             "optimizer_state_dict": self.optimizer.state_dict(),
             "scheduler_state_dict": self.scheduler.state_dict(),
             "best_loss": self.best_loss,
+            "best_epoch": self.best_epoch,
+            "patience_counter": self.patience_counter,
             "config": self.config,
         }
 
@@ -206,6 +210,10 @@ class ARCTrainer:
         self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         self.current_epoch = checkpoint["epoch"]
         self.best_loss = checkpoint["best_loss"]
+
+        # Load early stopping variables if they exist
+        self.best_epoch = checkpoint.get("best_epoch", 0)
+        self.patience_counter = checkpoint.get("patience_counter", 0)
 
         print(f"Loaded checkpoint from epoch {self.current_epoch}")
 
@@ -237,13 +245,27 @@ class ARCTrainer:
             # Log epoch results
             self.log_epoch(epoch, train_metrics, val_metrics)
 
-            # Save checkpoint
+            # Save checkpoint and update best model
             is_best = val_metrics["total_loss"] < self.best_loss
             if is_best:
                 self.best_loss = val_metrics["total_loss"]
+                self.best_epoch = epoch
+                self.patience_counter = 0
+            else:
+                self.patience_counter += 1
 
             if epoch % self.config.save_interval == 0 or is_best:
                 self.save_checkpoint(epoch, is_best)
+
+            # Early stopping
+            if self.patience_counter >= self.config.early_stopping_patience:
+                print(
+                    f"\nEarly stopping at epoch {epoch} (patience: {self.config.early_stopping_patience})"
+                )
+                print(
+                    f"Best validation loss: {self.best_loss:.6f} at epoch {self.best_epoch}"
+                )
+                break
 
         print("Training completed!")
 
@@ -261,10 +283,11 @@ class ARCTrainer:
         print(f"\nEpoch {epoch}:")
         print(f"  Train Loss: {train_metrics['total_loss']:.4f}")
         print(f"  Val Loss: {val_metrics['total_loss']:.4f}")
-        print(f"  L1: {train_metrics['l1_loss']:.4f} / {val_metrics['l1_loss']:.4f}")
-        print(f"  L2: {train_metrics['l2_loss']:.4f} / {val_metrics['l2_loss']:.4f}")
         print(
-            f"  Partial Credit: {train_metrics['partial_credit']:.4f} / {val_metrics['partial_credit']:.4f}"
+            f"  Cross-Entropy: {train_metrics['cross_entropy_loss']:.4f} / {val_metrics['cross_entropy_loss']:.4f}"
+        )
+        print(
+            f"  Accuracy: {train_metrics['accuracy']:.4f} / {val_metrics['accuracy']:.4f}"
         )
         print(f"  Learning Rate: {self.optimizer.param_groups[0]['lr']:.6f}")
 

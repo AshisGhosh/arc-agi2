@@ -285,8 +285,6 @@ class OverfitExperiment:
         perfect_matches = 0
         pixel_correct = 0
         near_miss_correct = 0
-        total_l1_loss = 0.0
-        total_l2_loss = 0.0
 
         # foreground metrics
         perfect_matches_foreground = 0
@@ -302,7 +300,7 @@ class OverfitExperiment:
                 batch = {k: v.to(self.config.device) for k, v in batch.items()}
 
                 # forward pass
-                solution = model(
+                logits = model(
                     batch["example1_input"],
                     batch["example1_output"],
                     batch["example2_input"],
@@ -311,52 +309,44 @@ class OverfitExperiment:
                 )
 
                 # calculate metrics using existing functions
-                batch_size = solution.size(0)
+                batch_size = logits.size(0)
                 total_samples += batch_size
 
                 # use existing accuracy functions
                 perfect_matches += (
-                    calculate_perfect_accuracy(solution, batch["target_output"])
+                    calculate_perfect_accuracy(logits, batch["target_output"])
                     * batch_size
                 )
 
                 pixel_correct += (
-                    calculate_pixel_accuracy(solution, batch["target_output"])
+                    calculate_pixel_accuracy(logits, batch["target_output"])
                     * batch_size
                 )
 
                 near_miss_correct += (
-                    calculate_near_miss_accuracy(solution, batch["target_output"])
+                    calculate_near_miss_accuracy(logits, batch["target_output"])
                     * batch_size
                 )
 
                 # foreground metrics
                 perfect_matches_foreground += (
                     calculate_perfect_accuracy_foreground(
-                        solution, batch["target_output"]
+                        logits, batch["target_output"]
                     )
                     * batch_size
                 )
 
                 pixel_correct_foreground += (
-                    calculate_pixel_accuracy_foreground(
-                        solution, batch["target_output"]
-                    )
+                    calculate_pixel_accuracy_foreground(logits, batch["target_output"])
                     * batch_size
                 )
 
                 near_miss_correct_foreground += (
                     calculate_near_miss_accuracy_foreground(
-                        solution, batch["target_output"]
+                        logits, batch["target_output"]
                     )
                     * batch_size
                 )
-
-                # losses
-                l1_loss = torch.nn.functional.l1_loss(solution, batch["target_output"])
-                l2_loss = torch.nn.functional.mse_loss(solution, batch["target_output"])
-                total_l1_loss += l1_loss.item() * batch_size
-                total_l2_loss += l2_loss.item() * batch_size
 
                 # per-task results for detailed analysis
                 for i in range(batch_size):
@@ -367,32 +357,30 @@ class OverfitExperiment:
                     )
 
                     # calculate per-sample metrics
-                    sample_solution = solution[i : i + 1]
+                    sample_logits = logits[i : i + 1]
                     sample_target = batch["target_output"][i : i + 1]
 
                     per_task_results.append(
                         {
                             "task_index": task_idx,
                             "perfect_match": calculate_perfect_accuracy(
-                                sample_solution, sample_target
+                                sample_logits, sample_target
                             ),
                             "pixel_accuracy": calculate_pixel_accuracy(
-                                sample_solution, sample_target
+                                sample_logits, sample_target
                             ),
                             "near_miss_accuracy": calculate_near_miss_accuracy(
-                                sample_solution, sample_target
+                                sample_logits, sample_target
                             ),
                             "perfect_match_foreground": calculate_perfect_accuracy_foreground(
-                                sample_solution, sample_target
+                                sample_logits, sample_target
                             ),
                             "pixel_accuracy_foreground": calculate_pixel_accuracy_foreground(
-                                sample_solution, sample_target
+                                sample_logits, sample_target
                             ),
                             "near_miss_accuracy_foreground": calculate_near_miss_accuracy_foreground(
-                                sample_solution, sample_target
+                                sample_logits, sample_target
                             ),
-                            "l1_loss": l1_loss.item(),
-                            "l2_loss": l2_loss.item(),
                         }
                     )
 
@@ -401,8 +389,6 @@ class OverfitExperiment:
             "perfect_accuracy": perfect_matches / total_samples,
             "pixel_accuracy": pixel_correct / total_samples,
             "near_miss_accuracy": near_miss_correct / total_samples,
-            "l1_loss": total_l1_loss / total_samples,
-            "l2_loss": total_l2_loss / total_samples,
             "total_samples": total_samples,
             "per_task_results": per_task_results,
             # foreground metrics
@@ -427,8 +413,6 @@ class OverfitExperiment:
         print(
             f"  near-miss accuracy: {results['near_miss_accuracy']:.4f} ({results['near_miss_accuracy']*100:.2f}%)"
         )
-        print(f"  l1 loss: {results['l1_loss']:.4f}")
-        print(f"  l2 loss: {results['l2_loss']:.4f}")
         print(f"  total samples: {results['total_samples']}")
 
         print("\nforeground results (non-background pixels only):")
@@ -449,7 +433,7 @@ def main():
     """main experiment function."""
     parser = argparse.ArgumentParser(description="n-task overfitting experiment")
     parser.add_argument(
-        "--n_tasks", "-n", type=int, default=10, help="number of tasks to overfit on"
+        "--n_tasks", "-n", type=int, default=50, help="number of tasks to overfit on"
     )
     parser.add_argument(
         "--task-indices", type=int, nargs="+", help="specific task indices to use"

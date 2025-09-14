@@ -22,6 +22,7 @@ services:
     tty: true
     ports:
       - "8502:8502"  # Streamlit dataset viewer
+      - "8503:8503"  # Streamlit model predictions viewer
     deploy:
       resources:
         reservations:

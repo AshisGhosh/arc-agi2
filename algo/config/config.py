@@ -19,16 +19,9 @@ class Config:
     batch_size: int = 32
     learning_rate: float = 1e-4
     weight_decay: float = 1e-5
-    num_epochs: int = 100
+    num_epochs: int = 1000
     max_grad_norm: float = 1.0
     dropout: float = 0.1
-
-    # Loss function weights
-    l1_weight: float = 1.0
-    l2_weight: float = 0.5
-    partial_credit_weight: float = 0.3
-    partial_credit_max_distance: float = 2.0
-    partial_credit_decay: float = 0.5
 
     # Data paths
     data_dir: str = "data/raw"
@@ -47,6 +40,9 @@ class Config:
     log_dir: str = "logs"
     log_interval: int = 2
     save_interval: int = 10
+
+    # Early stopping
+    early_stopping_patience: int = 50
 
     # Device
     device: str = "cuda" if os.environ.get("CUDA_VISIBLE_DEVICES") else "cpu"
