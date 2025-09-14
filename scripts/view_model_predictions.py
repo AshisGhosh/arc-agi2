@@ -431,10 +431,42 @@ def evaluate_model_on_tasks(
                 # calculate metrics
                 metrics = calculate_accuracy_metrics(predictions, target_output)
 
+                # get the global task index (actual ARC task index)
+                global_task_index = global_task_idx
+                if hasattr(dataset, "dataset") and hasattr(dataset, 'indices'):
+                    # we're using a subset, get the actual task index from the original dataset
+                    global_task_index = dataset.indices[global_task_idx]
+                
+                # extract task id - try multiple approaches
+                task_id = "unknown"
+                
+                # approach 1: from combination_info in batch
+                if "combination_info" in batch:
+                    combo_info = batch["combination_info"]
+                    if isinstance(combo_info, dict):
+                        task_id = combo_info.get("task_id", "unknown")
+                    elif isinstance(combo_info, list) and len(combo_info) > j:
+                        task_id = combo_info[j].get("task_id", "unknown")
+                    elif isinstance(combo_info, list) and len(combo_info) > 0:
+                        task_id = combo_info[0].get("task_id", "unknown")
+                
+                # approach 2: if we have a subset, get task id from original dataset
+                if task_id == "unknown" and hasattr(dataset, "dataset"):
+                    # we're using a subset, get the original dataset
+                    original_dataset = dataset.dataset
+                    if global_task_index < len(original_dataset.tasks):
+                        task_id = original_dataset.tasks[global_task_index]["task_id"]
+                
+                # approach 3: if still unknown, use the global task index as task_id
+                if task_id == "unknown":
+                    task_id = f"task_{global_task_index}"
+
                 # store results
                 results.append(
                     {
-                        "task_idx": global_task_idx,  # Use actual task index
+                        "task_idx": global_task_idx,  # Sequential evaluation index
+                        "global_task_index": global_task_index,  # Actual ARC task index
+                        "task_id": task_id,  # Task ID (filename)
                         "perfect_accuracy": metrics["perfect_accuracy"],
                         "pixel_accuracy": metrics["pixel_accuracy"],
                         "near_miss_accuracy": metrics["near_miss_accuracy"],
@@ -479,10 +511,17 @@ def test_all_combinations(
             # get the task data
             task_data = dataset[task_idx]
 
-            # get all possible combinations for this task
-            task_combinations = underlying_dataset.combinations[
-                task_data["combination_info"]["task_idx"]
-            ]
+            # get the original task index for combinations
+            original_task_index = task_data["combination_info"]["task_idx"]
+            
+            # get the global task index for display (same logic as regular evaluation)
+            global_task_index = task_idx
+            if hasattr(dataset, "dataset") and hasattr(dataset, 'indices'):
+                # we're using a subset, get the actual task index from the original dataset
+                global_task_index = dataset.indices[task_idx]
+
+            # get all possible combinations for this task (use original index)
+            task_combinations = underlying_dataset.combinations[original_task_index]
 
             task_results = []
             for combo_idx, (i, j) in enumerate(task_combinations):
@@ -570,7 +609,8 @@ def test_all_combinations(
 
             results.append(
                 {
-                    "task_idx": task_idx,
+                    "task_idx": task_idx,  # Sequential evaluation index
+                    "global_task_index": global_task_index,  # Actual ARC task index
                     "task_id": task_data["combination_info"]["task_id"],
                     "combinations": task_results,
                     "evaluation_mode": evaluation_mode,
@@ -634,9 +674,9 @@ def main():
 
     if "tasks" in exp_info:
         st.sidebar.write(f"**tasks:** {exp_info['tasks'].get('n_tasks', 'n/a')}")
-        st.sidebar.write(
-            f"**task indices:** {exp_info['tasks'].get('task_indices', [])}"
-        )
+        task_indices = exp_info['tasks'].get('task_indices', [])
+        sorted_indices = sorted(task_indices) if task_indices else []
+        st.sidebar.write(f"**task indices:** {sorted_indices}")
 
     # task set selection
     st.sidebar.subheader("task set selection")
@@ -743,7 +783,8 @@ def main():
         for result in results:
             df_data.append(
                 {
-                    "task": result["task_idx"],
+                    "idx": result["global_task_index"],
+                    "task_id": result["task_id"],
                     "perfect": f"{result['perfect_accuracy']:.3f}",
                     "pixel": f"{result['pixel_accuracy']:.3f}",
                     "near_miss": f"{result['near_miss_accuracy']:.3f}",
@@ -794,7 +835,6 @@ def main():
             # visualize the selected task
             # Extract the correct sample from the batch
             batch = selected_task["batch"]
-            task_idx = selected_task["task_idx"]
             sample_idx = selected_task[
                 "batch_sample_idx"
             ]  # Use stored batch sample index
@@ -833,11 +873,13 @@ def main():
         # create combination results dataframe
         combo_df_data = []
         for task_result in results:
-            task_idx = task_result["task_idx"]  # Use sequential index instead of UUID
+            global_task_index = task_result["global_task_index"]  # Use global task index
+            task_id = task_result["task_id"]  # Use actual task ID
             for combo in task_result["combinations"]:
                 combo_df_data.append(
                     {
-                        "task_id": task_idx,  # Use sequential index for consistency
+                        "idx": global_task_index,  # Global task index
+                        "task_id": task_id,  # Task ID (filename)
                         "combination": f"({combo['pair_indices'][0]}, {combo['pair_indices'][1]})",
                         "perfect": f"{combo['perfect_accuracy']:.3f}",
                         "pixel": f"{combo['pixel_accuracy']:.3f}",
@@ -946,6 +988,7 @@ def main():
         st.subheader("📊 per-task summary")
         task_summary = []
         for task_result in results:
+            global_task_index = task_result["global_task_index"]
             task_id = task_result["task_id"]
             combinations = task_result["combinations"]
             best_perfect = max(combo["perfect_accuracy"] for combo in combinations)
@@ -955,6 +998,7 @@ def main():
 
             task_summary.append(
                 {
+                    "idx": global_task_index,
                     "task_id": task_id,
                     "combinations": len(combinations),
                     "best_perfect": f"{best_perfect:.3f}",

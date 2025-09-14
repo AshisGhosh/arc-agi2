@@ -189,8 +189,9 @@ class OverfitExperiment:
             # log progress
             if epoch % 10 == 0 or epoch < 10:
                 elapsed = time.time() - start_time
+                current_lr = trainer.optimizer.param_groups[0]['lr']
                 print(
-                    f"epoch {epoch:4d}: loss={avg_loss:.6f} (elapsed: {elapsed:.1f}s)"
+                    f"epoch {epoch:4d}: loss={avg_loss:.6f}, lr={current_lr:.2e} (elapsed: {elapsed:.1f}s)"
                 )
 
             # save best model
@@ -520,14 +521,14 @@ def main():
     """main experiment function."""
     parser = argparse.ArgumentParser(description="n-task overfitting experiment")
     parser.add_argument(
-        "--n_tasks", "-n", type=int, default=50, help="number of tasks to overfit on"
+        "--n_tasks", "-n", type=int, default=10, help="number of tasks to overfit on"
     )
     parser.add_argument(
         "--task-indices", type=int, nargs="+", help="specific task indices to use"
     )
-    parser.add_argument("--epochs", type=int, default=1000, help="maximum epochs")
+    parser.add_argument("--epochs", type=int, help="maximum epochs")
     parser.add_argument(
-        "--patience", type=int, default=50, help="early stopping patience"
+        "--patience", type=int, help="early stopping patience"
     )
     parser.add_argument("--experiment-name", type=str, help="experiment name")
     parser.add_argument(
@@ -547,6 +548,11 @@ def main():
     if args.lr:
         config.learning_rate = args.lr
 
+    if args.epochs:
+        config.num_epochs = args.epochs
+    if args.patience:
+        config.early_stopping_patience = args.patience
+
     # set up deterministic training
     config.set_deterministic_training()
 
@@ -555,8 +561,8 @@ def main():
     print(f"  device: {config.device}")
     print(f"  batch size: {config.batch_size}")
     print(f"  learning rate: {config.learning_rate}")
-    print(f"  max epochs: {args.epochs}")
-    print(f"  early stopping patience: {args.patience}")
+    print(f"  max epochs: {config.num_epochs}")
+    print(f"  early stopping patience: {config.early_stopping_patience}")
 
     # create experiment
     experiment = OverfitExperiment(config, args.experiment_name)
@@ -568,7 +574,7 @@ def main():
 
     # train on selected tasks
     checkpoint_path = experiment.train_on_tasks(
-        task_indices, args.epochs, args.patience
+        task_indices, config.num_epochs, config.early_stopping_patience
     )
 
     # evaluate on same tasks

@@ -143,8 +143,15 @@ class ARCDataset(Dataset):
         """Filter tasks with sufficient examples for training."""
         valid_indices = []
         for i, task in enumerate(self.tasks):
-            if len(task["train"]) >= 2:
-                valid_indices.append(i)
+            if self.holdout:
+                # For holdout mode, need at least 3 training examples
+                # (2 for rule latent creation + 1 for holdout + at least 1 remaining for training)
+                if len(task["train"]) >= 3:
+                    valid_indices.append(i)
+            else:
+                # For regular mode, need at least 2 training examples
+                if len(task["train"]) >= 2:
+                    valid_indices.append(i)
         return valid_indices
 
     def __len__(self) -> int:

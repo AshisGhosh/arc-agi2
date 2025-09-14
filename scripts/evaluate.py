@@ -105,7 +105,7 @@ def calculate_perfect_accuracy_foreground(
     # If no foreground pixels in target, check if prediction also has no foreground
     if not target_foreground_mask.any():
         pred_foreground_mask = predictions != background_value
-        return (not pred_foreground_mask.any()).float().item()
+        return (~pred_foreground_mask.any()).float().item()
 
     # Check for exact matches only on foreground pixels
     exact_matches = predictions == target
@@ -142,7 +142,7 @@ def calculate_pixel_accuracy_foreground(
     # If no foreground pixels in target, check if prediction also has no foreground
     if not target_foreground_mask.any():
         pred_foreground_mask = predictions != background_value
-        return (not pred_foreground_mask.any()).float().item()
+        return (~pred_foreground_mask.any()).float().item()
 
     # Calculate pixel-level matches only on foreground pixels
     pixel_matches = predictions == target
@@ -186,7 +186,7 @@ def calculate_near_miss_accuracy_foreground(
     # If no foreground pixels in target, check if prediction also has no foreground
     if not target_foreground_mask.any():
         pred_foreground_mask = predictions != background_value
-        return (not pred_foreground_mask.any()).float().item()
+        return (~pred_foreground_mask.any()).float().item()
 
     # Check if within threshold only on foreground pixels
     near_misses = diff <= threshold

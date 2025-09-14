@@ -19,7 +19,7 @@ class Config:
     batch_size: int = 32
     learning_rate: float = 1e-4
     weight_decay: float = 1e-5
-    num_epochs: int = 1000
+    num_epochs: int = 2000
     max_grad_norm: float = 1.0
     dropout: float = 0.1
 
