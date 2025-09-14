@@ -103,7 +103,12 @@ class OverfitExperiment:
 
     def create_task_subset(self, task_indices: List[int]) -> ARCDataset:
         """create dataset subset with only selected tasks."""
-        full_dataset = ARCDataset(self.config.arc_agi1_dir, self.config, holdout=True)
+        full_dataset = ARCDataset(
+            self.config.arc_agi1_dir,
+            self.config,
+            holdout=True,
+            use_first_combination_only=True,
+        )
         subset = Subset(full_dataset, task_indices)
 
         # wrap in custom dataset class to maintain interface
@@ -517,6 +522,72 @@ class OverfitExperiment:
         return results
 
 
+def evaluate_existing_checkpoint(experiment_dir: str, config: Config):
+    """evaluate an existing checkpoint from an experiment directory."""
+    experiment_path = Path(experiment_dir)
+    if not experiment_path.exists():
+        print(f"experiment directory not found: {experiment_dir}")
+        return
+
+    checkpoint_path = experiment_path / "best_model.pt"
+    if not checkpoint_path.exists():
+        print(f"checkpoint not found: {checkpoint_path}")
+        return
+
+    print(f"evaluating checkpoint: {checkpoint_path}")
+
+    # create experiment instance to use existing evaluation logic
+    experiment = OverfitExperiment(config, experiment_path.name)
+
+    # load the task selection from the experiment
+    task_selection_file = experiment_path / "task_selection.json"
+    if task_selection_file.exists():
+        with open(task_selection_file, "r") as f:
+            task_data = json.load(f)
+        task_indices = task_data.get(
+            "task_indices", list(range(10))
+        )  # fallback to first 10 tasks
+    else:
+        # if no task selection file, evaluate on first 10 tasks
+        task_indices = list(range(10))
+
+    print(f"evaluating on {len(task_indices)} tasks...")
+
+    # use existing evaluation function
+    results = experiment.evaluate_on_tasks(task_indices, str(checkpoint_path))
+
+    # print results
+    print("\nevaluation results:")
+    print(
+        f"  perfect accuracy: {results['perfect_accuracy']:.4f} ({results['perfect_accuracy']*100:.2f}%)"
+    )
+    print(
+        f"  pixel accuracy: {results['pixel_accuracy']:.4f} ({results['pixel_accuracy']*100:.2f}%)"
+    )
+    print(
+        f"  near-miss accuracy: {results['near_miss_accuracy']:.4f} ({results['near_miss_accuracy']*100:.2f}%)"
+    )
+    print(f"  total samples: {results['total_samples']}")
+
+    print("\nforeground results (non-background pixels only):")
+    print(
+        f"  perfect accuracy (foreground): {results['perfect_accuracy_foreground']:.4f} ({results['perfect_accuracy_foreground']*100:.2f}%)"
+    )
+    print(
+        f"  pixel accuracy (foreground): {results['pixel_accuracy_foreground']:.4f} ({results['pixel_accuracy_foreground']*100:.2f}%)"
+    )
+    print(
+        f"  near-miss accuracy (foreground): {results['near_miss_accuracy_foreground']:.4f} ({results['near_miss_accuracy_foreground']*100:.2f}%)"
+    )
+
+    # save results
+    results_file = experiment_path / "evaluation_results.json"
+    with open(results_file, "w") as f:
+        json.dump(results, f, indent=2)
+
+    print(f"\nresults saved to: {results_file}")
+
+
 def main():
     """main experiment function."""
     parser = argparse.ArgumentParser(description="n-task overfitting experiment")
@@ -534,6 +605,11 @@ def main():
     )
     parser.add_argument("--batch-size", type=int, help="override batch size")
     parser.add_argument("--lr", type=float, help="override learning rate")
+    parser.add_argument(
+        "--evaluate",
+        type=str,
+        help="evaluate existing checkpoint (path to experiment directory)",
+    )
 
     args = parser.parse_args()
 
@@ -553,6 +629,11 @@ def main():
 
     # set up deterministic training
     config.set_deterministic_training()
+
+    # handle evaluation mode
+    if args.evaluate:
+        evaluate_existing_checkpoint(args.evaluate, config)
+        return
 
     print(f"overfitting experiment: {args.n_tasks} tasks")
     print("configuration:")

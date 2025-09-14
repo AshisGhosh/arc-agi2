@@ -13,7 +13,7 @@ import json
 
 from algo.config import Config
 from algo.models import SimpleARCModel
-from algo.data import ARCDataset
+from algo.data import ARCDataset, custom_collate_fn
 
 
 def calculate_perfect_accuracy(logits: torch.Tensor, target: torch.Tensor) -> float:
@@ -316,18 +316,24 @@ def main():
     if args.batch_size:
         config.batch_size = args.batch_size
 
+    # Determine data directory
+    data_dir = args.data_dir if args.data_dir else config.arc_agi1_dir
+
     print("Evaluation Configuration:")
     print(f"  Device: {config.device}")
     print(f"  Batch size: {config.batch_size}")
-    print(f"  Data directory: {config.processed_dir}")
+    print(f"  Data directory: {data_dir}")
     print(f"  Checkpoint: {args.checkpoint}")
 
-    # Load dataset
-    dataset = ARCDataset(config.processed_dir, config)
+    # Load dataset - use the correct data directory
+    dataset = ARCDataset(
+        data_dir, config, holdout=True, use_first_combination_only=True
+    )
     data_loader = DataLoader(
         dataset,
         batch_size=config.batch_size,
         shuffle=False,
+        collate_fn=custom_collate_fn,
         num_workers=2,
         pin_memory=True,
     )

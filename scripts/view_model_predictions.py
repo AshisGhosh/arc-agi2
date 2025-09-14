@@ -119,8 +119,9 @@ def extract_sample_from_batch(batch, sample_idx, evaluation_mode="test"):
             "output": batch["holdout_outputs"][sample_idx],
         }
 
-    # Extract training examples
-    num_train = batch["num_train"][sample_idx].item()
+    # Extract training examples - show first 2 examples from all_train_inputs
+    num_train = min(2, batch["all_train_inputs"].shape[1])
+
     for i in range(num_train):
         sample["train_examples"].append(
             {
@@ -307,7 +308,6 @@ def load_model_checkpoint(checkpoint_path: str, config: Config) -> SimpleARCMode
     """load model from checkpoint."""
     model = SimpleARCModel(config)
 
-    # load checkpoint
     checkpoint = torch.load(
         checkpoint_path, map_location=config.device, weights_only=False
     )
@@ -366,21 +366,17 @@ def calculate_accuracy_metrics(
 ) -> Dict[str, float]:
     """calculate accuracy metrics for predictions."""
     with torch.no_grad():
-        # add batch dimension if needed
         if predictions.dim() == 2:
             predictions = predictions.unsqueeze(0)
         if targets.dim() == 2:
             targets = targets.unsqueeze(0)
 
-        # perfect accuracy (exact match)
         perfect_matches = (predictions == targets).all(dim=(1, 2))
         perfect_accuracy = perfect_matches.float().mean().item()
 
-        # pixel accuracy
         pixel_matches = predictions == targets
         pixel_accuracy = pixel_matches.float().mean().item()
 
-        # near miss accuracy (within 1 pixel)
         diff = torch.abs(predictions.float() - targets.float())
         near_miss = (diff <= 1.0).all(dim=(1, 2))
         near_miss_accuracy = near_miss.float().mean().item()
@@ -403,6 +399,10 @@ def evaluate_model_on_tasks(
     noise_std=1.0,
     noise_range=1.0,
     noise_ratio=1.0,
+    enable_color_augmentation=False,
+    augmentation_variants=1,
+    preserve_background=True,
+    augmentation_seed=42,
 ):
     """evaluate model on all tasks in dataset and return results.
 
@@ -417,15 +417,50 @@ def evaluate_model_on_tasks(
         noise_std: Standard deviation for gaussian noise
         noise_range: Range for uniform noise
         noise_ratio: Fraction of rule latent to replace with noise
+        enable_color_augmentation: Whether to enable color relabeling
+        augmentation_variants: Number of augmented versions per example
+        preserve_background: Whether to preserve background color
+        augmentation_seed: Random seed for augmentation
     """
     from torch.utils.data import DataLoader
 
     results = []
 
+    # Create augmented dataset if color augmentation is enabled
+    if enable_color_augmentation:
+        # Create a copy of the config with augmentation enabled
+        augmented_config = Config()
+        augmented_config.__dict__.update(config.__dict__)  # Copy all config values
+        augmented_config.use_color_relabeling = True
+        augmented_config.augmentation_variants = augmentation_variants
+        augmented_config.preserve_background = preserve_background
+        augmented_config.random_seed = augmentation_seed
+
+        # Create augmented dataset
+        from algo.data import ARCDataset
+
+        augmented_dataset = ARCDataset(
+            config.arc_agi1_dir,
+            augmented_config,
+            holdout=True,
+            use_first_combination_only=True,
+        )
+
+        # If we're using a subset, create the same subset for augmented dataset
+        if hasattr(dataset, "dataset"):
+            # Get the original indices
+            original_indices = dataset.indices
+            augmented_dataset = Subset(augmented_dataset, original_indices)
+
+        dataset = augmented_dataset
+
     # Create DataLoader with custom collate function
     dataloader = DataLoader(
         dataset, batch_size=32, shuffle=False, collate_fn=custom_collate_fn
     )
+
+    # Set deterministic training for reproducible results
+    config.set_deterministic_training()
 
     with torch.no_grad():
         global_task_idx = 0  # Track actual task index across all batches
@@ -543,6 +578,10 @@ def test_all_combinations(
     noise_std=1.0,
     noise_range=1.0,
     noise_ratio=1.0,
+    enable_color_augmentation=False,
+    augmentation_variants=1,
+    preserve_background=True,
+    augmentation_seed=42,
 ):
     """test all possible combinations of train examples for rule latent creation.
 
@@ -557,8 +596,43 @@ def test_all_combinations(
         noise_std: Standard deviation for gaussian noise
         noise_range: Range for uniform noise
         noise_ratio: Fraction of rule latent to replace with noise
+        enable_color_augmentation: Whether to enable color relabeling
+        augmentation_variants: Number of augmented versions per example
+        preserve_background: Whether to preserve background color
+        augmentation_seed: Random seed for augmentation
     """
+    # Set deterministic training for reproducible results
+    config.set_deterministic_training()
+
     results = []
+
+    # Create augmented dataset if color augmentation is enabled
+    if enable_color_augmentation:
+        # Create a copy of the config with augmentation enabled
+        augmented_config = Config()
+        augmented_config.__dict__.update(config.__dict__)  # Copy all config values
+        augmented_config.use_color_relabeling = True
+        augmented_config.augmentation_variants = augmentation_variants
+        augmented_config.preserve_background = preserve_background
+        augmented_config.random_seed = augmentation_seed
+
+        # Create augmented dataset
+        from algo.data import ARCDataset
+
+        augmented_dataset = ARCDataset(
+            config.arc_agi1_dir,
+            augmented_config,
+            holdout=True,
+            use_first_combination_only=True,
+        )
+
+        # If we're using a subset, create the same subset for augmented dataset
+        if hasattr(dataset, "dataset"):
+            # Get the original indices
+            original_indices = dataset.indices
+            augmented_dataset = Subset(augmented_dataset, original_indices)
+
+        dataset = augmented_dataset
 
     # Get the underlying dataset if it's a Subset
     if hasattr(dataset, "dataset"):
@@ -594,8 +668,13 @@ def test_all_combinations(
                 raw_task = underlying_dataset.tasks[raw_task_idx]
 
                 # Get the specific training examples for this combination
-                example1 = raw_task["train"][i]
-                example2 = raw_task["train"][j]
+                # Handle both original and augmented examples
+                all_examples = raw_task["train"]
+                if "augmented_train" in raw_task:
+                    all_examples = raw_task["train"] + raw_task["augmented_train"]
+
+                example1 = all_examples[i]
+                example2 = all_examples[j]
 
                 # Preprocess for ResNet encoder
                 from algo.data import preprocess_example_image
@@ -694,10 +773,7 @@ def main():
     st.title("🤖 arc model predictions")
     st.markdown("visualize model predictions from overfitting experiments")
 
-    # sidebar controls
     st.sidebar.header("experiment controls")
-
-    # get available experiments
     logs_dir = Path("logs")
     if not logs_dir.exists():
         st.error("❌ logs directory not found")
@@ -707,8 +783,6 @@ def main():
     if not experiments:
         st.error("❌ no overfitting experiments found")
         st.stop()
-
-    # experiment selection
     experiment_names = [name for name, _ in experiments]
     selected_exp_name = st.sidebar.selectbox(
         "select experiment", experiment_names, index=0
@@ -717,10 +791,7 @@ def main():
         path for name, path in experiments if name == selected_exp_name
     )
 
-    # load experiment info
     exp_info = load_experiment_info(selected_exp_path)
-
-    # display experiment info
     st.sidebar.subheader("experiment info")
     if "training" in exp_info:
         st.sidebar.write(
@@ -747,7 +818,6 @@ def main():
         sorted_indices = sorted(task_indices) if task_indices else []
         st.sidebar.write(f"**task indices:** {sorted_indices}")
 
-    # task set selection
     st.sidebar.subheader("task set selection")
     task_set = st.sidebar.radio(
         "evaluate on:",
@@ -755,7 +825,6 @@ def main():
         index=0,
     )
 
-    # load model
     model_path = selected_exp_path / "best_model.pt"
     if not model_path.exists():
         st.error(f"❌ model checkpoint not found: {model_path}")
@@ -764,8 +833,6 @@ def main():
     try:
         config = Config()
         model = SimpleARCModel(config)
-
-        # load checkpoint with weights_only=False for compatibility
         checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
         model.load_state_dict(checkpoint["model_state_dict"])
         model.eval()
@@ -774,10 +841,10 @@ def main():
         st.error(f"❌ failed to load model: {e}")
         st.stop()
 
-    # load dataset
-    dataset = ARCDataset(config.arc_agi1_dir, config, holdout=True)
-
-    # create task subset based on selection
+    config.use_color_relabeling = False
+    dataset = ARCDataset(
+        config.arc_agi1_dir, config, holdout=True, use_first_combination_only=True
+    )
     if task_set == "overfit tasks only":
         if "tasks" in exp_info and "task_indices" in exp_info["tasks"]:
             task_indices = exp_info["tasks"]["task_indices"]
@@ -789,7 +856,6 @@ def main():
     else:
         st.sidebar.write(f"**evaluating on all {len(dataset)} test tasks**")
 
-    # evaluation mode selection
     st.sidebar.subheader("evaluation options")
     evaluation_mode = st.sidebar.selectbox(
         "evaluation mode",
@@ -798,14 +864,12 @@ def main():
         help="test: evaluate on test targets, holdout: evaluate on holdout targets",
     )
 
-    # combination testing option
     test_combinations = st.sidebar.checkbox(
         "test all combinations",
         value=False,
         help="test all possible combinations of train examples for rule latent creation",
     )
 
-    # rule latent noise injection
     st.sidebar.subheader("rule latent analysis")
     inject_noise = st.sidebar.checkbox(
         "inject noise into rule latent",
@@ -813,7 +877,6 @@ def main():
         help="replace rule latent with noise to test if it's actually useful",
     )
 
-    # initialize noise parameters with default values
     noise_type = "gaussian"
     noise_std = 1.0
     noise_range = 1.0
@@ -855,15 +918,48 @@ def main():
             help="fraction of rule latent to replace with noise (1.0 = full replacement)",
         )
 
-    # evaluation button
+    st.sidebar.subheader("color augmentation")
+    enable_color_augmentation = st.sidebar.checkbox(
+        "enable color relabeling",
+        value=False,
+        help="apply color relabeling to test model robustness",
+    )
+
+    augmentation_variants = 1
+    preserve_background = True
+    augmentation_seed = 42
+
+    if enable_color_augmentation:
+        augmentation_variants = st.sidebar.slider(
+            "augmentation variants",
+            min_value=1,
+            max_value=5,
+            value=1,
+            step=1,
+            help="number of color-relabeled versions per example",
+        )
+
+        preserve_background = st.sidebar.checkbox(
+            "preserve background",
+            value=True,
+            help="keep background color (0) unchanged during relabeling",
+        )
+
+        augmentation_seed = st.sidebar.number_input(
+            "augmentation seed",
+            min_value=0,
+            max_value=10000,
+            value=42,
+            step=1,
+            help="random seed for reproducible color relabeling",
+        )
+
     if st.sidebar.button("🚀 evaluate model", type="primary"):
-        # clear previous results when switching modes
         if "evaluation_results" in st.session_state:
             del st.session_state.evaluation_results
         if "combination_results" in st.session_state:
             del st.session_state.combination_results
 
-        # create progress bar
         progress_bar = st.progress(0)
         status_text = st.empty()
 
@@ -880,6 +976,10 @@ def main():
                 noise_std,
                 noise_range,
                 noise_ratio,
+                enable_color_augmentation,
+                augmentation_variants,
+                preserve_background,
+                augmentation_seed,
             )
             st.session_state.combination_results = results
         else:
@@ -895,6 +995,10 @@ def main():
                 noise_std,
                 noise_range,
                 noise_ratio,
+                enable_color_augmentation,
+                augmentation_variants,
+                preserve_background,
+                augmentation_seed,
             )
             st.session_state.evaluation_results = results
 
@@ -906,14 +1010,15 @@ def main():
         st.session_state.noise_std = noise_std
         st.session_state.noise_range = noise_range
         st.session_state.noise_ratio = noise_ratio
+        st.session_state.enable_color_augmentation = enable_color_augmentation
+        st.session_state.augmentation_variants = augmentation_variants
+        st.session_state.preserve_background = preserve_background
+        st.session_state.augmentation_seed = augmentation_seed
 
         progress_bar.empty()
         status_text.text("evaluation complete!")
-
-        # auto-rerun to show results
         st.rerun()
 
-    # display results if available
     if "evaluation_results" in st.session_state:
         results = st.session_state.evaluation_results
         current_task_set = st.session_state.get("task_set", "unknown")
@@ -1067,16 +1172,27 @@ def main():
         combo_df = pd.DataFrame(combo_df_data)
 
         # display summary stats
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
         with col1:
             st.metric("total combinations", len(combo_df_data))
         with col2:
             perfect_count = sum(1 for r in combo_df_data if float(r["perfect"]) > 0.99)
             st.metric("perfect combinations", f"{perfect_count}/{len(combo_df_data)}")
         with col3:
+            # Calculate perfect tasks (tasks with at least one perfect combination)
+            perfect_tasks = set()
+            for task_result in results:
+                has_perfect = any(
+                    combo["perfect_accuracy"] > 0.99
+                    for combo in task_result["combinations"]
+                )
+                if has_perfect:
+                    perfect_tasks.add(task_result["task_id"])
+            st.metric("perfect tasks", f"{len(perfect_tasks)}/{len(results)}")
+        with col4:
             avg_pixel = np.mean([float(r["pixel"]) for r in combo_df_data])
             st.metric("avg pixel accuracy", f"{avg_pixel:.3f}")
-        with col4:
+        with col5:
             avg_near_miss = np.mean([float(r["near_miss"]) for r in combo_df_data])
             st.metric("avg near-miss", f"{avg_near_miss:.3f}")
 

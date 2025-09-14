@@ -6,6 +6,7 @@ import json
 import itertools
 from ..config import Config
 from .preprocessing import preprocess_example_image, preprocess_target_image
+from .augmentation import generate_augmented_examples
 
 
 def custom_collate_fn(batch):
@@ -90,7 +91,13 @@ class ARCDataset(Dataset):
     for rule latent creation. Supports holdout validation mode.
     """
 
-    def __init__(self, raw_data_dir: str, config: Config, holdout: bool = False):
+    def __init__(
+        self,
+        raw_data_dir: str,
+        config: Config,
+        holdout: bool = False,
+        use_first_combination_only: bool = False,
+    ):
         """
         Initialize dataset.
 
@@ -98,10 +105,12 @@ class ARCDataset(Dataset):
             raw_data_dir: Directory containing raw JSON task files
             config: Configuration object
             holdout: If True, hold out last train example for validation
+            use_first_combination_only: If True, always use first combination (for evaluation)
         """
         self.raw_data_dir = Path(raw_data_dir)
         self.config = config
         self.holdout = holdout
+        self.use_first_combination_only = use_first_combination_only
 
         # Load raw tasks
         self.tasks = self._load_raw_tasks()
@@ -111,6 +120,9 @@ class ARCDataset(Dataset):
 
         # Filter tasks with sufficient examples
         self.valid_tasks = self._filter_valid_tasks()
+
+        # per-task cycling counters
+        self.task_cycle_counters = {i: 0 for i in self.valid_tasks}
 
     def _load_raw_tasks(self) -> List[Dict[str, Any]]:
         """Load raw JSON task files."""
@@ -132,11 +144,35 @@ class ARCDataset(Dataset):
     def _generate_combinations(self) -> List[List[Tuple[int, int]]]:
         """Generate all possible 2-combinations for rule latent creation."""
         combinations = []
-        for task in self.tasks:
-            # Use first 4 train examples for combinations (or all if < 4)
-            num_examples = min(4, len(task["train"]))
-            task_combinations = list(itertools.combinations(range(num_examples), 2))
-            combinations.append(task_combinations)
+
+        for task_idx, task in enumerate(self.tasks):
+            # Get original examples
+            original_examples = task["train"]
+
+            # Generate augmented examples if enabled
+            if self.config.use_color_relabeling:
+                augmented_examples = generate_augmented_examples(
+                    original_examples,
+                    num_variants=self.config.augmentation_variants,
+                    preserve_background=self.config.preserve_background,
+                    seed=self.config.random_seed + task_idx,  # Different seed per task
+                )
+                # Store augmented examples in task
+                task["augmented_train"] = augmented_examples
+                total_examples = len(original_examples) + len(augmented_examples)
+            else:
+                total_examples = len(original_examples)
+
+            # Generate combinations from all examples
+            if total_examples >= 2:
+                # Use all available examples for combinations
+                task_combinations = list(
+                    itertools.combinations(range(total_examples), 2)
+                )
+                combinations.append(task_combinations)
+            else:
+                combinations.append([])
+
         return combinations
 
     def _filter_valid_tasks(self) -> List[int]:
@@ -198,21 +234,30 @@ class ARCDataset(Dataset):
         combination_idx = self._get_combination_idx(idx)
         pair_indices = task_combinations[combination_idx]
 
+        # Get all available examples (original + augmented)
+        all_examples = task["train"]
+        if self.config.use_color_relabeling and "augmented_train" in task:
+            all_examples = task["train"] + task["augmented_train"]
+
         # Rule latent inputs (2 examples) - preprocess for ResNet
         rule_latent_inputs = [
-            self._preprocess_example(task["train"][pair_indices[0]]),
-            self._preprocess_example(task["train"][pair_indices[1]]),
+            self._preprocess_example(all_examples[pair_indices[0]]),
+            self._preprocess_example(all_examples[pair_indices[1]]),
         ]
 
         # Holdout target (if enabled and available)
         holdout_target = None
-        train_examples_to_use = task["train"]
+        train_examples_to_use = all_examples  # Use all examples (original + augmented)
         if self.holdout and len(task["train"]) > 2:
+            # For holdout, use the last original train example (not augmented)
             holdout_target = self._preprocess_target(
                 task["train"][-1]
-            )  # Last train example
-            # Remove holdout from train examples to use
+            )  # Last original train example
+            # Remove holdout from original train examples to use
             train_examples_to_use = task["train"][:-1]
+            # Add augmented examples if available
+            if self.config.use_color_relabeling and "augmented_train" in task:
+                train_examples_to_use = train_examples_to_use + task["augmented_train"]
 
         # Training targets (all available examples) - preprocess appropriately
         training_targets = []
@@ -238,4 +283,14 @@ class ARCDataset(Dataset):
         """Get combination index for this task (cycles through combinations)."""
         task_idx = self.valid_tasks[idx]
         task_combinations = self.combinations[task_idx]
-        return idx % len(task_combinations)
+
+        if self.use_first_combination_only:
+            # For evaluation, always use first combination
+            return 0
+        else:
+            # For training, cycle through combinations
+            combination_idx = self.task_cycle_counters[task_idx] % len(
+                task_combinations
+            )
+            self.task_cycle_counters[task_idx] += 1
+            return combination_idx

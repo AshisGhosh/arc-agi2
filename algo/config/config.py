@@ -51,6 +51,11 @@ class Config:
     random_seed: int = 42
     deterministic: bool = True
 
+    # Color augmentation
+    use_color_relabeling: bool = False
+    augmentation_variants: int = 1  # Number of augmented versions per original example
+    preserve_background: bool = True  # Keep background color (0) unchanged
+
     # Color palette (ARC official 10 colors)
     color_palette: List[List[float]] = None
 
