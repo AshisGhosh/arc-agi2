@@ -2,4 +2,5 @@
 *.pt
 
 data/
+!algo/data/
 logs/
