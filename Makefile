@@ -10,6 +10,7 @@ help:
 	@echo "  make preprocess - run data preprocessing"
 	@echo "  make train      - run training"
 	@echo "  make evaluate   - run evaluation"
+	@echo "  make view       - launch dataset viewer"
 	@echo "  make clean      - clean up containers and images"
 	@echo "  make lint       - run linting"
 
@@ -35,12 +36,20 @@ preprocess:
 	docker compose exec hrm-training python scripts/preprocess.py
 
 # run training
+DATA ?= arc1
 train:
-	docker compose exec hrm-training python scripts/train.py
+	docker compose exec hrm-training python scripts/train.py $(DATA)
+
+train-overfit:
+	docker compose exec hrm-training python scripts/overfit_experiment.py
 
 # run evaluation
 evaluate:
 	docker compose exec hrm-training python scripts/evaluate.py
+
+# launch dataset viewer
+view:
+	docker compose exec hrm-training streamlit run scripts/view_dataset.py --server.port 8502 --server.address 0.0.0.0
 
 # clean up
 clean:
@@ -48,5 +57,5 @@ clean:
 	docker system prune -f 
 
 lint:
-	ruff check --fix .
-	ruff format
+	ruff check --fix . --exclude HRM
+	ruff format --exclude HRM
