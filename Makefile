@@ -40,6 +40,9 @@ DATA ?= arc1
 train:
 	docker compose exec hrm-training python scripts/train.py $(DATA)
 
+train-overfit:
+	docker compose exec hrm-training python scripts/overfit_experiment.py
+
 # run evaluation
 evaluate:
 	docker compose exec hrm-training python scripts/evaluate.py

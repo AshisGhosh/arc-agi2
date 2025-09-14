@@ -1,6 +1,9 @@
 from dataclasses import dataclass
 from typing import Tuple, List
 import os
+import torch
+import random
+import numpy as np
 
 
 @dataclass
@@ -48,6 +51,10 @@ class Config:
     # Device
     device: str = "cuda" if os.environ.get("CUDA_VISIBLE_DEVICES") else "cpu"
 
+    # Deterministic training
+    random_seed: int = 42
+    deterministic: bool = True
+
     # Color palette (ARC official 10 colors)
     color_palette: List[List[float]] = None
 
@@ -66,3 +73,24 @@ class Config:
                 [0.498, 0.859, 1.0],  # 8: Teal (#7FDBFF)
                 [0.529, 0.047, 0.145],  # 9: Brown (#870C25)
             ]
+
+    def set_deterministic_training(self):
+        """Set up deterministic training for reproducible results."""
+        if self.deterministic:
+            # set random seeds
+            random.seed(self.random_seed)
+            np.random.seed(self.random_seed)
+            torch.manual_seed(self.random_seed)
+
+            # for cuda
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed(self.random_seed)
+                torch.cuda.manual_seed_all(self.random_seed)
+
+            # set deterministic algorithms
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+
+            # set environment variable for additional determinism
+            os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+            torch.use_deterministic_algorithms(True, warn_only=True)

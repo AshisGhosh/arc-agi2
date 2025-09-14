@@ -93,6 +93,9 @@ def main():
     if args.lr:
         config.learning_rate = args.lr
 
+    # Set up deterministic training
+    config.set_deterministic_training()
+
     # Map dataset argument to config value
     dataset_mapping = {"arc1": "arc_agi1", "arc2": "arc_agi2"}
     config.training_dataset = dataset_mapping[args.dataset]
