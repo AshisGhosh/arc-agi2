@@ -335,6 +335,32 @@ def get_available_experiments(logs_dir: Path) -> List[Tuple[str, Path]]:
     return experiments
 
 
+def generate_noise_latent(
+    original_latent, noise_type, noise_std=None, noise_range=None, noise_ratio=1.0
+):
+    """generate noise to replace part or all of the rule latent."""
+    if noise_ratio == 0.0:
+        return original_latent
+
+    # generate noise based on type
+    if noise_type == "gaussian":
+        noise = torch.randn_like(original_latent) * noise_std
+    elif noise_type == "uniform":
+        noise = torch.rand_like(original_latent) * 2 * noise_range - noise_range
+    elif noise_type == "zeros":
+        noise = torch.zeros_like(original_latent)
+    elif noise_type == "ones":
+        noise = torch.ones_like(original_latent)
+    else:
+        raise ValueError(f"unknown noise type: {noise_type}")
+
+    # mix original and noise based on ratio
+    if noise_ratio == 1.0:
+        return noise
+    else:
+        return (1 - noise_ratio) * original_latent + noise_ratio * noise
+
+
 def calculate_accuracy_metrics(
     predictions: torch.Tensor, targets: torch.Tensor
 ) -> Dict[str, float]:
@@ -367,7 +393,16 @@ def calculate_accuracy_metrics(
 
 
 def evaluate_model_on_tasks(
-    model, dataset, config, evaluation_mode="test", progress_bar=None
+    model,
+    dataset,
+    config,
+    evaluation_mode="test",
+    progress_bar=None,
+    inject_noise=False,
+    noise_type="gaussian",
+    noise_std=1.0,
+    noise_range=1.0,
+    noise_ratio=1.0,
 ):
     """evaluate model on all tasks in dataset and return results.
 
@@ -377,6 +412,11 @@ def evaluate_model_on_tasks(
         config: Configuration object
         evaluation_mode: "test" for test targets, "holdout" for holdout targets
         progress_bar: Streamlit progress bar
+        inject_noise: Whether to inject noise into rule latent
+        noise_type: Type of noise ("gaussian", "uniform", "zeros", "ones")
+        noise_std: Standard deviation for gaussian noise
+        noise_range: Range for uniform noise
+        noise_ratio: Fraction of rule latent to replace with noise
     """
     from torch.utils.data import DataLoader
 
@@ -399,6 +439,15 @@ def evaluate_model_on_tasks(
                 batch["all_train_inputs"],
                 batch["num_train"],
             )
+
+            # inject noise into rule latents if requested
+            if inject_noise:
+                for j in range(outputs["rule_latents"].size(0)):
+                    original_latent = outputs["rule_latents"][j : j + 1]
+                    noisy_latent = generate_noise_latent(
+                        original_latent, noise_type, noise_std, noise_range, noise_ratio
+                    )
+                    outputs["rule_latents"][j : j + 1] = noisy_latent
 
             # process each task in the batch
             for j in range(batch["rule_latent_inputs"].size(0)):
@@ -433,13 +482,13 @@ def evaluate_model_on_tasks(
 
                 # get the global task index (actual ARC task index)
                 global_task_index = global_task_idx
-                if hasattr(dataset, "dataset") and hasattr(dataset, 'indices'):
+                if hasattr(dataset, "dataset") and hasattr(dataset, "indices"):
                     # we're using a subset, get the actual task index from the original dataset
                     global_task_index = dataset.indices[global_task_idx]
-                
+
                 # extract task id - try multiple approaches
                 task_id = "unknown"
-                
+
                 # approach 1: from combination_info in batch
                 if "combination_info" in batch:
                     combo_info = batch["combination_info"]
@@ -449,14 +498,14 @@ def evaluate_model_on_tasks(
                         task_id = combo_info[j].get("task_id", "unknown")
                     elif isinstance(combo_info, list) and len(combo_info) > 0:
                         task_id = combo_info[0].get("task_id", "unknown")
-                
+
                 # approach 2: if we have a subset, get task id from original dataset
                 if task_id == "unknown" and hasattr(dataset, "dataset"):
                     # we're using a subset, get the original dataset
                     original_dataset = dataset.dataset
                     if global_task_index < len(original_dataset.tasks):
                         task_id = original_dataset.tasks[global_task_index]["task_id"]
-                
+
                 # approach 3: if still unknown, use the global task index as task_id
                 if task_id == "unknown":
                     task_id = f"task_{global_task_index}"
@@ -484,7 +533,16 @@ def evaluate_model_on_tasks(
 
 
 def test_all_combinations(
-    model, dataset, config, evaluation_mode="test", progress_bar=None
+    model,
+    dataset,
+    config,
+    evaluation_mode="test",
+    progress_bar=None,
+    inject_noise=False,
+    noise_type="gaussian",
+    noise_std=1.0,
+    noise_range=1.0,
+    noise_ratio=1.0,
 ):
     """test all possible combinations of train examples for rule latent creation.
 
@@ -494,6 +552,11 @@ def test_all_combinations(
         config: Configuration object
         evaluation_mode: "test" for test targets, "holdout" for holdout targets
         progress_bar: Streamlit progress bar
+        inject_noise: Whether to inject noise into rule latent
+        noise_type: Type of noise ("gaussian", "uniform", "zeros", "ones")
+        noise_std: Standard deviation for gaussian noise
+        noise_range: Range for uniform noise
+        noise_ratio: Fraction of rule latent to replace with noise
     """
     results = []
 
@@ -513,10 +576,10 @@ def test_all_combinations(
 
             # get the original task index for combinations
             original_task_index = task_data["combination_info"]["task_idx"]
-            
+
             # get the global task index for display (same logic as regular evaluation)
             global_task_index = task_idx
-            if hasattr(dataset, "dataset") and hasattr(dataset, 'indices'):
+            if hasattr(dataset, "dataset") and hasattr(dataset, "indices"):
                 # we're using a subset, get the actual task index from the original dataset
                 global_task_index = dataset.indices[task_idx]
 
@@ -553,6 +616,12 @@ def test_all_combinations(
                 rule_latent = model.encoder(
                     example1_input, example1_output, example2_input, example2_output
                 )
+
+                # inject noise into rule latent if requested
+                if inject_noise:
+                    rule_latent = generate_noise_latent(
+                        rule_latent, noise_type, noise_std, noise_range, noise_ratio
+                    )
 
                 # evaluate on target
                 if evaluation_mode == "test":
@@ -674,7 +743,7 @@ def main():
 
     if "tasks" in exp_info:
         st.sidebar.write(f"**tasks:** {exp_info['tasks'].get('n_tasks', 'n/a')}")
-        task_indices = exp_info['tasks'].get('task_indices', [])
+        task_indices = exp_info["tasks"].get("task_indices", [])
         sorted_indices = sorted(task_indices) if task_indices else []
         st.sidebar.write(f"**task indices:** {sorted_indices}")
 
@@ -736,6 +805,56 @@ def main():
         help="test all possible combinations of train examples for rule latent creation",
     )
 
+    # rule latent noise injection
+    st.sidebar.subheader("rule latent analysis")
+    inject_noise = st.sidebar.checkbox(
+        "inject noise into rule latent",
+        value=False,
+        help="replace rule latent with noise to test if it's actually useful",
+    )
+
+    # initialize noise parameters with default values
+    noise_type = "gaussian"
+    noise_std = 1.0
+    noise_range = 1.0
+    noise_ratio = 1.0
+
+    if inject_noise:
+        noise_type = st.sidebar.selectbox(
+            "noise type",
+            ["gaussian", "uniform", "zeros", "ones"],
+            index=0,
+            help="type of noise to inject",
+        )
+
+        if noise_type == "gaussian":
+            noise_std = st.sidebar.slider(
+                "noise std",
+                min_value=0.1,
+                max_value=2.0,
+                value=1.0,
+                step=0.1,
+                help="standard deviation for gaussian noise",
+            )
+        elif noise_type == "uniform":
+            noise_range = st.sidebar.slider(
+                "noise range",
+                min_value=0.1,
+                max_value=2.0,
+                value=1.0,
+                step=0.1,
+                help="range for uniform noise [-range, +range]",
+            )
+
+        noise_ratio = st.sidebar.slider(
+            "noise ratio",
+            min_value=0.0,
+            max_value=1.0,
+            value=1.0,
+            step=0.1,
+            help="fraction of rule latent to replace with noise (1.0 = full replacement)",
+        )
+
     # evaluation button
     if st.sidebar.button("🚀 evaluate model", type="primary"):
         # clear previous results when switching modes
@@ -751,19 +870,42 @@ def main():
         if test_combinations:
             status_text.text("testing all combinations...")
             results = test_all_combinations(
-                model, dataset, config, evaluation_mode, progress_bar
+                model,
+                dataset,
+                config,
+                evaluation_mode,
+                progress_bar,
+                inject_noise,
+                noise_type,
+                noise_std,
+                noise_range,
+                noise_ratio,
             )
             st.session_state.combination_results = results
         else:
             status_text.text("evaluating model on tasks...")
             results = evaluate_model_on_tasks(
-                model, dataset, config, evaluation_mode, progress_bar
+                model,
+                dataset,
+                config,
+                evaluation_mode,
+                progress_bar,
+                inject_noise,
+                noise_type,
+                noise_std,
+                noise_range,
+                noise_ratio,
             )
             st.session_state.evaluation_results = results
 
         st.session_state.task_set = task_set
         st.session_state.evaluation_mode = evaluation_mode
         st.session_state.test_combinations = test_combinations
+        st.session_state.inject_noise = inject_noise
+        st.session_state.noise_type = noise_type
+        st.session_state.noise_std = noise_std
+        st.session_state.noise_range = noise_range
+        st.session_state.noise_ratio = noise_ratio
 
         progress_bar.empty()
         status_text.text("evaluation complete!")
@@ -776,7 +918,21 @@ def main():
         results = st.session_state.evaluation_results
         current_task_set = st.session_state.get("task_set", "unknown")
 
-        st.subheader(f"📊 evaluation results ({current_task_set})")
+        # show noise info if applicable
+        noise_info = ""
+        if st.session_state.get("inject_noise", False):
+            noise_type = st.session_state.get("noise_type", "gaussian")
+            noise_ratio = st.session_state.get("noise_ratio", 1.0)
+            if noise_type == "gaussian":
+                noise_std = st.session_state.get("noise_std", 1.0)
+                noise_info = f" (noise: {noise_type}, std={noise_std:.1f}, ratio={noise_ratio:.1f})"
+            elif noise_type == "uniform":
+                noise_range = st.session_state.get("noise_range", 1.0)
+                noise_info = f" (noise: {noise_type}, range={noise_range:.1f}, ratio={noise_ratio:.1f})"
+            else:
+                noise_info = f" (noise: {noise_type}, ratio={noise_ratio:.1f})"
+
+        st.subheader(f"📊 evaluation results ({current_task_set}){noise_info}")
 
         # create results dataframe
         df_data = []
@@ -866,14 +1022,30 @@ def main():
         current_task_set = st.session_state.get("task_set", "unknown")
         evaluation_mode = st.session_state.get("evaluation_mode", "test")
 
+        # show noise info if applicable
+        noise_info = ""
+        if st.session_state.get("inject_noise", False):
+            noise_type = st.session_state.get("noise_type", "gaussian")
+            noise_ratio = st.session_state.get("noise_ratio", 1.0)
+            if noise_type == "gaussian":
+                noise_std = st.session_state.get("noise_std", 1.0)
+                noise_info = f" (noise: {noise_type}, std={noise_std:.1f}, ratio={noise_ratio:.1f})"
+            elif noise_type == "uniform":
+                noise_range = st.session_state.get("noise_range", 1.0)
+                noise_info = f" (noise: {noise_type}, range={noise_range:.1f}, ratio={noise_ratio:.1f})"
+            else:
+                noise_info = f" (noise: {noise_type}, ratio={noise_ratio:.1f})"
+
         st.subheader(
-            f"🔄 combination test results ({current_task_set}) - {evaluation_mode} mode"
+            f"🔄 combination test results ({current_task_set}) - {evaluation_mode} mode{noise_info}"
         )
 
         # create combination results dataframe
         combo_df_data = []
         for task_result in results:
-            global_task_index = task_result["global_task_index"]  # Use global task index
+            global_task_index = task_result[
+                "global_task_index"
+            ]  # Use global task index
             task_id = task_result["task_id"]  # Use actual task ID
             for combo in task_result["combinations"]:
                 combo_df_data.append(

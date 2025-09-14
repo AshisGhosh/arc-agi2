@@ -189,7 +189,7 @@ class OverfitExperiment:
             # log progress
             if epoch % 10 == 0 or epoch < 10:
                 elapsed = time.time() - start_time
-                current_lr = trainer.optimizer.param_groups[0]['lr']
+                current_lr = trainer.optimizer.param_groups[0]["lr"]
                 print(
                     f"epoch {epoch:4d}: loss={avg_loss:.6f}, lr={current_lr:.2e} (elapsed: {elapsed:.1f}s)"
                 )
@@ -527,9 +527,7 @@ def main():
         "--task-indices", type=int, nargs="+", help="specific task indices to use"
     )
     parser.add_argument("--epochs", type=int, help="maximum epochs")
-    parser.add_argument(
-        "--patience", type=int, help="early stopping patience"
-    )
+    parser.add_argument("--patience", type=int, help="early stopping patience")
     parser.add_argument("--experiment-name", type=str, help="experiment name")
     parser.add_argument(
         "--config", type=str, default="config.yaml", help="config file path"
