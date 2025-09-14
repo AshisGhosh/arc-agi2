@@ -65,46 +65,45 @@ def filter_tasks_with_examples(
     return filtered_tasks
 
 
-def preprocess_task(task: Dict[str, Any], config: Config) -> Dict[str, torch.Tensor]:
+def preprocess_task(task: Dict[str, Any], config: Config) -> Dict[str, Any]:
     """
-    Preprocess a single ARC task.
+    Preprocess a single ARC task with all train examples.
 
     Args:
         task: Task dictionary
         config: Configuration object
 
     Returns:
-        Dictionary of preprocessed tensors
+        Dictionary containing all train examples and test example
     """
-    # Get first two examples
-    example1 = task["train"][0]
-    example2 = task["train"][1]
+    # Process all train examples
+    train_examples = []
+    for i, example in enumerate(task["train"]):
+        train_examples.append(
+            {
+                "input": preprocess_example_image(example["input"], config),
+                "output": preprocess_example_image(example["output"], config),
+            }
+        )
 
-    # Get first test case
-    test_case = task["test"][0]
-
-    # Preprocess example images (for ResNet)
-    example1_input = preprocess_example_image(example1["input"], config)
-    example1_output = preprocess_example_image(example1["output"], config)
-    example2_input = preprocess_example_image(example2["input"], config)
-    example2_output = preprocess_example_image(example2["output"], config)
-
-    # Preprocess target images (for MLP decoder)
-    target_input = preprocess_target_image(test_case["input"], config)
-    target_output = preprocess_target_image(test_case["output"], config)
+    # Process test example
+    test_example = {
+        "input": preprocess_target_image(task["test"][0]["input"], config),
+        "output": preprocess_target_image(task["test"][0]["output"], config),
+    }
 
     return {
-        "example1_input": example1_input,
-        "example1_output": example1_output,
-        "example2_input": example2_input,
-        "example2_output": example2_output,
-        "target_input": target_input,
-        "target_output": target_output,
+        "task_id": task.get("task_id", "unknown"),
+        "train_examples": train_examples,
+        "test_example": test_example,
     }
 
 
 def preprocess_dataset(
-    tasks: List[Dict[str, Any]], dataset_name: str, config: Config
+    tasks: List[Dict[str, Any]],
+    dataset_name: str,
+    config: Config,
+    raw_data_dir: str = None,
 ) -> int:
     """
     Preprocess a single dataset and save to disk.
@@ -165,6 +164,7 @@ def preprocess_dataset(
         total_raw_tasks,
         len(filtered_tasks),
         dataset_name,
+        raw_data_dir,
     )
 
     return len(preprocessed_data)
@@ -188,7 +188,7 @@ def preprocess_arc_data(config: Config):
     # Process ARC-AGI-1
     if Path(config.arc_agi1_dir).exists():
         agi1_tasks = load_arc_tasks(config.arc_agi1_dir)
-        count = preprocess_dataset(agi1_tasks, "arc_agi1", config)
+        count = preprocess_dataset(agi1_tasks, "arc_agi1", config, config.arc_agi1_dir)
         total_processed += count
     else:
         print(f"ARC-AGI-1 directory not found: {config.arc_agi1_dir}")
@@ -215,6 +215,7 @@ def generate_data_report(
     total_raw_tasks: int,
     filtered_tasks: int,
     dataset_name: str,
+    raw_data_dir: str = None,
 ):
     """
     Generate an HTML report about the preprocessed data.
@@ -225,6 +226,7 @@ def generate_data_report(
         total_raw_tasks: Total number of raw tasks loaded
         filtered_tasks: Number of tasks after filtering
         dataset_name: Name of the dataset
+        raw_data_dir: Path to raw data directory for distribution analysis
     """
     if not data:
         print("No data to generate report for")
@@ -232,7 +234,7 @@ def generate_data_report(
 
     # Generate HTML report
     html_content = generate_html_report(
-        data, total_raw_tasks, filtered_tasks, dataset_name
+        data, total_raw_tasks, filtered_tasks, dataset_name, raw_data_dir
     )
 
     # Save HTML report

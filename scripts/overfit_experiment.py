@@ -18,7 +18,7 @@ from datetime import datetime
 
 from algo.config import Config
 from algo.models import SimpleARCModel
-from algo.data import ARCDataset
+from algo.data import ARCDataset, custom_collate_fn
 from algo.training import ARCTrainer
 from scripts.evaluate import (
     calculate_perfect_accuracy,
@@ -63,8 +63,8 @@ class OverfitExperiment:
         returns:
             list of selected task indices
         """
-        # load full dataset to get total number of tasks
-        full_dataset = ARCDataset(self.config.processed_dir, self.config)
+        # load full dataset to get total number of tasks with holdout capability
+        full_dataset = ARCDataset(self.config.arc_agi1_dir, self.config, holdout=True)
         total_tasks = len(full_dataset)
 
         if task_indices is not None:
@@ -103,7 +103,7 @@ class OverfitExperiment:
 
     def create_task_subset(self, task_indices: List[int]) -> ARCDataset:
         """create dataset subset with only selected tasks."""
-        full_dataset = ARCDataset(self.config.processed_dir, self.config)
+        full_dataset = ARCDataset(self.config.arc_agi1_dir, self.config, holdout=True)
         subset = Subset(full_dataset, task_indices)
 
         # wrap in custom dataset class to maintain interface
@@ -112,9 +112,8 @@ class OverfitExperiment:
                 self.subset = subset
                 self.original_dataset = original_dataset
                 self.config = original_dataset.config
-                self.processed_dir = original_dataset.processed_dir
-                self.dataset_name = original_dataset.dataset_name
-                self.dataset_path = original_dataset.dataset_path
+                self.raw_data_dir = original_dataset.raw_data_dir
+                self.holdout = original_dataset.holdout
 
             def __len__(self):
                 return len(self.subset)
@@ -153,6 +152,7 @@ class OverfitExperiment:
             shuffle=True,
             num_workers=2,
             pin_memory=True,
+            collate_fn=custom_collate_fn,
         )
 
         # create model
@@ -179,8 +179,8 @@ class OverfitExperiment:
             # update trainer's current epoch for proper logging
             trainer.current_epoch = epoch
 
-            # train one epoch using existing trainer method
-            train_metrics = trainer.train_epoch(train_loader)
+            # train one epoch using rule latent training method
+            train_metrics = trainer.train_epoch_rule_latent(train_loader)
             avg_loss = train_metrics["total_loss"]
 
             # update scheduler
@@ -195,6 +195,9 @@ class OverfitExperiment:
 
             # save best model
             if avg_loss < best_loss:
+                print(
+                    f"  New best! {avg_loss:.6f} < {best_loss:.6f} (improvement: {best_loss - avg_loss:.6f})"
+                )
                 best_loss = avg_loss
                 best_epoch = epoch
                 patience_counter = 0
@@ -236,7 +239,10 @@ class OverfitExperiment:
             "total_epochs": epoch + 1,
             "training_time_seconds": training_time,
             "early_stopping_patience": early_stopping_patience,
-            "task_indices": task_indices,
+            "tasks": {
+                "n_tasks": len(task_indices),
+                "task_indices": task_indices,
+            },
         }
 
         with open(self.experiment_dir / "training_info.json", "w") as f:
@@ -269,6 +275,7 @@ class OverfitExperiment:
             shuffle=False,
             num_workers=2,
             pin_memory=True,
+            collate_fn=custom_collate_fn,
         )
 
         # create model and load checkpoint
@@ -296,69 +303,116 @@ class OverfitExperiment:
 
         with torch.no_grad():
             for batch_idx, batch in enumerate(eval_loader):
-                # move batch to device
-                batch = {k: v.to(self.config.device) for k, v in batch.items()}
+                # Move batch to device
+                device = next(model.parameters()).device
+                rule_latent_inputs = batch["rule_latent_inputs"].to(device)
+                all_train_inputs = batch["all_train_inputs"].to(device)
+                test_inputs = batch["test_inputs"].to(device)
+                test_outputs = batch["test_outputs"].to(device)
+                holdout_inputs = batch["holdout_inputs"].to(device)
+                holdout_outputs = batch["holdout_outputs"].to(device)
+                num_train = batch["num_train"].to(device)
+                has_holdout = batch["has_holdout"].to(device)
 
-                # forward pass
-                logits = model(
-                    batch["example1_input"],
-                    batch["example1_output"],
-                    batch["example2_input"],
-                    batch["example2_output"],
-                    batch["target_input"],
+                # Forward pass with batched rule latent training
+                outputs = model.forward_rule_latent_training(
+                    rule_latent_inputs, all_train_inputs, num_train
                 )
 
-                # calculate metrics using existing functions
-                batch_size = logits.size(0)
-                total_samples += batch_size
-
-                # use existing accuracy functions
-                perfect_matches += (
-                    calculate_perfect_accuracy(logits, batch["target_output"])
-                    * batch_size
-                )
-
-                pixel_correct += (
-                    calculate_pixel_accuracy(logits, batch["target_output"])
-                    * batch_size
-                )
-
-                near_miss_correct += (
-                    calculate_near_miss_accuracy(logits, batch["target_output"])
-                    * batch_size
-                )
-
-                # foreground metrics
-                perfect_matches_foreground += (
-                    calculate_perfect_accuracy_foreground(
-                        logits, batch["target_output"]
+                # Process each task in the batch
+                for i in range(rule_latent_inputs.size(0)):
+                    # Evaluate on test target
+                    test_logits = model.decoder(
+                        outputs["rule_latents"][i : i + 1], test_inputs[i : i + 1]
                     )
-                    * batch_size
-                )
+                    test_target = test_outputs[i : i + 1]
 
-                pixel_correct_foreground += (
-                    calculate_pixel_accuracy_foreground(logits, batch["target_output"])
-                    * batch_size
-                )
+                    # calculate metrics using existing functions
+                    batch_size = test_logits.size(0)
+                    total_samples += batch_size
 
-                near_miss_correct_foreground += (
-                    calculate_near_miss_accuracy_foreground(
-                        logits, batch["target_output"]
+                    # use existing accuracy functions
+                    perfect_matches += (
+                        calculate_perfect_accuracy(test_logits, test_target)
+                        * batch_size
                     )
-                    * batch_size
-                )
 
-                # per-task results for detailed analysis
-                for i in range(batch_size):
+                    pixel_correct += (
+                        calculate_pixel_accuracy(test_logits, test_target) * batch_size
+                    )
+
+                    near_miss_correct += (
+                        calculate_near_miss_accuracy(test_logits, test_target)
+                        * batch_size
+                    )
+
+                    # foreground metrics
+                    perfect_matches_foreground += (
+                        calculate_perfect_accuracy_foreground(test_logits, test_target)
+                        * batch_size
+                    )
+
+                    pixel_correct_foreground += (
+                        calculate_pixel_accuracy_foreground(test_logits, test_target)
+                        * batch_size
+                    )
+
+                    near_miss_correct_foreground += (
+                        calculate_near_miss_accuracy_foreground(
+                            test_logits, test_target
+                        )
+                        * batch_size
+                    )
+
+                    # evaluate on holdout target (if available)
+                    if has_holdout[i]:
+                        holdout_logits = model.decoder(
+                            outputs["rule_latents"][i : i + 1],
+                            holdout_inputs[i : i + 1],
+                        )
+                        holdout_target = holdout_outputs[i : i + 1]
+
+                        # calculate holdout metrics
+                        holdout_perfect = calculate_perfect_accuracy(
+                            holdout_logits, holdout_target
+                        )
+                        holdout_pixel = calculate_pixel_accuracy(
+                            holdout_logits, holdout_target
+                        )
+                        holdout_near_miss = calculate_near_miss_accuracy(
+                            holdout_logits, holdout_target
+                        )
+
+                        # store holdout metrics for this batch
+                        if not hasattr(self, "holdout_metrics"):
+                            self.holdout_metrics = {
+                                "perfect_matches": 0,
+                                "pixel_correct": 0,
+                                "near_miss_correct": 0,
+                                "total_samples": 0,
+                            }
+
+                        self.holdout_metrics["perfect_matches"] += (
+                            holdout_perfect * batch_size
+                        )
+                        self.holdout_metrics["pixel_correct"] += (
+                            holdout_pixel * batch_size
+                        )
+                        self.holdout_metrics["near_miss_correct"] += (
+                            holdout_near_miss * batch_size
+                        )
+                        self.holdout_metrics["total_samples"] += batch_size
+
+                    # per-task results for detailed analysis
                     task_idx = (
                         task_indices[batch_idx * self.config.batch_size + i]
                         if batch_idx * self.config.batch_size + i < len(task_indices)
                         else batch_idx
                     )
 
-                    # calculate per-sample metrics
-                    sample_logits = logits[i : i + 1]
-                    sample_target = batch["target_output"][i : i + 1]
+                    # calculate per-sample metrics using test target
+                    sample_logits = test_logits[0:1]  # [1, 10, 30, 30]
+                    sample_target = test_target[0:1]  # [1, 1, 30, 30]
 
                     per_task_results.append(
                         {
@@ -398,6 +452,25 @@ class OverfitExperiment:
             / total_samples,
         }
 
+        # add holdout metrics if available
+        if (
+            hasattr(self, "holdout_metrics")
+            and self.holdout_metrics["total_samples"] > 0
+        ):
+            results.update(
+                {
+                    "holdout_perfect_accuracy": self.holdout_metrics["perfect_matches"]
+                    / self.holdout_metrics["total_samples"],
+                    "holdout_pixel_accuracy": self.holdout_metrics["pixel_correct"]
+                    / self.holdout_metrics["total_samples"],
+                    "holdout_near_miss_accuracy": self.holdout_metrics[
+                        "near_miss_correct"
+                    ]
+                    / self.holdout_metrics["total_samples"],
+                    "holdout_total_samples": self.holdout_metrics["total_samples"],
+                }
+            )
+
         # save results
         with open(self.experiment_dir / "evaluation_results.json", "w") as f:
             json.dump(results, f, indent=2)
@@ -425,6 +498,20 @@ class OverfitExperiment:
         print(
             f"  near-miss accuracy (foreground): {results['near_miss_accuracy_foreground']:.4f} ({results['near_miss_accuracy_foreground']*100:.2f}%)"
         )
+
+        # print holdout results if available
+        if "holdout_perfect_accuracy" in results:
+            print("\nholdout validation results:")
+            print(
+                f"  perfect accuracy (holdout): {results['holdout_perfect_accuracy']:.4f} ({results['holdout_perfect_accuracy']*100:.2f}%)"
+            )
+            print(
+                f"  pixel accuracy (holdout): {results['holdout_pixel_accuracy']:.4f} ({results['holdout_pixel_accuracy']*100:.2f}%)"
+            )
+            print(
+                f"  near-miss accuracy (holdout): {results['holdout_near_miss_accuracy']:.4f} ({results['holdout_near_miss_accuracy']*100:.2f}%)"
+            )
+            print(f"  holdout samples: {results['holdout_total_samples']}")
 
         return results
 

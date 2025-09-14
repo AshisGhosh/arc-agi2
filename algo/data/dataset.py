@@ -1,72 +1,234 @@
 import torch
 from torch.utils.data import Dataset
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Tuple
+import json
+import itertools
 from ..config import Config
+from .preprocessing import preprocess_example_image, preprocess_target_image
+
+
+def custom_collate_fn(batch):
+    """
+    Custom collate function for ARC dataset with full tensor batching.
+
+    Args:
+        batch: List of samples from the dataset
+
+    Returns:
+        Collated batch with proper tensor structure
+    """
+    batch_size = len(batch)
+    # Find the maximum number of training examples in this batch
+    max_train = max(len(sample["training_targets"]) for sample in batch)
+
+    # Pre-allocate tensors
+    rule_latent_inputs = torch.zeros(
+        [batch_size, 2, 2, 3, 64, 64]
+    )  # 2 examples, 2 images each
+    all_train_inputs = torch.zeros([batch_size, max_train, 1, 30, 30])
+    all_train_outputs = torch.zeros([batch_size, max_train, 1, 30, 30])
+    test_inputs = torch.zeros([batch_size, 1, 30, 30])
+    test_outputs = torch.zeros([batch_size, 1, 30, 30])
+    holdout_inputs = torch.zeros([batch_size, 1, 30, 30])
+    holdout_outputs = torch.zeros([batch_size, 1, 30, 30])
+    num_train = torch.zeros([batch_size], dtype=torch.long)
+    has_holdout = torch.zeros([batch_size], dtype=torch.bool)
+
+    # Fill with real data
+    for i, sample in enumerate(batch):
+        # Rule latent inputs (2 examples for ResNet)
+        rule_latent_inputs[i, 0, 0] = sample["rule_latent_inputs"][0]["input"].squeeze(
+            0
+        )  # [3, 64, 64]
+        rule_latent_inputs[i, 0, 1] = sample["rule_latent_inputs"][0]["output"].squeeze(
+            0
+        )
+        rule_latent_inputs[i, 1, 0] = sample["rule_latent_inputs"][1]["input"].squeeze(
+            0
+        )
+        rule_latent_inputs[i, 1, 1] = sample["rule_latent_inputs"][1]["output"].squeeze(
+            0
+        )
+
+        # Training targets
+        targets = sample["training_targets"]
+        num_train[i] = len(targets)
+
+        for j, target in enumerate(targets):
+            all_train_inputs[i, j] = target["input"].squeeze(0)  # [1, 30, 30]
+            all_train_outputs[i, j] = target["output"].squeeze(0)
+
+        # Test target (last in training_targets)
+        test_inputs[i] = targets[-1]["input"].squeeze(0)
+        test_outputs[i] = targets[-1]["output"].squeeze(0)
+
+        # Holdout target (if available)
+        if sample["holdout_target"] is not None:
+            holdout_inputs[i] = sample["holdout_target"]["input"].squeeze(0)
+            holdout_outputs[i] = sample["holdout_target"]["output"].squeeze(0)
+            has_holdout[i] = True
+
+    return {
+        "rule_latent_inputs": rule_latent_inputs,  # [B, 2, 2, 3, 64, 64]
+        "all_train_inputs": all_train_inputs,  # [B, max_train, 1, 30, 30]
+        "all_train_outputs": all_train_outputs,  # [B, max_train, 1, 30, 30]
+        "test_inputs": test_inputs,  # [B, 1, 30, 30]
+        "test_outputs": test_outputs,  # [B, 1, 30, 30]
+        "holdout_inputs": holdout_inputs,  # [B, 1, 30, 30]
+        "holdout_outputs": holdout_outputs,  # [B, 1, 30, 30]
+        "num_train": num_train,  # [B]
+        "has_holdout": has_holdout,  # [B]
+    }
 
 
 class ARCDataset(Dataset):
     """
-    Dataset for ARC tasks with preprocessed data.
+    Dataset for ARC tasks with combination cycling and holdout support.
 
-    Loads preprocessed tensors from disk for efficient training.
+    Loads raw JSON data and cycles through different combinations of train examples
+    for rule latent creation. Supports holdout validation mode.
     """
 
-    def __init__(self, processed_dir: str, config: Config):
+    def __init__(self, raw_data_dir: str, config: Config, holdout: bool = False):
         """
         Initialize dataset.
 
         Args:
-            processed_dir: Directory containing preprocessed data
+            raw_data_dir: Directory containing raw JSON task files
             config: Configuration object
+            holdout: If True, hold out last train example for validation
         """
-        self.processed_dir = Path(processed_dir)
+        self.raw_data_dir = Path(raw_data_dir)
         self.config = config
+        self.holdout = holdout
 
-        # Determine which dataset to load
-        self.dataset_name = config.training_dataset
-        self.dataset_path = self.processed_dir / self.dataset_name
+        # Load raw tasks
+        self.tasks = self._load_raw_tasks()
 
-        # Load preprocessed data
-        self.data = self._load_preprocessed_data()
+        # Generate combinations for each task
+        self.combinations = self._generate_combinations()
 
-    def _load_preprocessed_data(self) -> List[Dict[str, Any]]:
-        """Load preprocessed data from disk."""
-        data_file = self.dataset_path / "preprocessed_data.pt"
+        # Filter tasks with sufficient examples
+        self.valid_tasks = self._filter_valid_tasks()
 
-        if not data_file.exists():
-            raise FileNotFoundError(f"Preprocessed data not found at {data_file}")
+    def _load_raw_tasks(self) -> List[Dict[str, Any]]:
+        """Load raw JSON task files."""
+        tasks = []
+        task_files = list(self.raw_data_dir.glob("*.json"))
 
-        data = torch.load(data_file)
-        return data
+        for task_file in task_files:
+            try:
+                with open(task_file, "r") as f:
+                    task_data = json.load(f)
+                    task_data["task_id"] = task_file.stem
+                    tasks.append(task_data)
+            except Exception as e:
+                print(f"Error loading {task_file}: {e}")
+                continue
+
+        return tasks
+
+    def _generate_combinations(self) -> List[List[Tuple[int, int]]]:
+        """Generate all possible 2-combinations for rule latent creation."""
+        combinations = []
+        for task in self.tasks:
+            # Use first 4 train examples for combinations (or all if < 4)
+            num_examples = min(4, len(task["train"]))
+            task_combinations = list(itertools.combinations(range(num_examples), 2))
+            combinations.append(task_combinations)
+        return combinations
+
+    def _filter_valid_tasks(self) -> List[int]:
+        """Filter tasks with sufficient examples for training."""
+        valid_indices = []
+        for i, task in enumerate(self.tasks):
+            if len(task["train"]) >= 2:
+                valid_indices.append(i)
+        return valid_indices
 
     def __len__(self) -> int:
-        """Return number of samples."""
-        return len(self.data)
+        """Return number of valid samples."""
+        return len(self.valid_tasks)
 
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+    def _preprocess_example(self, example: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+        """Preprocess a single example (input/output pair)."""
+        input_tensor = preprocess_example_image(example["input"], self.config)
+        output_tensor = preprocess_example_image(example["output"], self.config)
+        return {
+            "input": input_tensor.unsqueeze(0),  # Add batch dimension [1, C, H, W]
+            "output": output_tensor.unsqueeze(0),  # Add batch dimension [1, C, H, W]
+        }
+
+    def _preprocess_target(self, example: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+        """Preprocess a single target example (input/output pair)."""
+        input_tensor = preprocess_target_image(example["input"], self.config)
+        output_tensor = preprocess_target_image(example["output"], self.config)
+        return {
+            "input": input_tensor.unsqueeze(0),  # Add batch dimension [1, C, H, W]
+            "output": output_tensor.unsqueeze(0),  # Add batch dimension [1, C, H, W]
+        }
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
         """
-        Get sample by index.
+        Get sample by index with combination cycling.
 
         Args:
             idx: Sample index
 
         Returns:
             Dictionary containing:
-                - example1_input: [3, 64, 64] RGB
-                - example1_output: [3, 64, 64] RGB
-                - example2_input: [3, 64, 64] RGB
-                - example2_output: [3, 64, 64] RGB
-                - target_input: [1, 30, 30] grayscale
-                - target_output: [1, 30, 30] grayscale
+                - rule_latent_inputs: List of 2 examples for rule latent creation
+                - training_targets: List of all examples for training
+                - holdout_target: Holdout example (if holdout=True)
+                - combination_info: Information about current combination
         """
-        sample = self.data[idx]
+        task_idx = self.valid_tasks[idx]
+        task = self.tasks[task_idx]
+        task_combinations = self.combinations[task_idx]
+
+        # Cycle through combinations
+        combination_idx = self._get_combination_idx(idx)
+        pair_indices = task_combinations[combination_idx]
+
+        # Rule latent inputs (2 examples) - preprocess for ResNet
+        rule_latent_inputs = [
+            self._preprocess_example(task["train"][pair_indices[0]]),
+            self._preprocess_example(task["train"][pair_indices[1]]),
+        ]
+
+        # Holdout target (if enabled and available)
+        holdout_target = None
+        train_examples_to_use = task["train"]
+        if self.holdout and len(task["train"]) > 2:
+            holdout_target = self._preprocess_target(
+                task["train"][-1]
+            )  # Last train example
+            # Remove holdout from train examples to use
+            train_examples_to_use = task["train"][:-1]
+
+        # Training targets (all available examples) - preprocess appropriately
+        training_targets = []
+        for train_example in train_examples_to_use:
+            training_targets.append(self._preprocess_target(train_example))
+        for test_example in task["test"]:
+            training_targets.append(self._preprocess_target(test_example))
 
         return {
-            "example1_input": sample["example1_input"],
-            "example1_output": sample["example1_output"],
-            "example2_input": sample["example2_input"],
-            "example2_output": sample["example2_output"],
-            "target_input": sample["target_input"],
-            "target_output": sample["target_output"],
+            "rule_latent_inputs": rule_latent_inputs,
+            "training_targets": training_targets,
+            "holdout_target": holdout_target,
+            "combination_info": {
+                "task_idx": task_idx,
+                "task_id": task["task_id"],
+                "combination_idx": combination_idx,
+                "pair_indices": pair_indices,
+                "total_combinations": len(task_combinations),
+            },
         }
+
+    def _get_combination_idx(self, idx: int) -> int:
+        """Get combination index for this task (cycles through combinations)."""
+        task_idx = self.valid_tasks[idx]
+        task_combinations = self.combinations[task_idx]
+        return idx % len(task_combinations)

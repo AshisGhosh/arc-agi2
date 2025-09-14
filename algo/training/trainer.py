@@ -118,6 +118,125 @@ class ARCTrainer:
 
         return {"total_loss": avg_loss, **avg_components}
 
+    def train_epoch_rule_latent(self, train_loader: DataLoader) -> Dict[str, float]:
+        """
+        Train for one epoch using rule latent training approach.
+
+        Args:
+            train_loader: Training data loader with new data structure
+
+        Returns:
+            Dictionary of training metrics
+        """
+        self.model.train()
+        total_loss = 0.0
+        total_holdout_loss = 0.0
+        loss_components = {"cross_entropy_loss": 0.0, "accuracy": 0.0}
+        holdout_components = {"cross_entropy_loss": 0.0, "accuracy": 0.0}
+
+        # Progress bar
+        pbar = tqdm(train_loader, desc=f"Epoch {self.current_epoch} (Rule Latent)")
+
+        for batch_idx, batch in enumerate(pbar):
+            # Move batch to device
+            rule_latent_inputs = batch["rule_latent_inputs"].to(self.device)
+            all_train_inputs = batch["all_train_inputs"].to(self.device)
+            all_train_outputs = batch["all_train_outputs"].to(self.device)
+            holdout_inputs = batch["holdout_inputs"].to(self.device)
+            holdout_outputs = batch["holdout_outputs"].to(self.device)
+            num_train = batch["num_train"].to(self.device)
+            has_holdout = batch["has_holdout"].to(self.device)
+
+            # Forward pass with batched rule latent training
+            outputs = self.model.forward_rule_latent_training(
+                rule_latent_inputs, all_train_inputs, num_train
+            )
+
+            # Calculate training loss for all tasks - vectorized
+            batch_training_loss = 0.0
+            batch_holdout_loss = 0.0
+
+            # Process all tasks at once
+            for i in range(rule_latent_inputs.size(0)):
+                num_train_i = num_train[i].item()
+                if num_train_i > 0:
+                    # Get training targets for this task
+                    train_logits = outputs["training_logits"][
+                        i, :num_train_i
+                    ]  # [num_train, 10, 30, 30]
+                    train_outputs = all_train_outputs[
+                        i, :num_train_i
+                    ]  # [num_train, 1, 30, 30]
+
+                    # Calculate loss for this task
+                    task_loss, components = calculate_classification_loss(
+                        train_logits, train_outputs, self.config
+                    )
+                    batch_training_loss += task_loss
+
+                    # Update metrics
+                    for key, value in components.items():
+                        if key != "total_loss":
+                            loss_components[key] += value
+
+                # Calculate holdout loss (if available)
+                if has_holdout[i]:
+                    holdout_logits = self.model.decoder(
+                        outputs["rule_latents"][i : i + 1], holdout_inputs[i : i + 1]
+                    )
+                    holdout_loss, holdout_comp = calculate_classification_loss(
+                        holdout_logits, holdout_outputs[i : i + 1], self.config
+                    )
+                    batch_holdout_loss += holdout_loss.item()
+                    total_holdout_loss += holdout_loss.item()
+
+                    # Update holdout metrics
+                    for key, value in holdout_comp.items():
+                        if key != "total_loss":
+                            holdout_components[key] += value
+
+            # Backward pass
+            self.optimizer.zero_grad()
+            batch_training_loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                self.model.parameters(), self.config.max_grad_norm
+            )
+            self.optimizer.step()
+
+            # Update metrics
+            total_loss += batch_training_loss.item()
+
+            # Update progress bar
+            pbar.set_postfix(
+                {
+                    "loss": f"{batch_training_loss.item():.4f}",
+                    "holdout": f"{batch_holdout_loss:.4f}"
+                    if batch_holdout_loss > 0
+                    else "N/A",
+                }
+            )
+
+        # Calculate averages
+        num_samples = len(train_loader)
+        metrics = {
+            "total_loss": total_loss / num_samples,
+            **{k: v / num_samples for k, v in loss_components.items()},
+        }
+
+        # Add holdout metrics if available
+        if total_holdout_loss > 0:
+            metrics.update(
+                {
+                    "holdout_loss": total_holdout_loss / num_samples,
+                    **{
+                        f"holdout_{k}": v / num_samples
+                        for k, v in holdout_components.items()
+                    },
+                }
+            )
+
+        return metrics
+
     def validate_epoch(self, val_loader: DataLoader) -> Dict[str, float]:
         """
         Validate for one epoch.
