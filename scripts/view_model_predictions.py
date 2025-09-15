@@ -16,6 +16,7 @@ from typing import Dict, Any, List, Tuple
 
 from algo.config import Config
 from algo.data import ARCDataset, custom_collate_fn
+from algo.data.task_subset import create_task_subset_for_evaluation
 from algo.models.simple_arc import SimpleARCModel
 from torch.utils.data import Subset
 
@@ -446,11 +447,23 @@ def evaluate_model_on_tasks(
             use_first_combination_only=True,
         )
 
-        # If we're using a subset, create the same subset for augmented dataset
-        if hasattr(dataset, "dataset"):
-            # Get the original indices
+        # Handle different dataset types for subset creation
+        if hasattr(dataset, "dataset") and hasattr(dataset, "indices"):
+            # PyTorch Subset - get the original indices
             original_indices = dataset.indices
             augmented_dataset = Subset(augmented_dataset, original_indices)
+        elif hasattr(dataset, "selected_task_indices"):
+            # TaskSubset - get the selected task indices
+            from algo.data.task_subset import TaskSubset
+
+            selected_task_indices = dataset.selected_task_indices
+            augmented_dataset = TaskSubset(
+                task_indices=list(selected_task_indices),
+                config=augmented_config,
+                arc_agi1_dir=config.arc_agi1_dir,
+                holdout=True,
+                use_first_combination_only=True,
+            )
 
         dataset = augmented_dataset
 
@@ -524,15 +537,25 @@ def evaluate_model_on_tasks(
                 # extract task id - try multiple approaches
                 task_id = "unknown"
 
-                # approach 1: from combination_info in batch
+                # approach 1: from combination_info in batch (preferred method)
                 if "combination_info" in batch:
                     combo_info = batch["combination_info"]
                     if isinstance(combo_info, dict):
                         task_id = combo_info.get("task_id", "unknown")
+                        # Also get the actual task index from combination_info
+                        global_task_index = combo_info.get(
+                            "task_idx", global_task_index
+                        )
                     elif isinstance(combo_info, list) and len(combo_info) > j:
                         task_id = combo_info[j].get("task_id", "unknown")
+                        global_task_index = combo_info[j].get(
+                            "task_idx", global_task_index
+                        )
                     elif isinstance(combo_info, list) and len(combo_info) > 0:
                         task_id = combo_info[0].get("task_id", "unknown")
+                        global_task_index = combo_info[0].get(
+                            "task_idx", global_task_index
+                        )
 
                 # approach 2: if we have a subset, get task id from original dataset
                 if task_id == "unknown" and hasattr(dataset, "dataset"):
@@ -626,11 +649,23 @@ def test_all_combinations(
             use_first_combination_only=True,
         )
 
-        # If we're using a subset, create the same subset for augmented dataset
-        if hasattr(dataset, "dataset"):
-            # Get the original indices
+        # Handle different dataset types for subset creation
+        if hasattr(dataset, "dataset") and hasattr(dataset, "indices"):
+            # PyTorch Subset - get the original indices
             original_indices = dataset.indices
             augmented_dataset = Subset(augmented_dataset, original_indices)
+        elif hasattr(dataset, "selected_task_indices"):
+            # TaskSubset - get the selected task indices
+            from algo.data.task_subset import TaskSubset
+
+            selected_task_indices = dataset.selected_task_indices
+            augmented_dataset = TaskSubset(
+                task_indices=list(selected_task_indices),
+                config=augmented_config,
+                arc_agi1_dir=config.arc_agi1_dir,
+                holdout=True,
+                use_first_combination_only=True,
+            )
 
         dataset = augmented_dataset
 
@@ -848,7 +883,8 @@ def main():
     if task_set == "overfit tasks only":
         if "tasks" in exp_info and "task_indices" in exp_info["tasks"]:
             task_indices = exp_info["tasks"]["task_indices"]
-            dataset = Subset(dataset, task_indices)
+            # Create a proper task subset that works with the new batching strategy
+            dataset = create_task_subset_for_evaluation(dataset, task_indices)
             st.sidebar.write(f"**evaluating on {len(task_indices)} overfit tasks**")
         else:
             st.error("❌ no task indices found in experiment info")
