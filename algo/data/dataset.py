@@ -36,6 +36,9 @@ def custom_collate_fn(batch):
     num_train = torch.zeros([batch_size], dtype=torch.long)
     has_holdout = torch.zeros([batch_size], dtype=torch.bool)
 
+    # Collect combination info for each sample
+    combination_info_list = []
+
     # Fill with real data
     for i, sample in enumerate(batch):
         # Rule latent inputs (2 examples for ResNet)
@@ -70,6 +73,10 @@ def custom_collate_fn(batch):
             holdout_outputs[i] = sample["holdout_target"]["output"].squeeze(0)
             has_holdout[i] = True
 
+        # Collect combination info
+        if "combination_info" in sample:
+            combination_info_list.append(sample["combination_info"])
+
     return {
         "rule_latent_inputs": rule_latent_inputs,  # [B, 2, 2, 3, 64, 64]
         "all_train_inputs": all_train_inputs,  # [B, max_train, 1, 30, 30]
@@ -80,15 +87,17 @@ def custom_collate_fn(batch):
         "holdout_outputs": holdout_outputs,  # [B, 1, 30, 30]
         "num_train": num_train,  # [B]
         "has_holdout": has_holdout,  # [B]
+        "combination_info": combination_info_list,  # [B] list of combination info dicts
     }
 
 
 class ARCDataset(Dataset):
     """
-    Dataset for ARC tasks with combination cycling and holdout support.
+    Dataset for ARC tasks with full combination coverage and holdout support.
 
-    Loads raw JSON data and cycles through different combinations of train examples
-    for rule latent creation. Supports holdout validation mode.
+    Loads raw JSON data and provides access to all combinations of train examples
+    for rule latent creation. Each epoch sees all combinations from all tasks.
+    Supports holdout validation mode.
     """
 
     def __init__(
@@ -121,8 +130,8 @@ class ARCDataset(Dataset):
         # Filter tasks with sufficient examples
         self.valid_tasks = self._filter_valid_tasks()
 
-        # per-task cycling counters
-        self.task_cycle_counters = {i: 0 for i in self.valid_tasks}
+        # create mapping from linear index to (task_idx, combination_idx) for full combination epochs
+        self._create_combination_mapping()
 
     def _load_raw_tasks(self) -> List[Dict[str, Any]]:
         """Load raw JSON task files."""
@@ -190,9 +199,27 @@ class ARCDataset(Dataset):
                     valid_indices.append(i)
         return valid_indices
 
+    def _create_combination_mapping(self):
+        """Create mapping from linear index to (task_idx, combination_idx) pairs."""
+        self.combination_mapping = []
+        self.task_start_indices = {}
+
+        for task_idx in self.valid_tasks:
+            task_combinations = self.combinations[task_idx]
+            self.task_start_indices[task_idx] = len(self.combination_mapping)
+
+            if self.use_first_combination_only:
+                # For evaluation mode, only use the first combination of each task
+                if len(task_combinations) > 0:
+                    self.combination_mapping.append((task_idx, 0))
+            else:
+                # For training mode, use all combinations
+                for combo_idx in range(len(task_combinations)):
+                    self.combination_mapping.append((task_idx, combo_idx))
+
     def __len__(self) -> int:
-        """Return number of valid samples."""
-        return len(self.valid_tasks)
+        """Return total number of combinations across all valid tasks."""
+        return len(self.combination_mapping)
 
     def _preprocess_example(self, example: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         """Preprocess a single example (input/output pair)."""
@@ -214,10 +241,10 @@ class ARCDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         """
-        Get sample by index with combination cycling.
+        Get sample by index using full combination mapping.
 
         Args:
-            idx: Sample index
+            idx: Linear index into all combinations across all tasks
 
         Returns:
             Dictionary containing:
@@ -226,12 +253,12 @@ class ARCDataset(Dataset):
                 - holdout_target: Holdout example (if holdout=True)
                 - combination_info: Information about current combination
         """
-        task_idx = self.valid_tasks[idx]
+        # Get task and combination indices from mapping
+        task_idx, combination_idx = self.combination_mapping[idx]
         task = self.tasks[task_idx]
         task_combinations = self.combinations[task_idx]
 
-        # Cycle through combinations
-        combination_idx = self._get_combination_idx(idx)
+        # Get the specific combination
         pair_indices = task_combinations[combination_idx]
 
         # Get all available examples (original + augmented)
@@ -278,19 +305,3 @@ class ARCDataset(Dataset):
                 "total_combinations": len(task_combinations),
             },
         }
-
-    def _get_combination_idx(self, idx: int) -> int:
-        """Get combination index for this task (cycles through combinations)."""
-        task_idx = self.valid_tasks[idx]
-        task_combinations = self.combinations[task_idx]
-
-        if self.use_first_combination_only:
-            # For evaluation, always use first combination
-            return 0
-        else:
-            # For training, cycle through combinations
-            combination_idx = self.task_cycle_counters[task_idx] % len(
-                task_combinations
-            )
-            self.task_cycle_counters[task_idx] += 1
-            return combination_idx

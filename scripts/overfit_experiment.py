@@ -7,7 +7,7 @@ with clean organization and reporting.
 """
 
 import torch
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 import argparse
 import json
 import random
@@ -19,6 +19,7 @@ from datetime import datetime
 from algo.config import Config
 from algo.models import SimpleARCModel
 from algo.data import ARCDataset, custom_collate_fn
+from algo.data.task_subset import TaskSubset
 from algo.training import ARCTrainer
 from scripts.evaluate import (
     calculate_perfect_accuracy,
@@ -63,25 +64,32 @@ class OverfitExperiment:
         returns:
             list of selected task indices
         """
-        # load full dataset to get total number of tasks with holdout capability
+        # load full dataset to get valid task indices
         full_dataset = ARCDataset(self.config.arc_agi1_dir, self.config, holdout=True)
-        total_tasks = len(full_dataset)
+        valid_task_indices = set(full_dataset.valid_tasks)
+        total_tasks = len(full_dataset.tasks)  # Total tasks in dataset (0-399)
 
         if task_indices is not None:
-            # validate indices
-            invalid_indices = [
-                idx for idx in task_indices if idx >= total_tasks or idx < 0
-            ]
+            # validate indices - check if they exist and are valid
+            invalid_indices = []
+            for idx in task_indices:
+                if idx < 0 or idx >= total_tasks:
+                    invalid_indices.append(f"{idx} (out of range 0-{total_tasks-1})")
+                elif idx not in valid_task_indices:
+                    invalid_indices.append(f"{idx} (insufficient training examples)")
+
             if invalid_indices:
                 raise ValueError(
-                    f"invalid task indices: {invalid_indices}. total tasks: {total_tasks}"
+                    f"invalid task indices: {invalid_indices}. "
+                    f"Valid range: 0-{total_tasks-1}, Valid tasks: {len(valid_task_indices)}"
                 )
             selected_indices = task_indices[:n_tasks]
         else:
-            # random selection
+            # random selection from all valid task indices
             random.seed(random_seed)
+            valid_indices_list = list(valid_task_indices)
             selected_indices = random.sample(
-                range(total_tasks), min(n_tasks, total_tasks)
+                valid_indices_list, min(n_tasks, len(valid_indices_list))
             )
 
         print(f"selected {len(selected_indices)} tasks for overfitting:")
@@ -101,32 +109,15 @@ class OverfitExperiment:
 
         return selected_indices
 
-    def create_task_subset(self, task_indices: List[int]) -> ARCDataset:
+    def create_task_subset(self, task_indices: List[int]) -> TaskSubset:
         """create dataset subset with only selected tasks."""
-        full_dataset = ARCDataset(
-            self.config.arc_agi1_dir,
-            self.config,
+        return TaskSubset(
+            task_indices=task_indices,
+            config=self.config,
+            arc_agi1_dir=self.config.arc_agi1_dir,
             holdout=True,
-            use_first_combination_only=True,
+            use_first_combination_only=False,  # Use ALL combinations for training
         )
-        subset = Subset(full_dataset, task_indices)
-
-        # wrap in custom dataset class to maintain interface
-        class TaskSubset(ARCDataset):
-            def __init__(self, subset, original_dataset):
-                self.subset = subset
-                self.original_dataset = original_dataset
-                self.config = original_dataset.config
-                self.raw_data_dir = original_dataset.raw_data_dir
-                self.holdout = original_dataset.holdout
-
-            def __len__(self):
-                return len(self.subset)
-
-            def __getitem__(self, idx):
-                return self.subset[idx]
-
-        return TaskSubset(subset, full_dataset)
 
     def train_on_tasks(
         self,
