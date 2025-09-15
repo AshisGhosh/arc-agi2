@@ -66,95 +66,37 @@ class TaskSubset(ARCDataset):
         return len(self.combination_mapping)
 
     def __getitem__(self, idx):
-        # use the filtered mapping
-        task_idx, combination_idx = self.combination_mapping[idx]
+        """Get sample by index using filtered combination mapping."""
+        # Get combination information using the base class helper
+        task_idx, combination_idx, (i, j), is_counterfactual = (
+            self._get_combination_info(idx)
+        )
         task = self.tasks[task_idx]
-        task_combinations = self.combinations[task_idx]
-        pair_indices = task_combinations[combination_idx]
 
-        # get all available examples (original + augmented)
-        all_examples = task["train"]
-        if self.config.use_color_relabeling and "augmented_train" in task:
-            all_examples = task["train"] + task["augmented_train"]
+        # Get all available examples using the base class helper
+        all_examples = self._get_all_examples(task, is_counterfactual)
 
-        # rule latent inputs (2 examples) - preprocess for resnet
-        rule_latent_inputs = [
-            self._preprocess_example(all_examples[pair_indices[0]]),
-            self._preprocess_example(all_examples[pair_indices[1]]),
-        ]
+        # Create rule latent inputs using the base class helper
+        rule_latent_inputs = self._create_rule_latent_inputs(
+            all_examples, i, j, is_counterfactual
+        )
 
-        # holdout target (if enabled and available)
-        holdout_target = None
-        train_examples_to_use = all_examples  # use all examples (original + augmented)
-        if self.holdout and len(task["train"]) > 2:
-            # for holdout, use the last original train example (not augmented)
-            holdout_target = self._preprocess_target(
-                task["train"][-1]
-            )  # last original train example
-            # remove holdout from original train examples to use
-            train_examples_to_use = task["train"][:-1]
-            # add augmented examples if available
-            if self.config.use_color_relabeling and "augmented_train" in task:
-                train_examples_to_use = train_examples_to_use + task["augmented_train"]
+        # Create test example using the base class helper
+        test_example = self._get_test_example(task, is_counterfactual)
 
-        # training targets (all available examples) - preprocess appropriately
-        training_targets = []
-        for train_example in train_examples_to_use:
-            training_targets.append(self._preprocess_target(train_example))
-        for test_example in task["test"]:
-            training_targets.append(self._preprocess_target(test_example))
+        # Create holdout target using the base class helper
+        holdout_example = self._get_holdout_example(task, is_counterfactual)
 
         return {
-            "rule_latent_inputs": rule_latent_inputs,
-            "training_targets": training_targets,
-            "holdout_target": holdout_target,
-            "combination_info": {
-                "task_idx": task_idx,
-                "task_id": task["task_id"],
-                "combination_idx": combination_idx,
-                "pair_indices": pair_indices,
-                "total_combinations": len(task_combinations),
-            },
+            # Core data - only what's needed for this combination
+            "rule_latent_examples": rule_latent_inputs,  # 2 examples for encoder
+            "test_example": test_example,  # Single test example
+            "holdout_example": holdout_example,  # Optional holdout
+            # Top-level metadata
+            "task_idx": task_idx,  # Top-level task index
+            "task_id": task["task_id"],  # Top-level task ID
+            "is_counterfactual": is_counterfactual,  # Top-level flag
+            "combination_idx": combination_idx,  # Top-level combination index
+            "pair_indices": (i, j),  # Top-level pair indices
+            "total_combinations": len(self.combinations[task_idx]),  # Top-level count
         }
-
-
-def create_task_subset(dataset: ARCDataset, task_indices: List[int]) -> TaskSubset:
-    """
-    create a task subset from an existing dataset.
-
-    args:
-        dataset: the original arc dataset
-        task_indices: list of task indices to include in the subset
-
-    returns:
-        task subset containing only the specified tasks
-    """
-    return TaskSubset(
-        task_indices=task_indices,
-        config=dataset.config,
-        arc_agi1_dir=str(dataset.raw_data_dir),
-        holdout=dataset.holdout,
-        use_first_combination_only=dataset.use_first_combination_only,
-    )
-
-
-def create_task_subset_for_evaluation(
-    dataset: ARCDataset, task_indices: List[int]
-) -> TaskSubset:
-    """
-    create a task subset specifically for evaluation (always uses first combination only).
-
-    args:
-        dataset: the original arc dataset
-        task_indices: list of task indices to include in the subset
-
-    returns:
-        task subset for evaluation containing only the specified tasks
-    """
-    return TaskSubset(
-        task_indices=task_indices,
-        config=dataset.config,
-        arc_agi1_dir=str(dataset.raw_data_dir),
-        holdout=True,  # always use holdout for evaluation
-        use_first_combination_only=True,  # always use first combination for evaluation
-    )

@@ -16,16 +16,18 @@ class ARCTrainer:
     Trainer for SimpleARC model with progress monitoring and checkpointing.
     """
 
-    def __init__(self, model: SimpleARCModel, config: Config):
+    def __init__(self, model: SimpleARCModel, config: Config, dataset=None):
         """
         Initialize trainer.
 
         Args:
             model: SimpleARC model instance
             config: Configuration object
+            dataset: Dataset instance (needed for getting all training examples)
         """
         self.model = model
         self.config = config
+        self.dataset = dataset
         self.device = torch.device(config.device)
 
         # Move model to device
@@ -140,12 +142,55 @@ class ARCTrainer:
         for batch_idx, batch in enumerate(pbar):
             # Move batch to device
             rule_latent_inputs = batch["rule_latent_inputs"].to(self.device)
-            all_train_inputs = batch["all_train_inputs"].to(self.device)
-            all_train_outputs = batch["all_train_outputs"].to(self.device)
             holdout_inputs = batch["holdout_inputs"].to(self.device)
             holdout_outputs = batch["holdout_outputs"].to(self.device)
-            num_train = batch["num_train"].to(self.device)
             has_holdout = batch["has_holdout"].to(self.device)
+
+            # Get task indices for this batch
+            task_indices = batch["task_indices"]
+
+            # Get all training examples for each task in the batch
+            batch_size = rule_latent_inputs.size(0)
+            max_train = 0
+            all_train_inputs_list = []
+            all_train_outputs_list = []
+            num_train_list = []
+
+            for i in range(batch_size):
+                task_idx = task_indices[i]  # Already an integer from the list
+                training_examples = self.dataset.get_all_training_examples_for_task(
+                    task_idx
+                )
+
+                # Extract inputs and outputs
+                train_inputs = [
+                    ex["input"].squeeze(0) for ex in training_examples
+                ]  # Remove batch dim
+                train_outputs = [ex["output"].squeeze(0) for ex in training_examples]
+
+                max_train = max(max_train, len(train_inputs))
+                all_train_inputs_list.append(train_inputs)
+                all_train_outputs_list.append(train_outputs)
+                num_train_list.append(len(train_inputs))
+
+            # Pad all training inputs to consistent shape
+            all_train_inputs = torch.zeros([batch_size, max_train, 1, 30, 30]).to(
+                self.device
+            )
+            all_train_outputs = torch.zeros([batch_size, max_train, 1, 30, 30]).to(
+                self.device
+            )
+
+            for i, (train_inputs, train_outputs) in enumerate(
+                zip(all_train_inputs_list, all_train_outputs_list)
+            ):
+                for j, (train_input, train_output) in enumerate(
+                    zip(train_inputs, train_outputs)
+                ):
+                    all_train_inputs[i, j] = train_input
+                    all_train_outputs[i, j] = train_output
+
+            num_train = torch.tensor(num_train_list, dtype=torch.long).to(self.device)
 
             # Forward pass with batched rule latent training
             outputs = self.model.forward_rule_latent_training(

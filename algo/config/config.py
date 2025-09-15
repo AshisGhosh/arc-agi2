@@ -56,6 +56,12 @@ class Config:
     augmentation_variants: int = 1  # Number of augmented versions per original example
     preserve_background: bool = True  # Keep background color (0) unchanged
 
+    # Counterfactual augmentation
+    enable_counterfactuals: bool = False
+    counterfactual_transform: str = (
+        "rotate_90"  # "rotate_90", "rotate_180", "rotate_270", "reflect_h", "reflect_v"
+    )
+
     # Color palette (ARC official 10 colors)
     color_palette: List[List[float]] = None
 

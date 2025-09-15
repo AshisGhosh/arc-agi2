@@ -155,7 +155,7 @@ class OverfitExperiment:
         model = SimpleARCModel(self.config)
 
         # create trainer with overfitting config
-        trainer = ARCTrainer(model, self.config)
+        trainer = ARCTrainer(model, self.config, task_dataset)
 
         # override config for overfitting
         trainer.config.num_epochs = epochs

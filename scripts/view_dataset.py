@@ -7,452 +7,404 @@ Interactive web interface to explore preprocessed ARC data batches.
 
 import streamlit as st
 import torch
-import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.patches as patches
 
 from algo.config import Config
 from algo.data import ARCDataset
+from scripts.visualization_utils import (
+    tensor_to_grayscale_numpy,
+    apply_arc_color_palette,
+    show_color_palette,
+    visualize_task_combination,
+)
 
 # Set page config
 st.set_page_config(page_title="ARC Dataset Viewer", page_icon="🔍", layout="wide")
 
-# ARC color palette (official 10 colors)
-ARC_COLORS = [
-    "#000000",  # 0: Black
-    "#0074D9",  # 1: Blue
-    "#FF4136",  # 2: Red
-    "#2ECC40",  # 3: Green
-    "#FFDC00",  # 4: Yellow
-    "#AAAAAA",  # 5: Grey
-    "#F012BE",  # 6: Fuschia
-    "#FF851B",  # 7: Orange
-    "#7FDBFF",  # 8: Teal
-    "#870C25",  # 9: Brown
-]
 
+def get_task_combinations(dataset, task_idx):
+    """get all combinations for a specific task."""
+    try:
+        return dataset.get_task_combinations(task_idx)
+    except Exception as e:
+        st.warning(f"could not load combinations for task {task_idx}: {e}")
+        import traceback
 
-def tensor_to_numpy(tensor):
-    """Convert PyTorch tensor to numpy array."""
-    if tensor.dim() == 4:  # [B, C, H, W]
-        return tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
-    elif tensor.dim() == 3:  # [C, H, W]
-        return tensor.permute(1, 2, 0).cpu().numpy()
-    elif tensor.dim() == 2:  # [H, W]
-        return tensor.cpu().numpy()
-    else:
-        return tensor.cpu().numpy()
-
-
-def tensor_to_grayscale_numpy(tensor):
-    """Convert PyTorch tensor to grayscale numpy array."""
-    if tensor.dim() == 4:  # [B, C, H, W]
-        return (
-            tensor.squeeze(0).squeeze(0).cpu().numpy()
-        )  # Remove batch and channel dims
-    elif tensor.dim() == 3:  # [C, H, W]
-        return tensor.squeeze(0).cpu().numpy()  # Remove channel dim
-    elif tensor.dim() == 2:  # [H, W]
-        return tensor.cpu().numpy()
-    else:
-        return tensor.cpu().numpy()
-
-
-def denormalize_rgb(img_tensor):
-    """Convert normalized RGB tensor back to [0, 1] range."""
-    # Convert from [-1, 1] to [0, 1]
-    img = (img_tensor + 1) / 2
-    return torch.clamp(img, 0, 1)
-
-
-def visualize_arc_image(img_tensor, title, is_rgb=True, figsize=(4, 4)):
-    """Visualize an ARC image with proper color mapping."""
-    fig, ax = plt.subplots(1, 1, figsize=figsize)
-
-    if is_rgb:
-        # RGB image (example images)
-        img = denormalize_rgb(img_tensor)
-        img_np = tensor_to_numpy(img)
-        ax.imshow(img_np)
-    else:
-        # Grayscale image (target images)
-        img_np = tensor_to_numpy(img_tensor)
-        # Create RGB version using ARC color palette
-        rgb_img = np.zeros((*img_np.shape, 3))
-        for i, color in enumerate(ARC_COLORS):
-            mask = img_np == i
-            rgb_img[mask] = (
-                np.array(
-                    [int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)]
-                )
-                / 255.0
-            )
-        ax.imshow(rgb_img)
-
-    ax.set_title(title, fontsize=10)
-    ax.axis("off")
-
-    # Add grid
-    ax.set_xticks(np.arange(-0.5, img_np.shape[1], 1), minor=True)
-    ax.set_yticks(np.arange(-0.5, img_np.shape[0], 1), minor=True)
-    ax.grid(which="minor", color="gray", linestyle="-", linewidth=0.5, alpha=0.3)
-
-    return fig
-
-
-def visualize_task(task, task_idx=0, show_holdout=False):
-    """Visualize a single task."""
-    # Determine grid size based on whether we have holdout data
-    if show_holdout and task.get("holdout_target") is not None:
-        # 2x4 grid to include holdout
-        fig, axes = plt.subplots(2, 4, figsize=(16, 8))
-        fig.suptitle(f"ARC Task {task_idx} (with Holdout)", fontsize=16)
-    else:
-        # 2x3 grid for normal view
-        fig, axes = plt.subplots(2, 3, figsize=(12, 8))
-        fig.suptitle(f"ARC Task {task_idx}", fontsize=16)
-
-    # Rule latent inputs (2 examples)
-    axes[0, 0].set_title("Example 1 Input", fontsize=12)
-    img1 = denormalize_rgb(task["rule_latent_inputs"][0]["input"])
-    img1_np = tensor_to_numpy(img1)
-    axes[0, 0].imshow(img1_np)
-    axes[0, 0].axis("off")
-
-    axes[0, 1].set_title("Example 1 Output", fontsize=12)
-    img2 = denormalize_rgb(task["rule_latent_inputs"][0]["output"])
-    img2_np = tensor_to_numpy(img2)
-    axes[0, 1].imshow(img2_np)
-    axes[0, 1].axis("off")
-
-    # Example 2
-    axes[0, 2].set_title("Example 2 Input", fontsize=12)
-    img3 = denormalize_rgb(task["rule_latent_inputs"][1]["input"])
-    img3_np = tensor_to_numpy(img3)
-    axes[0, 2].imshow(img3_np)
-    axes[0, 2].axis("off")
-
-    axes[1, 0].set_title("Example 2 Output", fontsize=12)
-    img4 = denormalize_rgb(task["rule_latent_inputs"][1]["output"])
-    img4_np = tensor_to_numpy(img4)
-    axes[1, 0].imshow(img4_np)
-    axes[1, 0].axis("off")
-
-    # Test target (last in training_targets)
-    axes[1, 1].set_title("Test Input", fontsize=12)
-    test_input_np = tensor_to_grayscale_numpy(task["training_targets"][-1]["input"])
-    rgb_test_input = np.zeros((*test_input_np.shape, 3))
-    for i, color in enumerate(ARC_COLORS):
-        mask = test_input_np == i
-        rgb_test_input[mask] = (
-            np.array([int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)])
-            / 255.0
-        )
-    axes[1, 1].imshow(rgb_test_input)
-    axes[1, 1].axis("off")
-
-    axes[1, 2].set_title("Test Output", fontsize=12)
-    test_output_np = tensor_to_grayscale_numpy(task["training_targets"][-1]["output"])
-    rgb_test_output = np.zeros((*test_output_np.shape, 3))
-    for i, color in enumerate(ARC_COLORS):
-        mask = test_output_np == i
-        rgb_test_output[mask] = (
-            np.array([int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)])
-            / 255.0
-        )
-    axes[1, 2].imshow(rgb_test_output)
-    axes[1, 2].axis("off")
-
-    # Add holdout visualization if available
-    if show_holdout and task.get("holdout_target") is not None:
-        # Holdout input in position 4 (row 0, col 3)
-        axes[0, 3].set_title("Holdout Input", fontsize=12)
-        holdout_input_np = tensor_to_grayscale_numpy(task["holdout_target"]["input"])
-        rgb_holdout_input = np.zeros((*holdout_input_np.shape, 3))
-        for i, color in enumerate(ARC_COLORS):
-            mask = holdout_input_np == i
-            rgb_holdout_input[mask] = (
-                np.array(
-                    [int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)]
-                )
-                / 255.0
-            )
-        axes[0, 3].imshow(rgb_holdout_input)
-        axes[0, 3].axis("off")
-
-        # Holdout output in position 8 (row 1, col 3)
-        axes[1, 3].set_title("Holdout Output", fontsize=12)
-        holdout_output_np = tensor_to_grayscale_numpy(task["holdout_target"]["output"])
-        rgb_holdout_output = np.zeros((*holdout_output_np.shape, 3))
-        for i, color in enumerate(ARC_COLORS):
-            mask = holdout_output_np == i
-            rgb_holdout_output[mask] = (
-                np.array(
-                    [int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)]
-                )
-                / 255.0
-            )
-        axes[1, 3].imshow(rgb_holdout_output)
-        axes[1, 3].axis("off")
-
-    # Add grid to all subplots
-    for ax in axes.flat:
-        ax.set_xticks(np.arange(-0.5, 30, 1), minor=True)
-        ax.set_yticks(np.arange(-0.5, 30, 1), minor=True)
-        ax.grid(which="minor", color="gray", linestyle="-", linewidth=0.5, alpha=0.3)
-
-    plt.tight_layout()
-    return fig
-
-
-def show_color_palette():
-    """Display the ARC color palette."""
-    fig, ax = plt.subplots(1, 1, figsize=(10, 2))
-
-    for i, color in enumerate(ARC_COLORS):
-        ax.add_patch(
-            patches.Rectangle((i, 0), 1, 1, facecolor=color, edgecolor="black")
-        )
-        ax.text(
-            i + 0.5,
-            0.5,
-            str(i),
-            ha="center",
-            va="center",
-            fontsize=12,
-            color="white" if i in [0, 9] else "black",
-            weight="bold",
-        )
-
-    ax.set_xlim(0, 10)
-    ax.set_ylim(0, 1)
-    ax.set_title("ARC Color Palette (0-9)", fontsize=14)
-    ax.set_xticks(range(11))
-    ax.set_yticks([])
-    ax.set_xlabel("Color Index")
-
-    return fig
+        st.code(traceback.format_exc())
+        return {"regular": [], "counterfactual": [], "all": []}
 
 
 def main():
-    """Main Streamlit app."""
-    st.title("🔍 ARC Dataset Viewer")
-    st.markdown("Interactive exploration of preprocessed ARC-AGI dataset")
+    """main streamlit app."""
+    st.title("🔍 arc dataset viewer")
+    st.markdown(
+        "interactive exploration of preprocessed arc-agi dataset with proper task indexing"
+    )
 
-    # Sidebar controls
-    st.sidebar.header("Dataset Controls")
+    # sidebar controls
+    st.sidebar.header("dataset controls")
 
-    # Dataset selection
+    # dataset selection
     dataset_choice = st.sidebar.selectbox(
-        "Select Dataset", ["arc_agi1", "arc_agi2"], index=0
+        "select dataset", ["arc_agi1", "arc_agi2"], index=0
     )
 
-    # Holdout mode
+    # holdout mode
     holdout_mode = st.sidebar.checkbox(
-        "Enable Holdout Mode",
+        "enable holdout mode",
         value=True,
-        help="When enabled, tasks with 3+ train examples will have holdout data",
+        help="when enabled, tasks with 3+ train examples will have holdout data",
     )
 
-    # Load dataset
+    # color augmentation options
+    st.sidebar.subheader("color augmentation")
+    enable_color_augmentation = st.sidebar.checkbox(
+        "enable color relabeling",
+        value=False,
+        help="apply color relabeling to test dataset diversity",
+    )
+
+    augmentation_variants = 1
+    preserve_background = True
+    augmentation_seed = 42
+
+    if enable_color_augmentation:
+        augmentation_variants = st.sidebar.slider(
+            "augmentation variants",
+            min_value=1,
+            max_value=5,
+            value=1,
+            step=1,
+            help="number of color-relabeled versions per example",
+        )
+
+        preserve_background = st.sidebar.checkbox(
+            "preserve background",
+            value=True,
+            help="keep background color (0) unchanged during relabeling",
+        )
+
+        augmentation_seed = st.sidebar.number_input(
+            "augmentation seed",
+            min_value=0,
+            max_value=10000,
+            value=42,
+            step=1,
+            help="random seed for reproducible color relabeling",
+        )
+
+    # counterfactual options
+    st.sidebar.subheader("counterfactual analysis")
+    enable_counterfactuals = st.sidebar.checkbox(
+        "enable counterfactuals",
+        value=False,
+        help="include counterfactual (rotated) examples in dataset",
+    )
+
+    counterfactual_transform = "rotate_90"
+    if enable_counterfactuals:
+        counterfactual_transform = st.sidebar.selectbox(
+            "counterfactual transform",
+            ["rotate_90", "rotate_180", "rotate_270", "reflect_h", "reflect_v"],
+            index=0,
+            help="type of transformation to apply to outputs",
+        )
+
+    # load dataset
     try:
         config = Config()
         config.training_dataset = dataset_choice
+        config.use_color_relabeling = enable_color_augmentation
+        config.augmentation_variants = augmentation_variants
+        config.preserve_background = preserve_background
+        config.random_seed = augmentation_seed
+        config.enable_counterfactuals = enable_counterfactuals
+        config.counterfactual_transform = counterfactual_transform
 
-        with st.spinner(f"Loading {dataset_choice} dataset..."):
-            if dataset_choice == "arc_agi1":
-                dataset = ARCDataset(config.arc_agi1_dir, config, holdout=holdout_mode)
-            else:
-                dataset = ARCDataset(config.processed_dir, config)
+        with st.spinner(f"loading {dataset_choice} dataset..."):
+            try:
+                if dataset_choice == "arc_agi1":
+                    dataset = ARCDataset(
+                        config.arc_agi1_dir, config, holdout=holdout_mode
+                    )
+                else:
+                    dataset = ARCDataset(config.processed_dir, config)
+            except Exception as e:
+                st.error(f"❌ error during dataset initialization: {e}")
+                st.error(f"error type: {type(e).__name__}")
+                import traceback
 
-        st.success(f"✅ Loaded {len(dataset)} samples from {dataset_choice}")
+                st.error(f"traceback: {traceback.format_exc()}")
+                st.stop()
 
-        # Task selection (after dataset is loaded)
-        task_idx = st.sidebar.number_input(
-            "Task Index",
-            min_value=0,
-            max_value=len(dataset) - 1,
-            value=0,
-            step=1,
-            help=f"Enter task index (0 to {len(dataset) - 1})",
+        # get unique task indices from the dataset
+        unique_task_indices = sorted(
+            list(set(task_idx for task_idx, _ in dataset.combination_mapping))
         )
 
-        # Dataset info
-        col1, col2, col3 = st.columns(3)
+        st.success(
+            f"✅ loaded {len(unique_task_indices)} unique tasks from {dataset_choice}"
+        )
+        st.success(f"✅ total combinations: {len(dataset)}")
+
+        # task selection (after dataset is loaded)
+        task_idx = st.sidebar.number_input(
+            "task index",
+            min_value=0,
+            max_value=len(unique_task_indices) - 1,
+            value=0,
+            step=1,
+            help=f"enter task index (0 to {len(unique_task_indices) - 1})",
+        )
+
+        # get the actual task index from unique list
+        actual_task_idx = unique_task_indices[task_idx]
+
+        # dataset info
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("Total Tasks", len(dataset))
+            st.metric("unique tasks", len(unique_task_indices))
         with col2:
-            st.metric("Current Task", task_idx)
+            st.metric("total combinations", len(dataset))
         with col3:
+            st.metric("current task", actual_task_idx)
+        with col4:
             if holdout_mode and dataset_choice == "arc_agi1":
-                # Count tasks with holdout data
+                # count tasks with holdout data
                 holdout_count = 0
-                for i in range(min(100, len(dataset))):  # Check first 100 samples
+                for i in range(min(100, len(dataset))):  # check first 100 samples
                     sample = dataset[i]
                     if sample.get("holdout_target") is not None:
                         holdout_count += 1
-                st.metric("Tasks w/ Holdout", f"{holdout_count}/100")
+                st.metric("tasks w/ holdout", f"{holdout_count}/100")
             else:
-                st.metric("Holdout Mode", "Disabled")
+                st.metric("holdout mode", "disabled")
 
     except Exception as e:
-        st.error(f"❌ Error loading dataset: {e}")
+        st.error(f"❌ error loading dataset: {e}")
+        st.error(f"error type: {type(e).__name__}")
+        st.error("full traceback:")
+        import traceback
+
+        st.code(traceback.format_exc())
         st.stop()
 
-    # Load a task
+    # get all combinations for the selected task
     try:
-        task = dataset[task_idx]
-        st.success(f"✅ Loaded task {task_idx}")
+        combinations_data = get_task_combinations(dataset, actual_task_idx)
+        combinations = combinations_data["all"]
+        st.success(
+            f"✅ loaded {len(combinations)} combinations for task {actual_task_idx}"
+        )
     except Exception as e:
-        st.error(f"❌ Error loading task: {e}")
+        st.error(f"❌ error loading task combinations: {e}")
+        st.error(f"error type: {type(e).__name__}")
+        st.error("full traceback:")
+        import traceback
+
+        st.code(traceback.format_exc())
         st.stop()
 
-    # Main content
-    st.header("📊 Task Visualization")
+    # main content
+    st.header("📊 task visualization")
 
-    # Color palette
-    st.subheader("🎨 ARC Color Palette")
+    # color palette
+    st.subheader("🎨 arc color palette")
     palette_fig = show_color_palette()
     st.pyplot(palette_fig)
 
-    # Task visualization
-    st.subheader(f"🔍 Task {task_idx}")
+    # task information
+    st.subheader(f"🔍 task {actual_task_idx}")
 
-    # Check if this task has holdout data
-    has_holdout = task.get("holdout_target") is not None
-
-    if has_holdout:
-        st.info(f"✅ Task {task_idx} has holdout data")
-    else:
-        st.info(f"ℹ️ Task {task_idx} has no holdout data")
-
-    task_fig = visualize_task(task, task_idx, show_holdout=has_holdout)
-    st.pyplot(task_fig)
-
-    # Holdout vs Test comparison
-    if has_holdout and holdout_mode and dataset_choice == "arc_agi1":
-        st.subheader("🔄 Holdout vs Test Comparison")
-
-        col1, col2 = st.columns(2)
+    # show task info
+    if hasattr(dataset, "tasks") and actual_task_idx < len(dataset.tasks):
+        task_info = dataset.tasks[actual_task_idx]
+        col1, col2, col3 = st.columns(3)
 
         with col1:
-            st.write("**Test Input**")
-            test_input_np = tensor_to_grayscale_numpy(
-                task["training_targets"][-1]["input"]
-            )
-            rgb_test_input = np.zeros((*test_input_np.shape, 3))
-            for i, color in enumerate(ARC_COLORS):
-                mask = test_input_np == i
-                rgb_test_input[mask] = (
-                    np.array(
-                        [int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)]
-                    )
-                    / 255.0
-                )
-            fig, ax = plt.subplots(1, 1, figsize=(4, 4))
-            ax.imshow(rgb_test_input)
-            ax.set_title("Test Input", fontsize=12)
-            ax.axis("off")
-            st.pyplot(fig)
-            plt.close(fig)
+            st.write("**task info**")
+            st.write(f"task id: {task_info.get('task_id', 'unknown')}")
+            st.write(f"train examples: {len(task_info.get('train', []))}")
+            st.write(f"test examples: {len(task_info.get('test', []))}")
 
         with col2:
-            st.write("**Holdout Input**")
-            holdout_input_np = tensor_to_grayscale_numpy(
-                task["holdout_target"]["input"]
+            st.write("**combinations**")
+            st.write(f"total combinations: {len(combinations)}")
+            counterfactual_count = sum(
+                1 for c in combinations if c.get("is_counterfactual", False)
             )
-            rgb_holdout_input = np.zeros((*holdout_input_np.shape, 3))
-            for i, color in enumerate(ARC_COLORS):
-                mask = holdout_input_np == i
-                rgb_holdout_input[mask] = (
-                    np.array(
-                        [int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)]
-                    )
-                    / 255.0
+            st.write(f"counterfactual: {counterfactual_count}")
+            st.write(f"original: {len(combinations) - counterfactual_count}")
+
+        with col3:
+            st.write("**augmentation status**")
+            st.write(f"color relabeling: {'✅' if enable_color_augmentation else '❌'}")
+            st.write(f"counterfactuals: {'✅' if enable_counterfactuals else '❌'}")
+            if enable_color_augmentation:
+                st.write(f"variants: {augmentation_variants}")
+
+    # combination selection
+    if combinations:
+        st.subheader("🔄 combination selection")
+
+        # create combination options
+        combo_options = []
+        for i, combo in enumerate(combinations):
+            pair_indices = combo["pair_indices"]
+            is_counterfactual = combo.get("is_counterfactual", False)
+            counterfactual_marker = " (counterfactual)" if is_counterfactual else ""
+            combo_options.append(
+                f"combination {combo['combination_idx']}: {pair_indices}{counterfactual_marker}"
+            )
+
+        selected_combo_idx = st.selectbox(
+            "select combination",
+            range(len(combinations)),
+            format_func=lambda x: combo_options[x],
+            index=0,
+            help="select which combination of training examples to view",
+        )
+
+        selected_combo = combinations[selected_combo_idx]
+        task_data = selected_combo
+
+        # check if this task has holdout data
+        has_holdout = task_data.get("holdout_example") is not None
+
+        if has_holdout:
+            st.info(f"✅ task {actual_task_idx} has holdout data")
+        else:
+            st.info(f"ℹ️ task {actual_task_idx} has no holdout data")
+
+        # visualize the selected combination
+        task_fig = visualize_task_combination(
+            task_data,
+            actual_task_idx,
+            selected_combo["combination_idx"],
+            show_holdout=has_holdout,
+        )
+        st.pyplot(task_fig)
+
+        # combination details
+        st.subheader("📋 combination details")
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            st.write("**combination info**")
+            st.write(f"combination index: {selected_combo['combination_idx']}")
+            st.write(f"pair indices: {selected_combo['pair_indices']}")
+            st.write(
+                f"is counterfactual: {'✅' if selected_combo.get('is_counterfactual', False) else '❌'}"
+            )
+
+        with col2:
+            st.write("**data structure**")
+            st.write("rule latent examples: 2")
+            st.write("test example: 1")
+            if task_data.get("holdout_example") is not None:
+                st.write("holdout example: 1")
+            else:
+                st.write("holdout example: 0")
+            if is_counterfactual:
+                st.write("✅ counterfactuals enabled")
+            else:
+                st.write("❌ no counterfactuals")
+
+        with col3:
+            st.write("**holdout status**")
+            if has_holdout:
+                st.write("✅ has holdout data")
+                st.write(
+                    f"holdout input shape: {task_data['holdout_example']['input'].shape}"
                 )
-            fig, ax = plt.subplots(1, 1, figsize=(4, 4))
-            ax.imshow(rgb_holdout_input)
-            ax.set_title("Holdout Input", fontsize=12)
-            ax.axis("off")
-            st.pyplot(fig)
-            plt.close(fig)
+            else:
+                st.write("❌ no holdout data")
 
-        # Check if they're the same
-        test_input = task["training_targets"][-1]["input"]
-        holdout_input = task["holdout_target"]["input"]
-        are_same = torch.equal(test_input, holdout_input)
+        # holdout vs test comparison
+        if has_holdout and holdout_mode and dataset_choice == "arc_agi1":
+            st.subheader("🔄 holdout vs test comparison")
 
-        if are_same:
-            st.error("⚠️ Holdout and Test inputs are the same! This indicates a bug.")
-        else:
-            st.success(
-                "✅ Holdout and Test inputs are different - holdout is working correctly!"
-            )
+            col1, col2 = st.columns(2)
 
-    # Task information
-    st.subheader("📋 Task Information")
+            with col1:
+                st.write("**test input**")
+                test_input_np = tensor_to_grayscale_numpy(
+                    task_data["test_example"]["input"]
+                )
+                rgb_test_input = apply_arc_color_palette(test_input_np)
+                fig, ax = plt.subplots(1, 1, figsize=(4, 4))
+                ax.imshow(rgb_test_input)
+                ax.set_title("test input", fontsize=12)
+                ax.axis("off")
+                st.pyplot(fig)
+                plt.close(fig)
 
-    col1, col2, col3 = st.columns(3)
+            with col2:
+                st.write("**holdout input**")
+                holdout_input_np = tensor_to_grayscale_numpy(
+                    task_data["holdout_example"]["input"]
+                )
+                rgb_holdout_input = apply_arc_color_palette(holdout_input_np)
+                fig, ax = plt.subplots(1, 1, figsize=(4, 4))
+                ax.imshow(rgb_holdout_input)
+                ax.set_title("holdout input", fontsize=12)
+                ax.axis("off")
+                st.pyplot(fig)
+                plt.close(fig)
 
-    with col1:
-        st.write("**Training Examples**")
-        st.write(f"Number: {len(task['training_targets'])}")
-        st.write(f"Rule latent pairs: {len(task['rule_latent_inputs'])}")
+            # check if they're the same
+            test_input = task_data["test_example"]["input"]
+            holdout_input = task_data["holdout_example"]["input"]
+            are_same = torch.equal(test_input, holdout_input)
 
-    with col2:
-        st.write("**Holdout Status**")
-        if has_holdout:
-            st.write("✅ Has holdout data")
-            st.write(f"Holdout input shape: {task['holdout_target']['input'].shape}")
-        else:
-            st.write("❌ No holdout data")
+            if are_same:
+                st.error(
+                    "⚠️ holdout and test inputs are the same! this indicates a bug."
+                )
+            else:
+                st.success(
+                    "✅ holdout and test inputs are different - holdout is working correctly!"
+                )
 
-    with col3:
-        st.write("**Combination Info**")
-        if "combination_info" in task:
-            combo_info = task["combination_info"]
-            st.write(f"Task ID: {combo_info.get('task_id', 'N/A')}")
-            st.write(f"Combination: {combo_info.get('pair_indices', 'N/A')}")
+        # data statistics
+        st.subheader("📈 data statistics")
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            st.write("**rule latent images (rgb)**")
+            example_img = task_data["rule_latent_examples"][0]["input"]
+            st.write(f"- shape: {example_img.shape}")
+            st.write(f"- data type: {example_img.dtype}")
             st.write(
-                f"Total combinations: {combo_info.get('total_combinations', 'N/A')}"
+                f"- value range: [{example_img.min():.3f}, {example_img.max():.3f}]"
             )
-        else:
-            st.write("No combination info")
 
-    # Data statistics
-    st.subheader("📈 Data Statistics")
+        with col2:
+            st.write("**test images (grayscale)**")
+            test_img = task_data["test_example"]["input"]
+            st.write(f"- shape: {test_img.shape}")
+            st.write(f"- data type: {test_img.dtype}")
+            st.write(f"- value range: [{test_img.min():.0f}, {test_img.max():.0f}]")
 
-    col1, col2, col3 = st.columns(3)
+        with col3:
+            if has_holdout:
+                st.write("**holdout images (grayscale)**")
+                holdout_img = task_data["holdout_example"]["input"]
+                st.write(f"- shape: {holdout_img.shape}")
+                st.write(f"- data type: {holdout_img.dtype}")
+                st.write(
+                    f"- value range: [{holdout_img.min():.0f}, {holdout_img.max():.0f}]"
+                )
+            else:
+                st.write("**holdout status**")
+                st.write("no holdout data available")
 
-    with col1:
-        st.write("**Rule Latent Images (RGB)**")
-        example_img = task["rule_latent_inputs"][0]["input"]
-        st.write(f"- Shape: {example_img.shape}")
-        st.write(f"- Data type: {example_img.dtype}")
-        st.write(f"- Value range: [{example_img.min():.3f}, {example_img.max():.3f}]")
+    else:
+        st.warning(f"no combinations found for task {actual_task_idx}")
 
-    with col2:
-        st.write("**Test Images (Grayscale)**")
-        test_img = task["training_targets"][-1]["input"]
-        st.write(f"- Shape: {test_img.shape}")
-        st.write(f"- Data type: {test_img.dtype}")
-        st.write(f"- Value range: [{test_img.min():.0f}, {test_img.max():.0f}]")
-
-    with col3:
-        if has_holdout:
-            st.write("**Holdout Images (Grayscale)**")
-            holdout_img = task["holdout_target"]["input"]
-            st.write(f"- Shape: {holdout_img.shape}")
-            st.write(f"- Data type: {holdout_img.dtype}")
-            st.write(
-                f"- Value range: [{holdout_img.min():.0f}, {holdout_img.max():.0f}]"
-            )
-        else:
-            st.write("**Holdout Status**")
-            st.write("No holdout data available")
-
-    # Refresh button
-    if st.button("🔄 Refresh Task"):
+    # refresh button
+    if st.button("🔄 refresh task"):
         st.rerun()
 
 

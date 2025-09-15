@@ -8,99 +8,25 @@ interactive web interface to load checkpoints and visualize model outputs.
 import streamlit as st
 import torch
 import numpy as np
-import matplotlib.pyplot as plt
 import json
 import pandas as pd
 from pathlib import Path
 from typing import Dict, Any, List, Tuple
 
 from algo.config import Config
-from algo.data import ARCDataset, custom_collate_fn
-from algo.data.task_subset import create_task_subset_for_evaluation
+from algo.data import ARCDataset
+from algo.data.task_subset import TaskSubset
 from algo.models.simple_arc import SimpleARCModel
-from torch.utils.data import Subset
+from scripts.visualization_utils import (
+    tensor_to_numpy,
+    tensor_to_grayscale_numpy,
+    denormalize_rgb,
+    visualize_prediction_comparison,
+)
+
 
 # set page config
 st.set_page_config(page_title="arc model predictions", page_icon="🤖", layout="wide")
-
-# arc color palette (official 10 colors)
-ARC_COLORS = [
-    "#000000",  # 0: black
-    "#0074D9",  # 1: blue
-    "#FF4136",  # 2: red
-    "#2ECC40",  # 3: green
-    "#FFDC00",  # 4: yellow
-    "#AAAAAA",  # 5: grey
-    "#F012BE",  # 6: fuschia
-    "#FF851B",  # 7: orange
-    "#7FDBFF",  # 8: teal
-    "#870C25",  # 9: brown
-]
-
-
-def tensor_to_numpy(tensor):
-    """convert pytorch tensor to numpy array."""
-    if tensor.dim() == 4:  # [b, c, h, w]
-        return tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
-    elif tensor.dim() == 3:  # [c, h, w]
-        return tensor.permute(1, 2, 0).cpu().numpy()
-    elif tensor.dim() == 2:  # [h, w]
-        return tensor.cpu().numpy()
-    else:
-        return tensor.cpu().numpy()
-
-
-def tensor_to_grayscale_numpy(tensor):
-    """convert pytorch tensor to grayscale numpy array."""
-    if tensor.dim() == 4:  # [b, c, h, w]
-        return tensor.squeeze(0).squeeze(0).cpu().numpy()
-    elif tensor.dim() == 3:  # [c, h, w]
-        return tensor.squeeze(0).cpu().numpy()
-    elif tensor.dim() == 2:  # [h, w]
-        return tensor.cpu().numpy()
-    else:
-        return tensor.cpu().numpy()
-
-
-def denormalize_rgb(img_tensor):
-    """convert normalized rgb tensor back to [0, 1] range."""
-    img = (img_tensor + 1) / 2
-    return torch.clamp(img, 0, 1)
-
-
-def visualize_arc_image(img_tensor, title, is_rgb=True, figsize=(4, 4)):
-    """visualize an arc image with proper color mapping."""
-    fig, ax = plt.subplots(1, 1, figsize=figsize)
-
-    if is_rgb:
-        # rgb image (example images)
-        img = denormalize_rgb(img_tensor)
-        img_np = tensor_to_numpy(img)
-        ax.imshow(img_np)
-    else:
-        # grayscale image (target images)
-        img_np = tensor_to_numpy(img_tensor)
-        # create rgb version using arc color palette
-        rgb_img = np.zeros((*img_np.shape, 3))
-        for i, color in enumerate(ARC_COLORS):
-            mask = img_np == i
-            rgb_img[mask] = (
-                np.array(
-                    [int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)]
-                )
-                / 255.0
-            )
-        ax.imshow(rgb_img)
-
-    ax.set_title(title, fontsize=10)
-    ax.axis("off")
-
-    # add grid
-    ax.set_xticks(np.arange(-0.5, img_np.shape[1], 1), minor=True)
-    ax.set_yticks(np.arange(-0.5, img_np.shape[0], 1), minor=True)
-    ax.grid(which="minor", color="gray", linestyle="-", linewidth=0.5, alpha=0.3)
-
-    return fig
 
 
 def extract_sample_from_batch(batch, sample_idx, evaluation_mode="test"):
@@ -120,164 +46,20 @@ def extract_sample_from_batch(batch, sample_idx, evaluation_mode="test"):
             "output": batch["holdout_outputs"][sample_idx],
         }
 
-    # Extract training examples - show first 2 examples from all_train_inputs
-    num_train = min(2, batch["all_train_inputs"].shape[1])
-
-    for i in range(num_train):
+    # Extract training examples from rule_latent_inputs (2 examples for encoder)
+    for i in range(2):  # Always 2 examples for rule latent
         sample["train_examples"].append(
             {
-                "input": batch["all_train_inputs"][sample_idx, i],
-                "output": batch["all_train_outputs"][sample_idx, i],
+                "input": batch["rule_latent_inputs"][
+                    sample_idx, i, 0
+                ],  # [B, 2, 2, 3, 64, 64] -> [3, 64, 64]
+                "output": batch["rule_latent_inputs"][
+                    sample_idx, i, 1
+                ],  # [B, 2, 2, 3, 64, 64] -> [3, 64, 64]
             }
         )
 
     return sample
-
-
-def visualize_prediction_comparison(sample, prediction):
-    """visualize model predictions compared to ground truth."""
-
-    # create figure with 2x4 grid
-    fig, axes = plt.subplots(2, 4, figsize=(16, 8))
-    fig.suptitle("model prediction comparison", fontsize=16)
-
-    # example 1 - handle new data structure with consistent color scheme
-    axes[0, 0].set_title("example 1 input", fontsize=12)
-    if "train_examples" in sample and len(sample["train_examples"]) >= 1:
-        img1_np = tensor_to_grayscale_numpy(sample["train_examples"][0]["input"])
-        rgb_img1 = np.zeros((*img1_np.shape, 3))
-        for i, color in enumerate(ARC_COLORS):
-            mask = img1_np == i
-            rgb_img1[mask] = (
-                np.array(
-                    [int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)]
-                )
-                / 255.0
-            )
-        axes[0, 0].imshow(rgb_img1)
-    else:
-        axes[0, 0].text(0.5, 0.5, "No data", ha="center", va="center")
-    axes[0, 0].axis("off")
-
-    axes[0, 1].set_title("example 1 output", fontsize=12)
-    if "train_examples" in sample and len(sample["train_examples"]) >= 1:
-        img2_np = tensor_to_grayscale_numpy(sample["train_examples"][0]["output"])
-        rgb_img2 = np.zeros((*img2_np.shape, 3))
-        for i, color in enumerate(ARC_COLORS):
-            mask = img2_np == i
-            rgb_img2[mask] = (
-                np.array(
-                    [int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)]
-                )
-                / 255.0
-            )
-        axes[0, 1].imshow(rgb_img2)
-    else:
-        axes[0, 1].text(0.5, 0.5, "No data", ha="center", va="center")
-    axes[0, 1].axis("off")
-
-    # example 2
-    axes[0, 2].set_title("example 2 input", fontsize=12)
-    if "train_examples" in sample and len(sample["train_examples"]) >= 2:
-        img3_np = tensor_to_grayscale_numpy(sample["train_examples"][1]["input"])
-        rgb_img3 = np.zeros((*img3_np.shape, 3))
-        for i, color in enumerate(ARC_COLORS):
-            mask = img3_np == i
-            rgb_img3[mask] = (
-                np.array(
-                    [int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)]
-                )
-                / 255.0
-            )
-        axes[0, 2].imshow(rgb_img3)
-    else:
-        axes[0, 2].text(0.5, 0.5, "No data", ha="center", va="center")
-    axes[0, 2].axis("off")
-
-    axes[0, 3].set_title("example 2 output", fontsize=12)
-    if "train_examples" in sample and len(sample["train_examples"]) >= 2:
-        img4_np = tensor_to_grayscale_numpy(sample["train_examples"][1]["output"])
-        rgb_img4 = np.zeros((*img4_np.shape, 3))
-        for i, color in enumerate(ARC_COLORS):
-            mask = img4_np == i
-            rgb_img4[mask] = (
-                np.array(
-                    [int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)]
-                )
-                / 255.0
-            )
-        axes[0, 3].imshow(rgb_img4)
-    else:
-        axes[0, 3].text(0.5, 0.5, "No data", ha="center", va="center")
-    axes[0, 3].axis("off")
-
-    # target input - handle new data structure
-    axes[1, 0].set_title("target input", fontsize=12)
-    if "test_example" in sample and "input" in sample["test_example"]:
-        target_input_np = tensor_to_grayscale_numpy(sample["test_example"]["input"])
-        rgb_target_input = np.zeros((*target_input_np.shape, 3))
-        for i, color in enumerate(ARC_COLORS):
-            mask = target_input_np == i
-            rgb_target_input[mask] = (
-                np.array(
-                    [int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)]
-                )
-                / 255.0
-            )
-        axes[1, 0].imshow(rgb_target_input)
-    else:
-        axes[1, 0].text(0.5, 0.5, "No data", ha="center", va="center")
-    axes[1, 0].axis("off")
-
-    # ground truth output
-    axes[1, 1].set_title("ground truth", fontsize=12)
-    if "test_example" in sample and "output" in sample["test_example"]:
-        target_output_np = tensor_to_grayscale_numpy(sample["test_example"]["output"])
-        rgb_target_output = np.zeros((*target_output_np.shape, 3))
-        for i, color in enumerate(ARC_COLORS):
-            mask = target_output_np == i
-            rgb_target_output[mask] = (
-                np.array(
-                    [int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)]
-                )
-                / 255.0
-            )
-        axes[1, 1].imshow(rgb_target_output)
-    else:
-        axes[1, 1].text(0.5, 0.5, "No data", ha="center", va="center")
-    axes[1, 1].axis("off")
-
-    # model prediction
-    axes[1, 2].set_title("model prediction", fontsize=12)
-    pred_np = tensor_to_grayscale_numpy(prediction)
-    rgb_pred = np.zeros((*pred_np.shape, 3))
-    for i, color in enumerate(ARC_COLORS):
-        mask = pred_np == i
-        rgb_pred[mask] = (
-            np.array([int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)])
-            / 255.0
-        )
-    axes[1, 2].imshow(rgb_pred)
-    axes[1, 2].axis("off")
-
-    # difference visualization
-    axes[1, 3].set_title("difference", fontsize=12)
-    if "test_example" in sample and "output" in sample["test_example"]:
-        target_output_np = tensor_to_grayscale_numpy(sample["test_example"]["output"])
-        diff = np.abs(target_output_np.astype(float) - pred_np.astype(float))
-        axes[1, 3].imshow(diff, cmap="hot", vmin=0, vmax=9)
-    else:
-        axes[1, 3].text(0.5, 0.5, "No data", ha="center", va="center")
-    axes[1, 3].axis("off")
-
-    # add grid to all subplots
-    for ax in axes.flat:
-        ax.set_xticks(np.arange(-0.5, 30, 1), minor=True)
-        ax.set_yticks(np.arange(-0.5, 30, 1), minor=True)
-        ax.grid(which="minor", color="gray", linestyle="-", linewidth=0.5, alpha=0.3)
-
-    plt.tight_layout()
-    return fig
 
 
 def load_experiment_info(experiment_dir: Path) -> Dict[str, Any]:
@@ -404,6 +186,9 @@ def evaluate_model_on_tasks(
     augmentation_variants=1,
     preserve_background=True,
     augmentation_seed=42,
+    enable_counterfactuals=False,
+    counterfactual_transform="rotate_90",
+    selected_task_indices=None,
 ):
     """evaluate model on all tasks in dataset and return results.
 
@@ -423,169 +208,196 @@ def evaluate_model_on_tasks(
         preserve_background: Whether to preserve background color
         augmentation_seed: Random seed for augmentation
     """
-    from torch.utils.data import DataLoader
-
     results = []
 
-    # Create augmented dataset if color augmentation is enabled
-    if enable_color_augmentation:
-        # Create a copy of the config with augmentation enabled
+    # Create augmented dataset if either color augmentation or counterfactuals are enabled
+    if enable_color_augmentation or enable_counterfactuals:
+        # Create a copy of the config with both augmentations enabled if needed
         augmented_config = Config()
         augmented_config.__dict__.update(config.__dict__)  # Copy all config values
-        augmented_config.use_color_relabeling = True
-        augmented_config.augmentation_variants = augmentation_variants
-        augmented_config.preserve_background = preserve_background
-        augmented_config.random_seed = augmentation_seed
 
-        # Create augmented dataset
-        from algo.data import ARCDataset
+        if enable_color_augmentation:
+            augmented_config.use_color_relabeling = True
+            augmented_config.augmentation_variants = augmentation_variants
+            augmented_config.preserve_background = preserve_background
+            augmented_config.random_seed = augmentation_seed
 
-        augmented_dataset = ARCDataset(
-            config.arc_agi1_dir,
-            augmented_config,
-            holdout=True,
-            use_first_combination_only=True,
+        if enable_counterfactuals:
+            augmented_config.enable_counterfactuals = True
+            augmented_config.counterfactual_transform = counterfactual_transform
+
+        # Create augmented dataset with both augmentations
+        task_indices = (
+            selected_task_indices
+            if selected_task_indices
+            else list(dataset.valid_tasks)
         )
-
-        # Handle different dataset types for subset creation
-        if hasattr(dataset, "dataset") and hasattr(dataset, "indices"):
-            # PyTorch Subset - get the original indices
-            original_indices = dataset.indices
-            augmented_dataset = Subset(augmented_dataset, original_indices)
-        elif hasattr(dataset, "selected_task_indices"):
-            # TaskSubset - get the selected task indices
-            from algo.data.task_subset import TaskSubset
-
-            selected_task_indices = dataset.selected_task_indices
-            augmented_dataset = TaskSubset(
-                task_indices=list(selected_task_indices),
-                config=augmented_config,
-                arc_agi1_dir=config.arc_agi1_dir,
-                holdout=True,
-                use_first_combination_only=True,
-            )
-
-        dataset = augmented_dataset
-
-    # Create DataLoader with custom collate function
-    dataloader = DataLoader(
-        dataset, batch_size=32, shuffle=False, collate_fn=custom_collate_fn
-    )
+        dataset = TaskSubset(
+            task_indices=task_indices,
+            config=augmented_config,
+            arc_agi1_dir=config.arc_agi1_dir,
+            holdout=True,
+            use_first_combination_only=False,
+        )
 
     # Set deterministic training for reproducible results
     config.set_deterministic_training()
 
+    # Get task indices
+    task_indices = (
+        selected_task_indices if selected_task_indices else list(dataset.valid_tasks)
+    )
+
     with torch.no_grad():
-        global_task_idx = 0  # Track actual task index across all batches
-        for i, batch in enumerate(dataloader):
+        total_tasks = len(task_indices)
+
+        for task_idx in task_indices:
             if progress_bar:
-                progress_bar.progress((i + 1) / len(dataloader))
+                progress_value = min(
+                    (task_idx + 1) / total_tasks, 1.0
+                )  # Ensure value is between 0 and 1
+                progress_bar.progress(progress_value)
 
-            # run model inference with rule latent training
-            outputs = model.forward_rule_latent_training(
-                batch["rule_latent_inputs"],
-                batch["all_train_inputs"],
-                batch["num_train"],
-            )
+            # Get all combinations for this task
+            task_combinations_data = dataset.get_task_combinations(task_idx)
+            task_combinations = task_combinations_data["all"]
 
-            # inject noise into rule latents if requested
-            if inject_noise:
-                for j in range(outputs["rule_latents"].size(0)):
-                    original_latent = outputs["rule_latents"][j : j + 1]
+            # Get all training examples for this task
+            training_examples = dataset.get_all_training_examples_for_task(task_idx)
+            train_inputs = [
+                ex["input"].squeeze(0) for ex in training_examples
+            ]  # Remove batch dim
+            max_train = len(train_inputs)
+
+            # Pad training inputs to consistent shape
+            all_train_inputs = torch.zeros([1, max_train, 1, 30, 30])
+            for j, train_input in enumerate(train_inputs):
+                all_train_inputs[0, j] = train_input
+
+            num_train = torch.tensor([max_train], dtype=torch.long)
+
+            task_results = []
+
+            for combo in task_combinations:
+                # Extract combination data
+                combo_idx = combo["combination_idx"]
+                i, j = combo["pair_indices"]
+                is_counterfactual = combo["is_counterfactual"]
+
+                # Get the preprocessed data from the combination
+                rule_latent_examples = combo["rule_latent_examples"]
+                test_example = combo["test_example"]
+                holdout_example = combo.get("holdout_example")
+
+                # Extract the preprocessed tensors for rule latent creation
+                example1_input = rule_latent_examples[0][
+                    "input"
+                ]  # Already has batch dimension
+                example1_output = rule_latent_examples[0]["output"]
+                example2_input = rule_latent_examples[1]["input"]
+                example2_output = rule_latent_examples[1]["output"]
+
+                # Create rule latent inputs tensor [1, 2, 2, 3, 64, 64]
+                rule_latent_inputs = torch.zeros([1, 2, 2, 3, 64, 64])
+                rule_latent_inputs[0, 0, 0] = example1_input.squeeze(0)  # [3, 64, 64]
+                rule_latent_inputs[0, 0, 1] = example1_output.squeeze(0)
+                rule_latent_inputs[0, 1, 0] = example2_input.squeeze(0)
+                rule_latent_inputs[0, 1, 1] = example2_output.squeeze(0)
+
+                # Run model inference
+                outputs = model.forward_rule_latent_training(
+                    rule_latent_inputs,
+                    all_train_inputs,
+                    num_train,
+                )
+
+                # inject noise into rule latent if requested
+                if inject_noise:
+                    original_latent = outputs["rule_latents"][0:1]
                     noisy_latent = generate_noise_latent(
                         original_latent, noise_type, noise_std, noise_range, noise_ratio
                     )
-                    outputs["rule_latents"][j : j + 1] = noisy_latent
+                    outputs["rule_latents"][0:1] = noisy_latent
 
-            # process each task in the batch
-            for j in range(batch["rule_latent_inputs"].size(0)):
-                # select target based on evaluation mode
+                # evaluate on target - use the test example from combination
                 if evaluation_mode == "test":
-                    # use test target
-                    target_logits = model.decoder(
-                        outputs["rule_latents"][j : j + 1],
-                        batch["test_inputs"][j : j + 1],
-                    )
-                    target_output = batch["test_outputs"][j : j + 1]
-                elif evaluation_mode == "holdout" and batch["has_holdout"][j]:
-                    # use holdout target
-                    target_logits = model.decoder(
-                        outputs["rule_latents"][j : j + 1],
-                        batch["holdout_inputs"][j : j + 1],
-                    )
-                    target_output = batch["holdout_outputs"][j : j + 1]
+                    target = test_example
+                elif evaluation_mode == "holdout" and holdout_example is not None:
+                    target = holdout_example
                 else:
-                    # fallback to test target
-                    target_logits = model.decoder(
-                        outputs["rule_latents"][j : j + 1],
-                        batch["test_inputs"][j : j + 1],
-                    )
-                    target_output = batch["test_outputs"][j : j + 1]
+                    target = test_example
 
-                # convert to predictions
+                # Create target tensors
+                target_input = target["input"].unsqueeze(0)  # Add batch dimension
+                target_output = target["output"].unsqueeze(0)
+
+                target_logits = model.decoder(
+                    outputs["rule_latents"][0:1],
+                    target_input,
+                )
                 predictions = torch.argmax(target_logits, dim=1).squeeze(0)
-
-                # calculate metrics
                 metrics = calculate_accuracy_metrics(predictions, target_output)
 
-                # get the global task index (actual ARC task index)
-                global_task_index = global_task_idx
-                if hasattr(dataset, "dataset") and hasattr(dataset, "indices"):
-                    # we're using a subset, get the actual task index from the original dataset
-                    global_task_index = dataset.indices[global_task_idx]
+                # Create sample data for visualization
+                sample_data = {
+                    "train_examples": [
+                        {
+                            "input": tensor_to_numpy(
+                                denormalize_rgb(rule_latent_examples[0]["input"])
+                            ),
+                            "output": tensor_to_numpy(
+                                denormalize_rgb(rule_latent_examples[0]["output"])
+                            ),
+                        },
+                        {
+                            "input": tensor_to_numpy(
+                                denormalize_rgb(rule_latent_examples[1]["input"])
+                            ),
+                            "output": tensor_to_numpy(
+                                denormalize_rgb(rule_latent_examples[1]["output"])
+                            ),
+                        },
+                    ],
+                    "test_example": {
+                        "input": tensor_to_grayscale_numpy(test_example["input"]),
+                        "output": tensor_to_grayscale_numpy(test_example["output"]),
+                    },
+                }
 
-                # extract task id - try multiple approaches
-                task_id = "unknown"
-
-                # approach 1: from combination_info in batch (preferred method)
-                if "combination_info" in batch:
-                    combo_info = batch["combination_info"]
-                    if isinstance(combo_info, dict):
-                        task_id = combo_info.get("task_id", "unknown")
-                        # Also get the actual task index from combination_info
-                        global_task_index = combo_info.get(
-                            "task_idx", global_task_index
-                        )
-                    elif isinstance(combo_info, list) and len(combo_info) > j:
-                        task_id = combo_info[j].get("task_id", "unknown")
-                        global_task_index = combo_info[j].get(
-                            "task_idx", global_task_index
-                        )
-                    elif isinstance(combo_info, list) and len(combo_info) > 0:
-                        task_id = combo_info[0].get("task_id", "unknown")
-                        global_task_index = combo_info[0].get(
-                            "task_idx", global_task_index
-                        )
-
-                # approach 2: if we have a subset, get task id from original dataset
-                if task_id == "unknown" and hasattr(dataset, "dataset"):
-                    # we're using a subset, get the original dataset
-                    original_dataset = dataset.dataset
-                    if global_task_index < len(original_dataset.tasks):
-                        task_id = original_dataset.tasks[global_task_index]["task_id"]
-
-                # approach 3: if still unknown, use the global task index as task_id
-                if task_id == "unknown":
-                    task_id = f"task_{global_task_index}"
-
-                # store results
-                results.append(
+                task_results.append(
                     {
-                        "task_idx": global_task_idx,  # Sequential evaluation index
-                        "global_task_index": global_task_index,  # Actual ARC task index
-                        "task_id": task_id,  # Task ID (filename)
+                        "combination_idx": combo_idx,
+                        "pair_indices": (i, j),
+                        "is_counterfactual": is_counterfactual,
                         "perfect_accuracy": metrics["perfect_accuracy"],
                         "pixel_accuracy": metrics["pixel_accuracy"],
                         "near_miss_accuracy": metrics["near_miss_accuracy"],
-                        "batch": batch,
                         "predictions": predictions,
                         "logits": target_logits,
-                        "evaluation_mode": evaluation_mode,
-                        "combination_info": batch.get("combination_info", {}),
-                        "batch_sample_idx": j,  # Store position within batch for visualization
+                        "sample_data": sample_data,
                     }
                 )
-                global_task_idx += 1
+
+            # For regular evaluation, we want to return all combinations as individual results
+            # This matches the format expected by the visualization code
+            for combo_result in task_results:
+                results.append(
+                    {
+                        "task_idx": task_idx,
+                        "global_task_index": task_idx,
+                        "task_id": dataset.tasks[task_idx]["task_id"],
+                        "combination_idx": combo_result["combination_idx"],
+                        "pair_indices": combo_result["pair_indices"],
+                        "is_counterfactual": combo_result["is_counterfactual"],
+                        "perfect_accuracy": combo_result["perfect_accuracy"],
+                        "pixel_accuracy": combo_result["pixel_accuracy"],
+                        "near_miss_accuracy": combo_result["near_miss_accuracy"],
+                        "predictions": combo_result["predictions"],
+                        "logits": combo_result["logits"],
+                        "sample_data": combo_result["sample_data"],
+                        "evaluation_mode": evaluation_mode,
+                    }
+                )
 
     return results
 
@@ -605,6 +417,9 @@ def test_all_combinations(
     augmentation_variants=1,
     preserve_background=True,
     augmentation_seed=42,
+    enable_counterfactuals=False,
+    counterfactual_transform="rotate_90",
+    selected_task_indices=None,
 ):
     """test all possible combinations of train examples for rule latent creation.
 
@@ -629,103 +444,80 @@ def test_all_combinations(
 
     results = []
 
-    # Create augmented dataset if color augmentation is enabled
-    if enable_color_augmentation:
-        # Create a copy of the config with augmentation enabled
+    # Create augmented dataset if either color augmentation or counterfactuals are enabled
+    if enable_color_augmentation or enable_counterfactuals:
+        # Create a copy of the config with both augmentations enabled if needed
         augmented_config = Config()
         augmented_config.__dict__.update(config.__dict__)  # Copy all config values
-        augmented_config.use_color_relabeling = True
-        augmented_config.augmentation_variants = augmentation_variants
-        augmented_config.preserve_background = preserve_background
-        augmented_config.random_seed = augmentation_seed
 
-        # Create augmented dataset
-        from algo.data import ARCDataset
+        if enable_color_augmentation:
+            augmented_config.use_color_relabeling = True
+            augmented_config.augmentation_variants = augmentation_variants
+            augmented_config.preserve_background = preserve_background
+            augmented_config.random_seed = augmentation_seed
 
-        augmented_dataset = ARCDataset(
-            config.arc_agi1_dir,
-            augmented_config,
+        if enable_counterfactuals:
+            augmented_config.enable_counterfactuals = True
+            augmented_config.counterfactual_transform = counterfactual_transform
+
+        # Create augmented dataset with both augmentations
+        task_indices = (
+            selected_task_indices
+            if selected_task_indices
+            else list(dataset.valid_tasks)
+        )
+        dataset = TaskSubset(
+            task_indices=task_indices,
+            config=augmented_config,
+            arc_agi1_dir=config.arc_agi1_dir,
             holdout=True,
-            use_first_combination_only=True,
+            use_first_combination_only=False,
         )
 
-        # Handle different dataset types for subset creation
-        if hasattr(dataset, "dataset") and hasattr(dataset, "indices"):
-            # PyTorch Subset - get the original indices
-            original_indices = dataset.indices
-            augmented_dataset = Subset(augmented_dataset, original_indices)
-        elif hasattr(dataset, "selected_task_indices"):
-            # TaskSubset - get the selected task indices
-            from algo.data.task_subset import TaskSubset
-
-            selected_task_indices = dataset.selected_task_indices
-            augmented_dataset = TaskSubset(
-                task_indices=list(selected_task_indices),
-                config=augmented_config,
-                arc_agi1_dir=config.arc_agi1_dir,
-                holdout=True,
-                use_first_combination_only=True,
-            )
-
-        dataset = augmented_dataset
-
-    # Get the underlying dataset if it's a Subset
-    if hasattr(dataset, "dataset"):
-        underlying_dataset = dataset.dataset
-    else:
-        underlying_dataset = dataset
-
     with torch.no_grad():
-        for task_idx in range(len(dataset)):
+        # Get the task indices to iterate over
+        task_indices_to_process = (
+            selected_task_indices
+            if selected_task_indices
+            else list(dataset.valid_tasks)
+        )
+
+        for task_idx in task_indices_to_process:
             if progress_bar:
-                progress_bar.progress((task_idx + 1) / len(dataset))
+                progress_bar.progress(
+                    (task_indices_to_process.index(task_idx) + 1)
+                    / len(task_indices_to_process)
+                )
 
             # get the task data
-            task_data = dataset[task_idx]
+            task_data = dataset[task_indices_to_process.index(task_idx)]
 
-            # get the original task index for combinations
-            original_task_index = task_data["combination_info"]["task_idx"]
-
-            # get the global task index for display (same logic as regular evaluation)
+            # get the global task index for display
             global_task_index = task_idx
-            if hasattr(dataset, "dataset") and hasattr(dataset, "indices"):
-                # we're using a subset, get the actual task index from the original dataset
-                global_task_index = dataset.indices[task_idx]
 
-            # get all possible combinations for this task (use original index)
-            task_combinations = underlying_dataset.combinations[original_task_index]
+            # get all possible combinations for this task using the new method
+            task_combinations_data = dataset.get_task_combinations(task_idx)
+            task_combinations = task_combinations_data["all"]
 
             task_results = []
-            for combo_idx, (i, j) in enumerate(task_combinations):
-                # create rule latent from this combination
-                # Get the raw data from the underlying dataset
-                raw_task_idx = task_data["combination_info"]["task_idx"]
-                raw_task = underlying_dataset.tasks[raw_task_idx]
+            for combo in task_combinations:
+                # Extract combination data
+                combo_idx = combo["combination_idx"]
+                i, j = combo["pair_indices"]
+                is_counterfactual = combo["is_counterfactual"]
 
-                # Get the specific training examples for this combination
-                # Handle both original and augmented examples
-                all_examples = raw_task["train"]
-                if "augmented_train" in raw_task:
-                    all_examples = raw_task["train"] + raw_task["augmented_train"]
+                # Get the preprocessed data from the combination
+                rule_latent_examples = combo["rule_latent_examples"]
+                test_example = combo["test_example"]
+                holdout_example = combo.get("holdout_example")
 
-                example1 = all_examples[i]
-                example2 = all_examples[j]
-
-                # Preprocess for ResNet encoder
-                from algo.data import preprocess_example_image
-
-                example1_input = preprocess_example_image(
-                    example1["input"], config
-                ).unsqueeze(0)  # [1, 3, 64, 64]
-                example1_output = preprocess_example_image(
-                    example1["output"], config
-                ).unsqueeze(0)  # [1, 3, 64, 64]
-                example2_input = preprocess_example_image(
-                    example2["input"], config
-                ).unsqueeze(0)  # [1, 3, 64, 64]
-                example2_output = preprocess_example_image(
-                    example2["output"], config
-                ).unsqueeze(0)  # [1, 3, 64, 64]
+                # Extract the preprocessed tensors
+                example1_input = rule_latent_examples[0][
+                    "input"
+                ]  # Already has batch dimension
+                example1_output = rule_latent_examples[0]["output"]
+                example2_input = rule_latent_examples[1]["input"]
+                example2_output = rule_latent_examples[1]["output"]
 
                 rule_latent = model.encoder(
                     example1_input, example1_output, example2_input, example2_output
@@ -737,43 +529,42 @@ def test_all_combinations(
                         rule_latent, noise_type, noise_std, noise_range, noise_ratio
                     )
 
-                # evaluate on target
+                # evaluate on target - use the test example from combination
                 if evaluation_mode == "test":
-                    target = task_data["training_targets"][-1]  # test target
-                elif evaluation_mode == "holdout" and task_data.get("holdout_target"):
-                    target = task_data["holdout_target"]
+                    target = test_example
+                elif evaluation_mode == "holdout" and holdout_example is not None:
+                    target = holdout_example
                 else:
-                    target = task_data["training_targets"][-1]
+                    target = test_example
 
                 logits = model.decoder(rule_latent, target["input"])
                 predictions = torch.argmax(logits, dim=1).squeeze(0)
                 metrics = calculate_accuracy_metrics(predictions, target["output"])
 
-                # Create sample data for visualization - use decoder preprocessing for training examples
-                from algo.data import preprocess_target_image
-
+                # Create sample data for visualization using the same approach as view_dataset.py
+                # Create visualization data
                 sample_data = {
                     "train_examples": [
                         {
-                            "input": preprocess_target_image(
-                                example1["input"], config
-                            ).squeeze(0),  # [1, 30, 30] -> [30, 30]
-                            "output": preprocess_target_image(
-                                example1["output"], config
-                            ).squeeze(0),
+                            "input": tensor_to_numpy(
+                                denormalize_rgb(rule_latent_examples[0]["input"])
+                            ),  # [1, 3, 64, 64] -> [64, 64, 3]
+                            "output": tensor_to_numpy(
+                                denormalize_rgb(rule_latent_examples[0]["output"])
+                            ),
                         },
                         {
-                            "input": preprocess_target_image(
-                                example2["input"], config
-                            ).squeeze(0),
-                            "output": preprocess_target_image(
-                                example2["output"], config
-                            ).squeeze(0),
+                            "input": tensor_to_numpy(
+                                denormalize_rgb(rule_latent_examples[1]["input"])
+                            ),
+                            "output": tensor_to_numpy(
+                                denormalize_rgb(rule_latent_examples[1]["output"])
+                            ),
                         },
                     ],
                     "test_example": {
-                        "input": target["input"],
-                        "output": target["output"],
+                        "input": tensor_to_grayscale_numpy(test_example["input"]),
+                        "output": tensor_to_grayscale_numpy(test_example["output"]),
                     },
                 }
 
@@ -781,6 +572,7 @@ def test_all_combinations(
                     {
                         "combination_idx": combo_idx,
                         "pair_indices": (i, j),
+                        "is_counterfactual": is_counterfactual,  # Add counterfactual flag
                         "perfect_accuracy": metrics["perfect_accuracy"],
                         "pixel_accuracy": metrics["pixel_accuracy"],
                         "near_miss_accuracy": metrics["near_miss_accuracy"],
@@ -790,15 +582,25 @@ def test_all_combinations(
                     }
                 )
 
-            results.append(
-                {
-                    "task_idx": task_idx,  # Sequential evaluation index
-                    "global_task_index": global_task_index,  # Actual ARC task index
-                    "task_id": task_data["combination_info"]["task_id"],
-                    "combinations": task_results,
-                    "evaluation_mode": evaluation_mode,
-                }
-            )
+            # Return individual combination results (same format as evaluate_model_on_tasks)
+            for combo_result in task_results:
+                results.append(
+                    {
+                        "task_idx": task_idx,
+                        "global_task_index": global_task_index,
+                        "task_id": task_data["task_id"],
+                        "combination_idx": combo_result["combination_idx"],
+                        "pair_indices": combo_result["pair_indices"],
+                        "is_counterfactual": combo_result["is_counterfactual"],
+                        "perfect_accuracy": combo_result["perfect_accuracy"],
+                        "pixel_accuracy": combo_result["pixel_accuracy"],
+                        "near_miss_accuracy": combo_result["near_miss_accuracy"],
+                        "predictions": combo_result["predictions"],
+                        "logits": combo_result["logits"],
+                        "sample_data": combo_result["sample_data"],
+                        "evaluation_mode": evaluation_mode,
+                    }
+                )
 
     return results
 
@@ -878,13 +680,19 @@ def main():
 
     config.use_color_relabeling = False
     dataset = ARCDataset(
-        config.arc_agi1_dir, config, holdout=True, use_first_combination_only=True
+        config.arc_agi1_dir, config, holdout=True, use_first_combination_only=False
     )
     if task_set == "overfit tasks only":
         if "tasks" in exp_info and "task_indices" in exp_info["tasks"]:
             task_indices = exp_info["tasks"]["task_indices"]
-            # Create a proper task subset that works with the new batching strategy
-            dataset = create_task_subset_for_evaluation(dataset, task_indices)
+            # Create a task subset for evaluation (first combination only)
+            dataset = TaskSubset(
+                task_indices=task_indices,
+                config=dataset.config,
+                arc_agi1_dir=str(dataset.raw_data_dir),
+                holdout=True,
+                use_first_combination_only=True,
+            )
             st.sidebar.write(f"**evaluating on {len(task_indices)} overfit tasks**")
         else:
             st.error("❌ no task indices found in experiment info")
@@ -990,6 +798,22 @@ def main():
             help="random seed for reproducible color relabeling",
         )
 
+    st.sidebar.subheader("counterfactual analysis")
+    enable_counterfactuals = st.sidebar.checkbox(
+        "enable counterfactuals",
+        value=False,
+        help="include counterfactual (rotated) examples in evaluation",
+    )
+
+    counterfactual_transform = "rotate_90"
+    if enable_counterfactuals:
+        counterfactual_transform = st.sidebar.selectbox(
+            "counterfactual transform",
+            ["rotate_90", "rotate_180", "rotate_270", "reflect_h", "reflect_v"],
+            index=0,
+            help="type of transformation to apply to outputs",
+        )
+
     if st.sidebar.button("🚀 evaluate model", type="primary"):
         if "evaluation_results" in st.session_state:
             del st.session_state.evaluation_results
@@ -1001,9 +825,37 @@ def main():
 
         if test_combinations:
             status_text.text("testing all combinations...")
+            # For testing all combinations, we need to create a task subset with all combinations
+            if task_set == "overfit tasks only":
+                if "tasks" in exp_info and "task_indices" in exp_info["tasks"]:
+                    task_indices = exp_info["tasks"]["task_indices"]
+                    # Create a task subset with all combinations for testing
+                    test_dataset = TaskSubset(
+                        task_indices=task_indices,
+                        config=dataset.config,
+                        arc_agi1_dir=str(dataset.raw_data_dir),
+                        holdout=True,
+                        use_first_combination_only=False,
+                    )
+                else:
+                    st.error("❌ no task indices found in experiment info")
+                    st.stop()
+            else:
+                test_dataset = dataset
+
+            # Get task indices for the test dataset
+            if task_set == "overfit tasks only":
+                task_indices = (
+                    exp_info["tasks"]["task_indices"]
+                    if "tasks" in exp_info and "task_indices" in exp_info["tasks"]
+                    else None
+                )
+            else:
+                task_indices = None
+
             results = test_all_combinations(
                 model,
-                dataset,
+                test_dataset,
                 config,
                 evaluation_mode,
                 progress_bar,
@@ -1016,10 +868,23 @@ def main():
                 augmentation_variants,
                 preserve_background,
                 augmentation_seed,
+                enable_counterfactuals,
+                counterfactual_transform,
+                selected_task_indices=task_indices,
             )
             st.session_state.combination_results = results
         else:
             status_text.text("evaluating model on tasks...")
+            # Get task indices for the dataset
+            if task_set == "overfit tasks only":
+                task_indices = (
+                    exp_info["tasks"]["task_indices"]
+                    if "tasks" in exp_info and "task_indices" in exp_info["tasks"]
+                    else None
+                )
+            else:
+                task_indices = None
+
             results = evaluate_model_on_tasks(
                 model,
                 dataset,
@@ -1035,6 +900,9 @@ def main():
                 augmentation_variants,
                 preserve_background,
                 augmentation_seed,
+                enable_counterfactuals,
+                counterfactual_transform,
+                selected_task_indices=task_indices,
             )
             st.session_state.evaluation_results = results
 
@@ -1050,9 +918,11 @@ def main():
         st.session_state.augmentation_variants = augmentation_variants
         st.session_state.preserve_background = preserve_background
         st.session_state.augmentation_seed = augmentation_seed
+        st.session_state.enable_counterfactuals = enable_counterfactuals
+        st.session_state.counterfactual_transform = counterfactual_transform
 
         progress_bar.empty()
-        status_text.text("evaluation complete!")
+        status_text.text(f"evaluation complete on {len(results)} tasks!")
         st.rerun()
 
     if "evaluation_results" in st.session_state:
@@ -1073,20 +943,41 @@ def main():
             else:
                 noise_info = f" (noise: {noise_type}, ratio={noise_ratio:.1f})"
 
-        st.subheader(f"📊 evaluation results ({current_task_set}){noise_info}")
+        # show counterfactual info if applicable
+        counterfactual_info = ""
+        if st.session_state.get("enable_counterfactuals", False):
+            counterfactual_transform = st.session_state.get(
+                "counterfactual_transform", "rotate_90"
+            )
+            counterfactual_info = f" (counterfactuals: {counterfactual_transform})"
+
+        st.subheader(
+            f"📊 evaluation results ({current_task_set}){noise_info}{counterfactual_info}"
+        )
 
         # create results dataframe
         df_data = []
         for result in results:
+            task_id_display = result["task_id"]
+            if result.get("is_counterfactual", False):
+                task_id_display += " (counterfactual)"
+
+            # Add combination info if available
+            combination_info = ""
+            if "combination_idx" in result:
+                combination_info = f" - combo {result['combination_idx']}"
+                if "pair_indices" in result:
+                    combination_info += f" {result['pair_indices']}"
+
             df_data.append(
                 {
                     "idx": result["global_task_index"],
-                    "task_id": result["task_id"],
+                    "task_id": task_id_display + combination_info,
                     "perfect": f"{result['perfect_accuracy']:.3f}",
                     "pixel": f"{result['pixel_accuracy']:.3f}",
                     "near_miss": f"{result['near_miss_accuracy']:.3f}",
                     "status": "✅ perfect"
-                    if result["perfect_accuracy"] > 0.99
+                    if result["perfect_accuracy"] == 1.0
                     else "⚠️ partial"
                     if result["pixel_accuracy"] > 0.5
                     else "❌ failed",
@@ -1100,7 +991,7 @@ def main():
         with col1:
             st.metric("total tasks", len(results))
         with col2:
-            perfect_count = sum(1 for r in results if r["perfect_accuracy"] > 0.99)
+            perfect_count = sum(1 for r in results if r["perfect_accuracy"] == 1.0)
             st.metric("perfect tasks", f"{perfect_count}/{len(results)}")
         with col3:
             avg_pixel = np.mean([r["pixel_accuracy"] for r in results])
@@ -1130,18 +1021,28 @@ def main():
             st.subheader(f"🔍 visualizing task {selected_task['task_idx']}")
 
             # visualize the selected task
-            # Extract the correct sample from the batch
-            batch = selected_task["batch"]
-            sample_idx = selected_task[
-                "batch_sample_idx"
-            ]  # Use stored batch sample index
+            if "sample_data" in selected_task:
+                # New format - direct sample data
+                sample_data = selected_task["sample_data"]
+                fig = visualize_prediction_comparison(
+                    sample_data, selected_task["predictions"]
+                )
+                st.pyplot(fig)
+            else:
+                # Old format - extract from batch
+                batch = selected_task["batch"]
+                sample_idx = selected_task[
+                    "batch_sample_idx"
+                ]  # Use stored batch sample index
 
-            evaluation_mode = st.session_state.get("evaluation_mode", "test")
-            sample_data = extract_sample_from_batch(batch, sample_idx, evaluation_mode)
-            fig = visualize_prediction_comparison(
-                sample_data, selected_task["predictions"]
-            )
-            st.pyplot(fig)
+                evaluation_mode = st.session_state.get("evaluation_mode", "test")
+                sample_data = extract_sample_from_batch(
+                    batch, sample_idx, evaluation_mode
+                )
+                fig = visualize_prediction_comparison(
+                    sample_data, selected_task["predictions"]
+                )
+                st.pyplot(fig)
 
             # show detailed metrics
             st.subheader("📈 detailed metrics")
@@ -1158,8 +1059,13 @@ def main():
                 )
 
     # display combination results if available
-    elif "combination_results" in st.session_state:
-        results = st.session_state.combination_results
+    elif (
+        "combination_results" in st.session_state
+        or "evaluation_results" in st.session_state
+    ):
+        results = st.session_state.get(
+            "combination_results", st.session_state.get("evaluation_results", [])
+        )
         current_task_set = st.session_state.get("task_set", "unknown")
         evaluation_mode = st.session_state.get("evaluation_mode", "test")
 
@@ -1177,33 +1083,42 @@ def main():
             else:
                 noise_info = f" (noise: {noise_type}, ratio={noise_ratio:.1f})"
 
+        # show counterfactual info if applicable
+        counterfactual_info = ""
+        if st.session_state.get("enable_counterfactuals", False):
+            counterfactual_transform = st.session_state.get(
+                "counterfactual_transform", "rotate_90"
+            )
+            counterfactual_info = f" (counterfactuals: {counterfactual_transform})"
+
         st.subheader(
-            f"🔄 combination test results ({current_task_set}) - {evaluation_mode} mode{noise_info}"
+            f"🔄 combination test results ({current_task_set}) - {evaluation_mode} mode{noise_info}{counterfactual_info}"
         )
 
-        # create combination results dataframe
+        # create combination results dataframe with consistent indexing
         combo_df_data = []
-        for task_result in results:
-            global_task_index = task_result[
-                "global_task_index"
-            ]  # Use global task index
-            task_id = task_result["task_id"]  # Use actual task ID
-            for combo in task_result["combinations"]:
-                combo_df_data.append(
-                    {
-                        "idx": global_task_index,  # Global task index
-                        "task_id": task_id,  # Task ID (filename)
-                        "combination": f"({combo['pair_indices'][0]}, {combo['pair_indices'][1]})",
-                        "perfect": f"{combo['perfect_accuracy']:.3f}",
-                        "pixel": f"{combo['pixel_accuracy']:.3f}",
-                        "near_miss": f"{combo['near_miss_accuracy']:.3f}",
-                        "status": "✅ perfect"
-                        if combo["perfect_accuracy"] > 0.99
-                        else "⚠️ partial"
-                        if combo["pixel_accuracy"] > 0.5
-                        else "❌ failed",
-                    }
-                )
+        combo_index_mapping = []  # Store mapping from dataframe index to (task_idx, combo_idx)
+
+        for result in results:
+            combo_df_data.append(
+                {
+                    "idx": result["global_task_index"],  # Global task index
+                    "task_id": result["task_id"],  # Task ID (filename)
+                    "combination": f"({result['pair_indices'][0]}, {result['pair_indices'][1]}){' (counterfactual)' if result.get('is_counterfactual', False) else ''}",
+                    "perfect": f"{result['perfect_accuracy']:.3f}",
+                    "pixel": f"{result['pixel_accuracy']:.3f}",
+                    "near_miss": f"{result['near_miss_accuracy']:.3f}",
+                    "status": "✅ perfect"
+                    if result["perfect_accuracy"] == 1.0
+                    else "⚠️ partial"
+                    if result["pixel_accuracy"] > 0.5
+                    else "❌ failed",
+                }
+            )
+            # Store mapping for later lookup
+            combo_index_mapping.append(
+                (result["global_task_index"], result["combination_idx"])
+            )
 
         combo_df = pd.DataFrame(combo_df_data)
 
@@ -1212,19 +1127,16 @@ def main():
         with col1:
             st.metric("total combinations", len(combo_df_data))
         with col2:
-            perfect_count = sum(1 for r in combo_df_data if float(r["perfect"]) > 0.99)
+            perfect_count = sum(1 for r in combo_df_data if float(r["perfect"]) == 1.0)
             st.metric("perfect combinations", f"{perfect_count}/{len(combo_df_data)}")
         with col3:
             # Calculate perfect tasks (tasks with at least one perfect combination)
             perfect_tasks = set()
-            for task_result in results:
-                has_perfect = any(
-                    combo["perfect_accuracy"] > 0.99
-                    for combo in task_result["combinations"]
-                )
-                if has_perfect:
-                    perfect_tasks.add(task_result["task_id"])
-            st.metric("perfect tasks", f"{len(perfect_tasks)}/{len(results)}")
+            for result in results:
+                if result["perfect_accuracy"] == 1.0:
+                    perfect_tasks.add(result["global_task_index"])
+            total_tasks = len(set(r["global_task_index"] for r in results))
+            st.metric("perfect tasks", f"{len(perfect_tasks)}/{total_tasks}")
         with col4:
             avg_pixel = np.mean([float(r["pixel"]) for r in combo_df_data])
             st.metric("avg pixel accuracy", f"{avg_pixel:.3f}")
@@ -1250,19 +1162,21 @@ def main():
         if selected_rows.selection.rows:
             selected_idx = selected_rows.selection.rows[0]
 
-            # find the selected combination
-            combo_idx = 0
+            # use the mapping to find the correct combination
+            if selected_idx < len(combo_index_mapping):
+                global_task_index, combo_idx = combo_index_mapping[selected_idx]
+
+                # find the selected task and combination
             selected_task = None
             selected_combo = None
 
-            for task_result in results:
-                for combo in task_result["combinations"]:
-                    if combo_idx == selected_idx:
-                        selected_task = task_result
-                        selected_combo = combo
-                        break
-                    combo_idx += 1
-                if selected_combo is not None:
+            for result in results:
+                if (
+                    result["global_task_index"] == global_task_index
+                    and result["combination_idx"] == combo_idx
+                ):
+                    selected_task = result
+                    selected_combo = result
                     break
 
             if selected_combo is not None:
@@ -1298,33 +1212,45 @@ def main():
                 col1, col2 = st.columns(2)
                 with col1:
                     st.write(f"**Task ID:** {selected_task['task_id']}")
-                    st.write(f"**Combination:** {selected_combo['pair_indices']}")
+                    combination_display = f"{selected_combo['pair_indices']}"
+                    if selected_combo.get("is_counterfactual", False):
+                        combination_display += " (counterfactual)"
+                    st.write(f"**Combination:** {combination_display}")
                     st.write(f"**Evaluation Mode:** {evaluation_mode}")
                 with col2:
                     st.write(
                         f"**Training Examples Used:** {selected_combo['pair_indices'][0]} and {selected_combo['pair_indices'][1]}"
                     )
                     st.write(
-                        f"**Status:** {'✅ perfect' if selected_combo['perfect_accuracy'] > 0.99 else '⚠️ partial' if selected_combo['pixel_accuracy'] > 0.5 else '❌ failed'}"
+                        f"**Status:** {'✅ perfect' if selected_combo['perfect_accuracy'] == 1.0 else '⚠️ partial' if selected_combo['pixel_accuracy'] > 0.5 else '❌ failed'}"
                     )
 
         # per-task summary
         st.subheader("📊 per-task summary")
         task_summary = []
-        for task_result in results:
-            global_task_index = task_result["global_task_index"]
-            task_id = task_result["task_id"]
-            combinations = task_result["combinations"]
-            best_perfect = max(combo["perfect_accuracy"] for combo in combinations)
-            best_pixel = max(combo["pixel_accuracy"] for combo in combinations)
-            avg_perfect = np.mean([combo["perfect_accuracy"] for combo in combinations])
-            avg_pixel = np.mean([combo["pixel_accuracy"] for combo in combinations])
+
+        # Group results by task index (global_task_index)
+        task_groups = {}
+        for result in results:
+            global_task_index = result["global_task_index"]
+            if global_task_index not in task_groups:
+                task_groups[global_task_index] = []
+            task_groups[global_task_index].append(result)
+
+        for global_task_index, task_results in task_groups.items():
+            task_id = task_results[0]["task_id"]  # Get task_id from first result
+            best_perfect = max(result["perfect_accuracy"] for result in task_results)
+            best_pixel = max(result["pixel_accuracy"] for result in task_results)
+            avg_perfect = np.mean(
+                [result["perfect_accuracy"] for result in task_results]
+            )
+            avg_pixel = np.mean([result["pixel_accuracy"] for result in task_results])
 
             task_summary.append(
                 {
                     "idx": global_task_index,
                     "task_id": task_id,
-                    "combinations": len(combinations),
+                    "combinations": len(task_results),
                     "best_perfect": f"{best_perfect:.3f}",
                     "best_pixel": f"{best_pixel:.3f}",
                     "avg_perfect": f"{avg_perfect:.3f}",
