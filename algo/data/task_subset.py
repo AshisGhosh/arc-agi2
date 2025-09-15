@@ -81,6 +81,11 @@ class TaskSubset(ARCDataset):
             all_examples, i, j, is_counterfactual
         )
 
+        # Create rule latent targets using the base class helper
+        rule_latent_targets = self._create_rule_latent_targets(
+            all_examples, i, j, is_counterfactual
+        )
+
         # Create test example using the base class helper
         test_example = self._get_test_example(task, is_counterfactual)
 
@@ -89,7 +94,8 @@ class TaskSubset(ARCDataset):
 
         return {
             # Core data - only what's needed for this combination
-            "rule_latent_examples": rule_latent_inputs,  # 2 examples for encoder
+            "rule_latent_examples": rule_latent_inputs,  # 2 examples for encoder (ResNet format)
+            "rule_latent_targets": rule_latent_targets,  # 2 examples for decoder (ARC format)
             "test_example": test_example,  # Single test example
             "holdout_example": holdout_example,  # Optional holdout
             # Top-level metadata

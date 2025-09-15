@@ -39,9 +39,9 @@ def extract_sample_from_batch(batch, sample_idx, evaluation_mode="test"):
         },
     }
 
-    # Use holdout data if in holdout mode and available
-    if evaluation_mode == "holdout" and batch["has_holdout"][sample_idx]:
-        sample["test_example"] = {
+    # Add holdout data if available
+    if batch["has_holdout"][sample_idx]:
+        sample["holdout_example"] = {
             "input": batch["holdout_inputs"][sample_idx],
             "output": batch["holdout_outputs"][sample_idx],
         }
@@ -364,6 +364,13 @@ def evaluate_model_on_tasks(
                     },
                 }
 
+                # Add holdout data if available
+                if holdout_example is not None:
+                    sample_data["holdout_example"] = {
+                        "input": tensor_to_grayscale_numpy(holdout_example["input"]),
+                        "output": tensor_to_grayscale_numpy(holdout_example["output"]),
+                    }
+
                 task_results.append(
                     {
                         "combination_idx": combo_idx,
@@ -567,6 +574,13 @@ def test_all_combinations(
                         "output": tensor_to_grayscale_numpy(test_example["output"]),
                     },
                 }
+
+                # Add holdout data if available
+                if holdout_example is not None:
+                    sample_data["holdout_example"] = {
+                        "input": tensor_to_grayscale_numpy(holdout_example["input"]),
+                        "output": tensor_to_grayscale_numpy(holdout_example["output"]),
+                    }
 
                 task_results.append(
                     {
@@ -1025,7 +1039,7 @@ def main():
                 # New format - direct sample data
                 sample_data = selected_task["sample_data"]
                 fig = visualize_prediction_comparison(
-                    sample_data, selected_task["predictions"]
+                    sample_data, selected_task["predictions"], evaluation_mode
                 )
                 st.pyplot(fig)
             else:
@@ -1040,7 +1054,7 @@ def main():
                     batch, sample_idx, evaluation_mode
                 )
                 fig = visualize_prediction_comparison(
-                    sample_data, selected_task["predictions"]
+                    sample_data, selected_task["predictions"], evaluation_mode
                 )
                 st.pyplot(fig)
 
@@ -1186,7 +1200,9 @@ def main():
 
                 # visualize the selected combination
                 fig = visualize_prediction_comparison(
-                    selected_combo["sample_data"], selected_combo["predictions"]
+                    selected_combo["sample_data"],
+                    selected_combo["predictions"],
+                    evaluation_mode,
                 )
                 st.pyplot(fig)
 

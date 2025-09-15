@@ -303,13 +303,46 @@ class OverfitExperiment:
                 # Move batch to device
                 device = next(model.parameters()).device
                 rule_latent_inputs = batch["rule_latent_inputs"].to(device)
-                all_train_inputs = batch["all_train_inputs"].to(device)
                 test_inputs = batch["test_inputs"].to(device)
                 test_outputs = batch["test_outputs"].to(device)
                 holdout_inputs = batch["holdout_inputs"].to(device)
                 holdout_outputs = batch["holdout_outputs"].to(device)
-                num_train = batch["num_train"].to(device)
                 has_holdout = batch["has_holdout"].to(device)
+
+                # Get task indices for this batch
+                task_indices = batch["task_indices"]
+
+                # Get all training examples for each task in the batch
+                batch_size = rule_latent_inputs.size(0)
+                max_train = 0
+                all_train_inputs_list = []
+                num_train_list = []
+
+                for i in range(batch_size):
+                    task_idx = task_indices[i]  # Already an integer from the list
+                    training_examples = task_dataset.get_all_training_examples_for_task(
+                        task_idx
+                    )
+
+                    # Extract inputs
+                    train_inputs = [
+                        ex["input"].squeeze(0) for ex in training_examples
+                    ]  # Remove batch dim
+
+                    max_train = max(max_train, len(train_inputs))
+                    all_train_inputs_list.append(train_inputs)
+                    num_train_list.append(len(train_inputs))
+
+                # Pad all training inputs to consistent shape
+                all_train_inputs = torch.zeros([batch_size, max_train, 1, 30, 30]).to(
+                    device
+                )
+
+                for i, train_inputs in enumerate(all_train_inputs_list):
+                    for j, train_input in enumerate(train_inputs):
+                        all_train_inputs[i, j] = train_input
+
+                num_train = torch.tensor(num_train_list, dtype=torch.long).to(device)
 
                 # Forward pass with batched rule latent training
                 outputs = model.forward_rule_latent_training(

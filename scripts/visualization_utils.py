@@ -255,11 +255,11 @@ def visualize_task_combination(
     return fig
 
 
-def visualize_prediction_comparison(sample, prediction):
+def visualize_prediction_comparison(sample, prediction, evaluation_mode="test"):
     """Visualize model predictions compared to ground truth."""
     # create figure with 2x4 grid
     fig, axes = plt.subplots(2, 4, figsize=(16, 8))
-    fig.suptitle("model prediction comparison", fontsize=16)
+    fig.suptitle(f"model prediction comparison ({evaluation_mode} mode)", fontsize=16)
 
     # example 1 - handle RGB images from rule latent inputs
     axes[0, 0].set_title("example 1 input", fontsize=12)
@@ -323,10 +323,17 @@ def visualize_prediction_comparison(sample, prediction):
         axes[0, 3].text(0.5, 0.5, "No data", ha="center", va="center")
     axes[0, 3].axis("off")
 
-    # target input - handle new data structure
-    axes[1, 0].set_title("target input", fontsize=12)
-    if "test_example" in sample and "input" in sample["test_example"]:
-        target_input_np = tensor_to_grayscale_numpy(sample["test_example"]["input"])
+    # target input - use appropriate data based on evaluation mode
+    target_data = None
+    if evaluation_mode == "holdout" and "holdout_example" in sample:
+        target_data = sample["holdout_example"]
+        axes[1, 0].set_title("holdout input", fontsize=12)
+    else:
+        target_data = sample.get("test_example")
+        axes[1, 0].set_title("test input", fontsize=12)
+
+    if target_data and "input" in target_data:
+        target_input_np = tensor_to_grayscale_numpy(target_data["input"])
         rgb_target_input = apply_arc_color_palette(target_input_np)
         axes[1, 0].imshow(rgb_target_input)
     else:
@@ -334,9 +341,13 @@ def visualize_prediction_comparison(sample, prediction):
     axes[1, 0].axis("off")
 
     # ground truth output
-    axes[1, 1].set_title("ground truth", fontsize=12)
-    if "test_example" in sample and "output" in sample["test_example"]:
-        target_output_np = tensor_to_grayscale_numpy(sample["test_example"]["output"])
+    if evaluation_mode == "holdout" and "holdout_example" in sample:
+        axes[1, 1].set_title("holdout ground truth", fontsize=12)
+    else:
+        axes[1, 1].set_title("test ground truth", fontsize=12)
+
+    if target_data and "output" in target_data:
+        target_output_np = tensor_to_grayscale_numpy(target_data["output"])
         rgb_target_output = apply_arc_color_palette(target_output_np)
         axes[1, 1].imshow(rgb_target_output)
     else:
@@ -352,8 +363,8 @@ def visualize_prediction_comparison(sample, prediction):
 
     # difference visualization
     axes[1, 3].set_title("difference", fontsize=12)
-    if "test_example" in sample and "output" in sample["test_example"]:
-        target_output_np = tensor_to_grayscale_numpy(sample["test_example"]["output"])
+    if target_data and "output" in target_data:
+        target_output_np = tensor_to_grayscale_numpy(target_data["output"])
         diff = np.abs(target_output_np.astype(float) - pred_np.astype(float))
         axes[1, 3].imshow(diff, cmap="hot", vmin=0, vmax=9)
     else:

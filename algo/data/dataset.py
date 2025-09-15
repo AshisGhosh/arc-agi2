@@ -41,6 +41,10 @@ def custom_collate_fn(batch):
     pair_indices = []
     total_combinations = []
 
+    # Collect raw rule latent examples for decoder
+    raw_rule_latent_examples = []
+    raw_rule_latent_targets = []
+
     # Fill with real data
     for i, sample in enumerate(batch):
         # Rule latent inputs (2 examples for ResNet)
@@ -67,6 +71,10 @@ def custom_collate_fn(batch):
             holdout_outputs[i] = sample["holdout_example"]["output"].squeeze(0)
             has_holdout[i] = True
 
+        # Collect raw rule latent examples for decoder
+        raw_rule_latent_examples.append(sample["rule_latent_examples"])
+        raw_rule_latent_targets.append(sample["rule_latent_targets"])
+
         # Collect metadata
         task_indices.append(sample["task_idx"])
         task_ids.append(sample["task_id"])
@@ -82,6 +90,8 @@ def custom_collate_fn(batch):
         "holdout_inputs": holdout_inputs,  # [B, 1, 30, 30]
         "holdout_outputs": holdout_outputs,  # [B, 1, 30, 30]
         "has_holdout": has_holdout,  # [B]
+        "raw_rule_latent_examples": raw_rule_latent_examples,  # [B] list of raw examples (ResNet format)
+        "raw_rule_latent_targets": raw_rule_latent_targets,  # [B] list of raw targets (ARC format)
         "task_indices": task_indices,  # [B] list of task indices
         "task_ids": task_ids,  # [B] list of task IDs
         "is_counterfactual": is_counterfactual,  # [B] list of counterfactual flags
@@ -177,10 +187,24 @@ class ARCDataset(Dataset):
 
             # Generate combinations from all examples
             if total_examples >= 2:
-                # Use all available examples for combinations
-                task_combinations = list(
-                    itertools.combinations(range(total_examples), 2)
-                )
+                # For holdout mode, exclude the last original example from combinations
+                if self.holdout and len(original_examples) > 2:
+                    # Only use the first (len(original_examples) - 1) examples for combinations
+                    # This excludes the holdout example
+                    max_original_idx = len(original_examples) - 1
+                    if self.config.use_color_relabeling:
+                        # Augmented examples come after original examples
+                        max_idx = max_original_idx + len(augmented_examples)
+                    else:
+                        max_idx = max_original_idx
+
+                    # Generate combinations only from non-holdout examples
+                    task_combinations = list(itertools.combinations(range(max_idx), 2))
+                else:
+                    # Use all available examples for combinations
+                    task_combinations = list(
+                        itertools.combinations(range(total_examples), 2)
+                    )
 
                 # NEW: Add counterfactual combinations if enabled
                 if self.config.enable_counterfactuals:
@@ -387,10 +411,15 @@ class ARCDataset(Dataset):
         self, task: Dict[str, Any], is_counterfactual: bool
     ) -> List[Dict[str, Any]]:
         """Get all available examples (original + augmented + counterfactual if applicable)."""
-        all_examples = task["train"]
+        # Start with training examples, excluding holdout if holdout mode is enabled
+        if self.holdout and len(task["train"]) > 2:
+            # Exclude the last training example (holdout) from rule latent creation
+            all_examples = task["train"][:-1]
+        else:
+            all_examples = task["train"]
 
         if self.config.use_color_relabeling and "augmented_train" in task:
-            all_examples = task["train"] + task["augmented_train"]
+            all_examples = all_examples + task["augmented_train"]
 
         if is_counterfactual:
             all_examples = all_examples + task["counterfactual_train"]
@@ -425,6 +454,31 @@ class ARCDataset(Dataset):
             return [
                 self._preprocess_example(all_examples[i]),
                 self._preprocess_example(all_examples[j]),
+            ]
+
+    def _create_rule_latent_targets(
+        self,
+        all_examples: List[Dict[str, Any]],
+        i: int,
+        j: int,
+        is_counterfactual: bool,
+    ) -> List[Dict[str, torch.Tensor]]:
+        """Create rule latent targets (ARC format) from examples i and j for decoder."""
+        if is_counterfactual:
+            # For counterfactual combinations, create counterfactual versions
+            ex1 = copy.deepcopy(all_examples[i])
+            ex2 = copy.deepcopy(all_examples[j])
+
+            # Preprocess with counterfactual transformation for decoder
+            ex1_processed = self._preprocess_target(ex1, apply_counterfactual=True)
+            ex2_processed = self._preprocess_target(ex2, apply_counterfactual=True)
+
+            return [ex1_processed, ex2_processed]
+        else:
+            # For non-counterfactual combinations, use original examples
+            return [
+                self._preprocess_target(all_examples[i]),
+                self._preprocess_target(all_examples[j]),
             ]
 
     def _create_training_targets(
@@ -525,6 +579,11 @@ class ARCDataset(Dataset):
             all_examples, i, j, is_counterfactual
         )
 
+        # Create rule latent targets (2 examples for decoder)
+        rule_latent_targets = self._create_rule_latent_targets(
+            all_examples, i, j, is_counterfactual
+        )
+
         # Create test example
         test_example = self._get_test_example(task, is_counterfactual)
 
@@ -533,7 +592,8 @@ class ARCDataset(Dataset):
 
         return {
             # Core data - only what's needed for this combination
-            "rule_latent_examples": rule_latent_inputs,  # 2 examples for encoder
+            "rule_latent_examples": rule_latent_inputs,  # 2 examples for encoder (ResNet format)
+            "rule_latent_targets": rule_latent_targets,  # 2 examples for decoder (ARC format)
             "test_example": test_example,  # Single test example
             "holdout_example": holdout_example,  # Optional holdout
             # Top-level metadata
@@ -573,12 +633,18 @@ class ARCDataset(Dataset):
     def get_all_training_examples_for_task(
         self, task_idx: int
     ) -> List[Dict[str, torch.Tensor]]:
-        """Get all training examples for a specific task."""
+        """Get all training examples for a specific task (excluding holdout)."""
         task = self.tasks[task_idx]
         training_examples = []
 
-        # Get original training examples
-        for example in task["train"]:
+        # Get original training examples (excluding holdout if holdout mode is enabled)
+        if self.holdout and len(task["train"]) > 2:
+            # Exclude the last training example (holdout) from training
+            train_examples = task["train"][:-1]
+        else:
+            train_examples = task["train"]
+
+        for example in train_examples:
             training_examples.append(self._preprocess_target(example))
 
         # Add augmented examples if available

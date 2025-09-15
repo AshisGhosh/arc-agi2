@@ -141,93 +141,100 @@ class ARCTrainer:
 
         for batch_idx, batch in enumerate(pbar):
             # Move batch to device
-            rule_latent_inputs = batch["rule_latent_inputs"].to(self.device)
-            holdout_inputs = batch["holdout_inputs"].to(self.device)
-            holdout_outputs = batch["holdout_outputs"].to(self.device)
-            has_holdout = batch["has_holdout"].to(self.device)
+            rule_latent_inputs = batch["rule_latent_inputs"].to(
+                self.device
+            )  # [B, 2, 2, 3, 64, 64]
+            test_inputs = batch["test_inputs"].to(self.device)  # [B, 1, 30, 30]
+            test_outputs = batch["test_outputs"].to(self.device)  # [B, 1, 30, 30]
+            holdout_inputs = batch["holdout_inputs"].to(self.device)  # [B, 1, 30, 30]
+            holdout_outputs = batch["holdout_outputs"].to(self.device)  # [B, 1, 30, 30]
+            has_holdout = batch["has_holdout"].to(self.device)  # [B]
+            raw_rule_latent_targets = batch[
+                "raw_rule_latent_targets"
+            ]  # [B] list of raw targets (ARC format)
 
-            # Get task indices for this batch
-            task_indices = batch["task_indices"]
-
-            # Get all training examples for each task in the batch
             batch_size = rule_latent_inputs.size(0)
-            max_train = 0
-            all_train_inputs_list = []
-            all_train_outputs_list = []
-            num_train_list = []
 
-            for i in range(batch_size):
-                task_idx = task_indices[i]  # Already an integer from the list
-                training_examples = self.dataset.get_all_training_examples_for_task(
-                    task_idx
-                )
+            # Reshape rule latent inputs for encoder: [B, 4, 3, 64, 64] where 4 = 2 examples * 2 images each
+            rule_inputs_batch = rule_latent_inputs.view(batch_size, 4, 3, 64, 64)
 
-                # Extract inputs and outputs
-                train_inputs = [
-                    ex["input"].squeeze(0) for ex in training_examples
-                ]  # Remove batch dim
-                train_outputs = [ex["output"].squeeze(0) for ex in training_examples]
+            # Split into the 4 components the encoder expects
+            example1_inputs = rule_inputs_batch[:, 0]  # [B, 3, 64, 64]
+            example1_outputs = rule_inputs_batch[:, 1]  # [B, 3, 64, 64]
+            example2_inputs = rule_inputs_batch[:, 2]  # [B, 3, 64, 64]
+            example2_outputs = rule_inputs_batch[:, 3]  # [B, 3, 64, 64]
 
-                max_train = max(max_train, len(train_inputs))
-                all_train_inputs_list.append(train_inputs)
-                all_train_outputs_list.append(train_outputs)
-                num_train_list.append(len(train_inputs))
+            # Run encoder on entire batch at once
+            rule_latents = self.model.encoder(
+                example1_inputs, example1_outputs, example2_inputs, example2_outputs
+            )  # [B, 128]
 
-            # Pad all training inputs to consistent shape
-            all_train_inputs = torch.zeros([batch_size, max_train, 1, 30, 30]).to(
-                self.device
-            )
-            all_train_outputs = torch.zeros([batch_size, max_train, 1, 30, 30]).to(
-                self.device
-            )
-
-            for i, (train_inputs, train_outputs) in enumerate(
-                zip(all_train_inputs_list, all_train_outputs_list)
-            ):
-                for j, (train_input, train_output) in enumerate(
-                    zip(train_inputs, train_outputs)
-                ):
-                    all_train_inputs[i, j] = train_input
-                    all_train_outputs[i, j] = train_output
-
-            num_train = torch.tensor(num_train_list, dtype=torch.long).to(self.device)
-
-            # Forward pass with batched rule latent training
-            outputs = self.model.forward_rule_latent_training(
-                rule_latent_inputs, all_train_inputs, num_train
-            )
-
-            # Calculate training loss for all tasks - vectorized
+            # Calculate training loss for all tasks
             batch_training_loss = 0.0
             batch_holdout_loss = 0.0
 
             # Process all tasks at once
-            for i in range(rule_latent_inputs.size(0)):
-                num_train_i = num_train[i].item()
-                if num_train_i > 0:
-                    # Get training targets for this task
-                    train_logits = outputs["training_logits"][
-                        i, :num_train_i
-                    ]  # [num_train, 10, 30, 30]
-                    train_outputs = all_train_outputs[
-                        i, :num_train_i
-                    ]  # [num_train, 1, 30, 30]
+            for i in range(batch_size):
+                # Get rule latent for this task
+                rule_latent = rule_latents[i : i + 1]  # [1, 128]
 
-                    # Calculate loss for this task
-                    task_loss, components = calculate_classification_loss(
-                        train_logits, train_outputs, self.config
-                    )
-                    batch_training_loss += task_loss
+                # 1. Test example prediction (main target)
+                test_logits = self.model.decoder(
+                    rule_latent, test_inputs[i : i + 1]
+                )  # [1, 10, 30, 30]
+                test_loss, test_comp = calculate_classification_loss(
+                    test_logits, test_outputs[i : i + 1], self.config
+                )
+                batch_training_loss += test_loss
 
-                    # Update metrics
-                    for key, value in components.items():
-                        if key != "total_loss":
-                            loss_components[key] += value
+                # Update test metrics
+                for key, value in test_comp.items():
+                    if key != "total_loss":
+                        loss_components[key] += value
 
-                # Calculate holdout loss (if available)
+                # 2. Rule latent example 1 prediction (to prevent memorization)
+                # Use raw targets from batch (ARC format)
+                ex1_input = raw_rule_latent_targets[i][0]["input"].unsqueeze(
+                    0
+                )  # [1, 1, 30, 30]
+                ex1_output = raw_rule_latent_targets[i][0]["output"].unsqueeze(
+                    0
+                )  # [1, 1, 30, 30]
+
+                ex1_logits = self.model.decoder(
+                    rule_latent, ex1_input
+                )  # [1, 10, 30, 30]
+                ex1_loss, ex1_comp = calculate_classification_loss(
+                    ex1_logits, ex1_output, self.config
+                )
+                batch_training_loss += ex1_loss
+                for key, value in ex1_comp.items():
+                    if key != "total_loss":
+                        loss_components[key] += value
+
+                # 3. Rule latent example 2 prediction (to prevent memorization)
+                ex2_input = raw_rule_latent_targets[i][1]["input"].unsqueeze(
+                    0
+                )  # [1, 1, 30, 30]
+                ex2_output = raw_rule_latent_targets[i][1]["output"].unsqueeze(
+                    0
+                )  # [1, 1, 30, 30]
+
+                ex2_logits = self.model.decoder(
+                    rule_latent, ex2_input
+                )  # [1, 10, 30, 30]
+                ex2_loss, ex2_comp = calculate_classification_loss(
+                    ex2_logits, ex2_output, self.config
+                )
+                batch_training_loss += ex2_loss
+                for key, value in ex2_comp.items():
+                    if key != "total_loss":
+                        loss_components[key] += value
+
+                # Calculate holdout loss (if available) - for validation only
                 if has_holdout[i]:
                     holdout_logits = self.model.decoder(
-                        outputs["rule_latents"][i : i + 1], holdout_inputs[i : i + 1]
+                        rule_latent, holdout_inputs[i : i + 1]
                     )
                     holdout_loss, holdout_comp = calculate_classification_loss(
                         holdout_logits, holdout_outputs[i : i + 1], self.config
