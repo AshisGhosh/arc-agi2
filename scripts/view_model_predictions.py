@@ -693,6 +693,7 @@ def main():
         st.stop()
 
     config.use_color_relabeling = False
+    config.enable_counterfactuals = False
     dataset = ARCDataset(
         config.arc_agi1_dir, config, holdout=True, use_first_combination_only=False
     )

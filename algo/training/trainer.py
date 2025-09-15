@@ -194,12 +194,8 @@ class ARCTrainer:
 
                 # 2. Rule latent example 1 prediction (to prevent memorization)
                 # Use raw targets from batch (ARC format)
-                ex1_input = raw_rule_latent_targets[i][0]["input"].unsqueeze(
-                    0
-                )  # [1, 1, 30, 30]
-                ex1_output = raw_rule_latent_targets[i][0]["output"].unsqueeze(
-                    0
-                )  # [1, 1, 30, 30]
+                ex1_input = raw_rule_latent_targets[i][0]["input"]  # [1, 1, 30, 30]
+                ex1_output = raw_rule_latent_targets[i][0]["output"]  # [1, 1, 30, 30]
 
                 ex1_logits = self.model.decoder(
                     rule_latent, ex1_input
@@ -213,12 +209,8 @@ class ARCTrainer:
                         loss_components[key] += value
 
                 # 3. Rule latent example 2 prediction (to prevent memorization)
-                ex2_input = raw_rule_latent_targets[i][1]["input"].unsqueeze(
-                    0
-                )  # [1, 1, 30, 30]
-                ex2_output = raw_rule_latent_targets[i][1]["output"].unsqueeze(
-                    0
-                )  # [1, 1, 30, 30]
+                ex2_input = raw_rule_latent_targets[i][1]["input"]  # [1, 1, 30, 30]
+                ex2_output = raw_rule_latent_targets[i][1]["output"]  # [1, 1, 30, 30]
 
                 ex2_logits = self.model.decoder(
                     rule_latent, ex2_input
