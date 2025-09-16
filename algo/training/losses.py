@@ -18,8 +18,8 @@ def calculate_classification_loss(
         Tuple of (total_loss, loss_components)
     """
     # Flatten spatial dimensions for cross-entropy
-    logits_flat = logits.view(logits.size(0), 10, -1)  # [B, 10, 900]
-    target_flat = target.view(target.size(0), -1)  # [B, 900]
+    logits_flat = logits.reshape(logits.size(0), 10, -1)  # [B, 10, 900]
+    target_flat = target.reshape(target.size(0), -1)  # [B, 900]
 
     # Cross-entropy loss
     cross_entropy_loss = F.cross_entropy(logits_flat, target_flat.long())

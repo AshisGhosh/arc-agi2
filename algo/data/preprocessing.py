@@ -35,6 +35,7 @@ def preprocess_example_image(image_data: np.ndarray, config: Config) -> torch.Te
         Preprocessed RGB tensor [3, 64, 64] normalized to [-1, 1]
     """
     # Convert to tensor and ensure float32
+    image_data = image_data.copy()
     img_tensor = torch.tensor(image_data, dtype=torch.float32)
 
     # Pad or crop to 30x30
@@ -86,6 +87,7 @@ def preprocess_target_image(image_data: np.ndarray, config: Config) -> torch.Ten
         Preprocessed grayscale tensor [1, 30, 30]
     """
     # Convert to tensor and ensure float32
+    image_data = image_data.copy()
     img_tensor = torch.tensor(image_data, dtype=torch.float32)
 
     # Pad or crop to 30x30
