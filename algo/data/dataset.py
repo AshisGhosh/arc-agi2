@@ -13,7 +13,7 @@ from .augmentation import generate_augmented_examples
 
 def custom_collate_fn(batch):
     """
-    Custom collate function for ARC dataset with simplified structure.
+    Custom collate function for ARC dataset with variable-length test examples.
 
     Args:
         batch: List of samples from the dataset
@@ -23,12 +23,16 @@ def custom_collate_fn(batch):
     """
     batch_size = len(batch)
 
+    # Find maximum number of test examples in this batch
+    max_test_examples = max(sample["num_test_examples"] for sample in batch)
+
     # Pre-allocate tensors
     rule_latent_inputs = torch.zeros(
         [batch_size, 2, 2, 3, 64, 64]
     )  # 2 examples, 2 images each
-    test_inputs = torch.zeros([batch_size, 1, 30, 30])
-    test_outputs = torch.zeros([batch_size, 1, 30, 30])
+    test_inputs = torch.zeros([batch_size, max_test_examples, 30, 30])
+    test_outputs = torch.zeros([batch_size, max_test_examples, 30, 30])
+    test_masks = torch.zeros([batch_size, max_test_examples], dtype=torch.bool)
     holdout_inputs = torch.zeros([batch_size, 1, 30, 30])
     holdout_outputs = torch.zeros([batch_size, 1, 30, 30])
     has_holdout = torch.zeros([batch_size], dtype=torch.bool)
@@ -40,6 +44,7 @@ def custom_collate_fn(batch):
     combination_indices = []
     pair_indices = []
     total_combinations = []
+    num_test_examples = []
 
     # Collect raw rule latent examples for decoder
     raw_rule_latent_examples = []
@@ -61,9 +66,17 @@ def custom_collate_fn(batch):
             "output"
         ].squeeze(0)
 
-        # Test example
-        test_inputs[i] = sample["test_example"]["input"].squeeze(0)
-        test_outputs[i] = sample["test_example"]["output"].squeeze(0)
+        # Test examples (variable length with masking)
+        sample_test_examples = sample["test_examples"]
+        sample_num_test = sample["num_test_examples"]
+        for j, test_example in enumerate(sample_test_examples):
+            test_inputs[i, j] = test_example["input"].squeeze(0)
+            test_outputs[i, j] = test_example["output"].squeeze(0)
+            test_masks[i, j] = True
+
+        # Set mask for unused slots
+        for j in range(sample_num_test, max_test_examples):
+            test_masks[i, j] = False
 
         # Holdout example (if available)
         if sample["holdout_example"] is not None:
@@ -82,11 +95,13 @@ def custom_collate_fn(batch):
         combination_indices.append(sample["combination_idx"])
         pair_indices.append(sample["pair_indices"])
         total_combinations.append(sample["total_combinations"])
+        num_test_examples.append(sample["num_test_examples"])
 
     return {
         "rule_latent_inputs": rule_latent_inputs,  # [B, 2, 2, 3, 64, 64]
-        "test_inputs": test_inputs,  # [B, 1, 30, 30]
-        "test_outputs": test_outputs,  # [B, 1, 30, 30]
+        "test_inputs": test_inputs,  # [B, max_test_examples, 30, 30]
+        "test_outputs": test_outputs,  # [B, max_test_examples, 30, 30]
+        "test_masks": test_masks,  # [B, max_test_examples] - True for valid test examples
         "holdout_inputs": holdout_inputs,  # [B, 1, 30, 30]
         "holdout_outputs": holdout_outputs,  # [B, 1, 30, 30]
         "has_holdout": has_holdout,  # [B]
@@ -98,6 +113,7 @@ def custom_collate_fn(batch):
         "combination_indices": combination_indices,  # [B] list of combination indices
         "pair_indices": pair_indices,  # [B] list of pair indices
         "total_combinations": total_combinations,  # [B] list of total combinations per task
+        "num_test_examples": num_test_examples,  # [B] list of number of test examples per task
     }
 
 
@@ -584,8 +600,8 @@ class ARCDataset(Dataset):
             all_examples, i, j, is_counterfactual
         )
 
-        # Create test example
-        test_example = self._get_test_example(task, is_counterfactual)
+        # Create test examples (all of them)
+        test_examples = self._get_test_examples(task, is_counterfactual)
 
         # Create holdout example (if available)
         holdout_example = self._get_holdout_example(task, is_counterfactual)
@@ -594,7 +610,8 @@ class ARCDataset(Dataset):
             # Core data - only what's needed for this combination
             "rule_latent_examples": rule_latent_inputs,  # 2 examples for encoder (ResNet format)
             "rule_latent_targets": rule_latent_targets,  # 2 examples for decoder (ARC format)
-            "test_example": test_example,  # Single test example
+            "test_examples": test_examples,  # All test examples
+            "num_test_examples": len(test_examples),  # Number of test examples
             "holdout_example": holdout_example,  # Optional holdout
             # Top-level metadata
             "task_idx": task_idx,  # Top-level task index
@@ -605,16 +622,26 @@ class ARCDataset(Dataset):
             "total_combinations": len(self.combinations[task_idx]),  # Top-level count
         }
 
-    def _get_test_example(
+    def _get_test_examples(
         self, task: Dict[str, Any], is_counterfactual: bool
-    ) -> Dict[str, torch.Tensor]:
-        """Get single test example."""
-        if is_counterfactual and task.get("counterfactual_test"):
-            return self._preprocess_target(
-                task["counterfactual_test"][0], apply_counterfactual=True
-            )
+    ) -> List[Dict[str, torch.Tensor]]:
+        """Get all test examples."""
+        if (
+            is_counterfactual
+            and task.get("counterfactual_test")
+            and len(task["counterfactual_test"]) > 0
+        ):
+            test_examples = []
+            for test_example in task["counterfactual_test"]:
+                test_examples.append(
+                    self._preprocess_target(test_example, apply_counterfactual=True)
+                )
+            return test_examples
         else:
-            return self._preprocess_target(task["test"][0])
+            test_examples = []
+            for test_example in task["test"]:
+                test_examples.append(self._preprocess_target(test_example))
+            return test_examples
 
     def _get_holdout_example(
         self, task: Dict[str, Any], is_counterfactual: bool
@@ -693,7 +720,8 @@ class ARCDataset(Dataset):
                     "pair_indices": (i, j),
                     "is_counterfactual": is_counterfactual,
                     "rule_latent_examples": combination_data["rule_latent_examples"],
-                    "test_example": combination_data["test_example"],
+                    "test_examples": combination_data["test_examples"],
+                    "num_test_examples": combination_data["num_test_examples"],
                     "holdout_example": combination_data["holdout_example"],
                     "task_id": combination_data["task_id"],
                     "task_idx": combination_data["task_idx"],

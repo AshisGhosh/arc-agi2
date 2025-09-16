@@ -31,12 +31,24 @@ st.set_page_config(page_title="arc model predictions", page_icon="🤖", layout=
 
 def extract_sample_from_batch(batch, sample_idx, evaluation_mode="test"):
     """Extract individual sample data from batched format."""
+    # Extract all test examples for this sample
+    test_examples = []
+    num_test_examples = batch["num_test_examples"][sample_idx]
+    test_masks = batch["test_masks"][sample_idx]
+
+    for test_idx in range(num_test_examples):
+        if test_masks[test_idx]:  # Only include valid test examples
+            test_examples.append(
+                {
+                    "input": batch["test_inputs"][sample_idx, test_idx],
+                    "output": batch["test_outputs"][sample_idx, test_idx],
+                }
+            )
+
     sample = {
         "train_examples": [],
-        "test_example": {
-            "input": batch["test_inputs"][sample_idx],
-            "output": batch["test_outputs"][sample_idx],
-        },
+        "test_examples": test_examples,
+        "num_test_examples": len(test_examples),
     }
 
     # Add holdout data if available
@@ -189,6 +201,7 @@ def evaluate_model_on_tasks(
     enable_counterfactuals=False,
     counterfactual_transform="rotate_90",
     selected_task_indices=None,
+    test_all_test_pairs=False,
 ):
     """evaluate model on all tasks in dataset and return results.
 
@@ -286,7 +299,8 @@ def evaluate_model_on_tasks(
 
                 # Get the preprocessed data from the combination
                 rule_latent_examples = combo["rule_latent_examples"]
-                test_example = combo["test_example"]
+                test_examples = combo["test_examples"]
+                num_test_examples = combo["num_test_examples"]
                 holdout_example = combo.get("holdout_example")
 
                 # Extract the preprocessed tensors for rule latent creation
@@ -319,24 +333,135 @@ def evaluate_model_on_tasks(
                     )
                     outputs["rule_latents"][0:1] = noisy_latent
 
-                # evaluate on target - use the test example from combination
                 if evaluation_mode == "test":
-                    target = test_example
-                elif evaluation_mode == "holdout" and holdout_example is not None:
-                    target = holdout_example
+                    if test_all_test_pairs and len(test_examples) > 1:
+                        # Evaluate on all test examples and create separate results for each
+                        for test_idx in range(num_test_examples):
+                            test_example = test_examples[test_idx]
+                            target_input = test_example["input"].unsqueeze(
+                                0
+                            )  # Add batch dimension
+                            target_output = test_example["output"].unsqueeze(0)
+
+                            target_logits = model.decoder(
+                                outputs["rule_latents"][0:1],
+                                target_input,
+                            )
+                            predictions = torch.argmax(target_logits, dim=1).squeeze(0)
+                            metrics = calculate_accuracy_metrics(
+                                predictions, target_output
+                            )
+
+                            # Create separate result for this test example
+                            test_sample_data = {
+                                "train_examples": [
+                                    {
+                                        "input": tensor_to_numpy(
+                                            denormalize_rgb(
+                                                rule_latent_examples[0]["input"]
+                                            )
+                                        ),
+                                        "output": tensor_to_numpy(
+                                            denormalize_rgb(
+                                                rule_latent_examples[0]["output"]
+                                            )
+                                        ),
+                                    },
+                                    {
+                                        "input": tensor_to_numpy(
+                                            denormalize_rgb(
+                                                rule_latent_examples[1]["input"]
+                                            )
+                                        ),
+                                        "output": tensor_to_numpy(
+                                            denormalize_rgb(
+                                                rule_latent_examples[1]["output"]
+                                            )
+                                        ),
+                                    },
+                                ],
+                                "test_examples": [
+                                    {
+                                        "input": tensor_to_grayscale_numpy(
+                                            test_ex["input"]
+                                        ),
+                                        "output": tensor_to_grayscale_numpy(
+                                            test_ex["output"]
+                                        ),
+                                    }
+                                    for test_ex in test_examples
+                                ],
+                                "num_test_examples": num_test_examples,
+                            }
+
+                            # Add holdout data if available
+                            if holdout_example is not None:
+                                test_sample_data["holdout_example"] = {
+                                    "input": tensor_to_grayscale_numpy(
+                                        holdout_example["input"]
+                                    ),
+                                    "output": tensor_to_grayscale_numpy(
+                                        holdout_example["output"]
+                                    ),
+                                }
+
+                            task_results.append(
+                                {
+                                    "combination_idx": combo_idx,
+                                    "pair_indices": (i, j),
+                                    "is_counterfactual": is_counterfactual,
+                                    "test_example_idx": test_idx,
+                                    "perfect_accuracy": metrics["perfect_accuracy"],
+                                    "pixel_accuracy": metrics["pixel_accuracy"],
+                                    "near_miss_accuracy": metrics["near_miss_accuracy"],
+                                    "predictions": predictions,
+                                    "logits": target_logits,
+                                    "sample_data": test_sample_data,
+                                }
+                            )
+
+                        # Skip the normal result creation since we created separate results above
+                        continue
                 else:
-                    target = test_example
+                    # Use first test example only (original behavior)
+                    test_example = test_examples[0] if test_examples else None
+                    if test_example:
+                        target_input = test_example["input"].unsqueeze(0)
+                        target_output = test_example["output"].unsqueeze(0)
 
-                # Create target tensors
-                target_input = target["input"].unsqueeze(0)  # Add batch dimension
-                target_output = target["output"].unsqueeze(0)
+                        target_logits = model.decoder(
+                            outputs["rule_latents"][0:1],
+                            target_input,
+                        )
+                        predictions = torch.argmax(target_logits, dim=1).squeeze(0)
+                        metrics = calculate_accuracy_metrics(predictions, target_output)
+                    else:
+                        metrics = {"accuracy": 0.0, "exact_match": 0.0}
+                        predictions = None
 
-                target_logits = model.decoder(
-                    outputs["rule_latents"][0:1],
-                    target_input,
-                )
-                predictions = torch.argmax(target_logits, dim=1).squeeze(0)
-                metrics = calculate_accuracy_metrics(predictions, target_output)
+                if evaluation_mode == "holdout" and holdout_example is not None:
+                    # Evaluate on holdout example
+                    target_input = holdout_example["input"].unsqueeze(0)
+                    target_output = holdout_example["output"].unsqueeze(0)
+
+                    target_logits = model.decoder(
+                        outputs["rule_latents"][0:1],
+                        target_input,
+                    )
+                    predictions = torch.argmax(target_logits, dim=1).squeeze(0)
+                    metrics = calculate_accuracy_metrics(predictions, target_output)
+                else:
+                    # Fallback to first test example
+                    test_example = test_examples[0]
+                    target_input = test_example["input"].unsqueeze(0)
+                    target_output = test_example["output"].unsqueeze(0)
+
+                    target_logits = model.decoder(
+                        outputs["rule_latents"][0:1],
+                        target_input,
+                    )
+                    predictions = torch.argmax(target_logits, dim=1).squeeze(0)
+                    metrics = calculate_accuracy_metrics(predictions, target_output)
 
                 # Create sample data for visualization
                 sample_data = {
@@ -358,10 +483,14 @@ def evaluate_model_on_tasks(
                             ),
                         },
                     ],
-                    "test_example": {
-                        "input": tensor_to_grayscale_numpy(test_example["input"]),
-                        "output": tensor_to_grayscale_numpy(test_example["output"]),
-                    },
+                    "test_examples": [
+                        {
+                            "input": tensor_to_grayscale_numpy(test_example["input"]),
+                            "output": tensor_to_grayscale_numpy(test_example["output"]),
+                        }
+                        for test_example in test_examples
+                    ],
+                    "num_test_examples": num_test_examples,
                 }
 
                 # Add holdout data if available
@@ -388,23 +517,27 @@ def evaluate_model_on_tasks(
             # For regular evaluation, we want to return all combinations as individual results
             # This matches the format expected by the visualization code
             for combo_result in task_results:
-                results.append(
-                    {
-                        "task_idx": task_idx,
-                        "global_task_index": task_idx,
-                        "task_id": dataset.tasks[task_idx]["task_id"],
-                        "combination_idx": combo_result["combination_idx"],
-                        "pair_indices": combo_result["pair_indices"],
-                        "is_counterfactual": combo_result["is_counterfactual"],
-                        "perfect_accuracy": combo_result["perfect_accuracy"],
-                        "pixel_accuracy": combo_result["pixel_accuracy"],
-                        "near_miss_accuracy": combo_result["near_miss_accuracy"],
-                        "predictions": combo_result["predictions"],
-                        "logits": combo_result["logits"],
-                        "sample_data": combo_result["sample_data"],
-                        "evaluation_mode": evaluation_mode,
-                    }
-                )
+                result_entry = {
+                    "task_idx": task_idx,
+                    "global_task_index": task_idx,
+                    "task_id": dataset.tasks[task_idx]["task_id"],
+                    "combination_idx": combo_result["combination_idx"],
+                    "pair_indices": combo_result["pair_indices"],
+                    "is_counterfactual": combo_result["is_counterfactual"],
+                    "perfect_accuracy": combo_result["perfect_accuracy"],
+                    "pixel_accuracy": combo_result["pixel_accuracy"],
+                    "near_miss_accuracy": combo_result["near_miss_accuracy"],
+                    "predictions": combo_result["predictions"],
+                    "logits": combo_result["logits"],
+                    "sample_data": combo_result["sample_data"],
+                    "evaluation_mode": evaluation_mode,
+                }
+
+                # Add test example index if it exists (for test all pairs mode)
+                if "test_example_idx" in combo_result:
+                    result_entry["test_example_idx"] = combo_result["test_example_idx"]
+
+                results.append(result_entry)
 
     return results
 
@@ -427,6 +560,7 @@ def test_all_combinations(
     enable_counterfactuals=False,
     counterfactual_transform="rotate_90",
     selected_task_indices=None,
+    test_all_test_pairs=False,
 ):
     """test all possible combinations of train examples for rule latent creation.
 
@@ -445,6 +579,7 @@ def test_all_combinations(
         augmentation_variants: Number of augmented versions per example
         preserve_background: Whether to preserve background color
         augmentation_seed: Random seed for augmentation
+        test_all_test_pairs: Whether to evaluate on all test examples for each combination
     """
     # Set deterministic training for reproducible results
     config.set_deterministic_training()
@@ -515,7 +650,8 @@ def test_all_combinations(
 
                 # Get the preprocessed data from the combination
                 rule_latent_examples = combo["rule_latent_examples"]
-                test_example = combo["test_example"]
+                test_examples = combo["test_examples"]
+                num_test_examples = combo["num_test_examples"]
                 holdout_example = combo.get("holdout_example")
 
                 # Extract the preprocessed tensors
@@ -536,14 +672,103 @@ def test_all_combinations(
                         rule_latent, noise_type, noise_std, noise_range, noise_ratio
                     )
 
-                # evaluate on target - use the test example from combination
+                # evaluate on target(s)
                 if evaluation_mode == "test":
-                    target = test_example
+                    if test_all_test_pairs and len(test_examples) > 1:
+                        # Evaluate on all test examples and create separate results for each
+                        for test_idx, test_example in enumerate(test_examples):
+                            logits = model.decoder(rule_latent, test_example["input"])
+                            predictions = torch.argmax(logits, dim=1).squeeze(0)
+                            metrics = calculate_accuracy_metrics(
+                                predictions, test_example["output"]
+                            )
+
+                            # Create separate result for this test example
+                            test_sample_data = {
+                                "train_examples": [
+                                    {
+                                        "input": tensor_to_numpy(
+                                            denormalize_rgb(
+                                                rule_latent_examples[0]["input"]
+                                            )
+                                        ),
+                                        "output": tensor_to_numpy(
+                                            denormalize_rgb(
+                                                rule_latent_examples[0]["output"]
+                                            )
+                                        ),
+                                    },
+                                    {
+                                        "input": tensor_to_numpy(
+                                            denormalize_rgb(
+                                                rule_latent_examples[1]["input"]
+                                            )
+                                        ),
+                                        "output": tensor_to_numpy(
+                                            denormalize_rgb(
+                                                rule_latent_examples[1]["output"]
+                                            )
+                                        ),
+                                    },
+                                ],
+                                "test_examples": [
+                                    {
+                                        "input": tensor_to_grayscale_numpy(
+                                            test_ex["input"]
+                                        ),
+                                        "output": tensor_to_grayscale_numpy(
+                                            test_ex["output"]
+                                        ),
+                                    }
+                                    for test_ex in test_examples
+                                ],
+                                "num_test_examples": num_test_examples,
+                            }
+
+                            # Add holdout data if available
+                            if holdout_example is not None:
+                                test_sample_data["holdout_example"] = {
+                                    "input": tensor_to_grayscale_numpy(
+                                        holdout_example["input"]
+                                    ),
+                                    "output": tensor_to_grayscale_numpy(
+                                        holdout_example["output"]
+                                    ),
+                                }
+
+                            task_results.append(
+                                {
+                                    "combination_idx": combo_idx,
+                                    "pair_indices": (i, j),
+                                    "is_counterfactual": is_counterfactual,
+                                    "test_example_idx": test_idx,
+                                    "perfect_accuracy": metrics["perfect_accuracy"],
+                                    "pixel_accuracy": metrics["pixel_accuracy"],
+                                    "near_miss_accuracy": metrics["near_miss_accuracy"],
+                                    "predictions": predictions,
+                                    "logits": logits,
+                                    "sample_data": test_sample_data,
+                                }
+                            )
+
+                        # Skip the normal result creation since we created separate results above
+                        continue
+                    else:
+                        # Use first test example (original behavior)
+                        target = test_examples[0]
+                        logits = model.decoder(rule_latent, target["input"])
+                        predictions = torch.argmax(logits, dim=1).squeeze(0)
+                        metrics = calculate_accuracy_metrics(
+                            predictions, target["output"]
+                        )
                 elif evaluation_mode == "holdout" and holdout_example is not None:
                     target = holdout_example
+                    logits = model.decoder(rule_latent, target["input"])
+                    predictions = torch.argmax(logits, dim=1).squeeze(0)
+                    metrics = calculate_accuracy_metrics(predictions, target["output"])
                 else:
-                    target = test_example
-
+                    # Fallback to first test example
+                    target = test_examples[0]
                 logits = model.decoder(rule_latent, target["input"])
                 predictions = torch.argmax(logits, dim=1).squeeze(0)
                 metrics = calculate_accuracy_metrics(predictions, target["output"])
@@ -569,10 +794,14 @@ def test_all_combinations(
                             ),
                         },
                     ],
-                    "test_example": {
-                        "input": tensor_to_grayscale_numpy(test_example["input"]),
-                        "output": tensor_to_grayscale_numpy(test_example["output"]),
-                    },
+                    "test_examples": [
+                        {
+                            "input": tensor_to_grayscale_numpy(test_example["input"]),
+                            "output": tensor_to_grayscale_numpy(test_example["output"]),
+                        }
+                        for test_example in test_examples
+                    ],
+                    "num_test_examples": num_test_examples,
                 }
 
                 # Add holdout data if available
@@ -606,6 +835,9 @@ def test_all_combinations(
                         "combination_idx": combo_result["combination_idx"],
                         "pair_indices": combo_result["pair_indices"],
                         "is_counterfactual": combo_result["is_counterfactual"],
+                        "test_example_idx": combo_result.get(
+                            "test_example_idx"
+                        ),  # Add test example index
                         "perfect_accuracy": combo_result["perfect_accuracy"],
                         "pixel_accuracy": combo_result["pixel_accuracy"],
                         "near_miss_accuracy": combo_result["near_miss_accuracy"],
@@ -700,15 +932,16 @@ def main():
     if task_set == "overfit tasks only":
         if "tasks" in exp_info and "task_indices" in exp_info["tasks"]:
             task_indices = exp_info["tasks"]["task_indices"]
-            # Create a task subset for evaluation (first combination only)
+            # Create a task subset for evaluation (will be updated later based on options)
             dataset = TaskSubset(
                 task_indices=task_indices,
                 config=dataset.config,
                 arc_agi1_dir=str(dataset.raw_data_dir),
                 holdout=True,
-                use_first_combination_only=True,
+                use_first_combination_only=True,  # Default, will be updated later
             )
             st.sidebar.write(f"**evaluating on {len(task_indices)} overfit tasks**")
+            st.sidebar.write(f"**task indices:** {sorted(task_indices)}")
         else:
             st.error("❌ no task indices found in experiment info")
             st.stop()
@@ -727,6 +960,12 @@ def main():
         "test all combinations",
         value=False,
         help="test all possible combinations of train examples for rule latent creation",
+    )
+
+    test_all_test_pairs = st.sidebar.checkbox(
+        "test all test pairs",
+        value=False,
+        help="evaluate on all test examples for each task/combination",
     )
 
     st.sidebar.subheader("rule latent analysis")
@@ -829,6 +1068,30 @@ def main():
             help="type of transformation to apply to outputs",
         )
 
+    # Update dataset based on options if needed
+    if task_set == "overfit tasks only" and test_combinations:
+        # Recreate dataset with all combinations when testing all combinations
+        if "tasks" in exp_info and "task_indices" in exp_info["tasks"]:
+            task_indices = exp_info["tasks"]["task_indices"]
+            dataset = TaskSubset(
+                task_indices=task_indices,
+                config=dataset.config,
+                arc_agi1_dir=str(dataset.raw_data_dir),
+                holdout=True,
+                use_first_combination_only=False,  # Use all combinations
+            )
+            if test_all_test_pairs:
+                st.sidebar.write("**mode:** all combinations, all test pairs")
+            else:
+                st.sidebar.write("**mode:** all combinations")
+    elif (
+        task_set == "overfit tasks only"
+        and test_all_test_pairs
+        and not test_combinations
+    ):
+        # When testing all test pairs but not all combinations, use first combination only
+        st.sidebar.write("**mode:** first combination, all test pairs")
+
     if st.sidebar.button("🚀 evaluate model", type="primary"):
         if "evaluation_results" in st.session_state:
             del st.session_state.evaluation_results
@@ -886,6 +1149,7 @@ def main():
                 enable_counterfactuals,
                 counterfactual_transform,
                 selected_task_indices=task_indices,
+                test_all_test_pairs=test_all_test_pairs,
             )
             st.session_state.combination_results = results
         else:
@@ -918,12 +1182,14 @@ def main():
                 enable_counterfactuals,
                 counterfactual_transform,
                 selected_task_indices=task_indices,
+                test_all_test_pairs=test_all_test_pairs,
             )
             st.session_state.evaluation_results = results
 
         st.session_state.task_set = task_set
         st.session_state.evaluation_mode = evaluation_mode
         st.session_state.test_combinations = test_combinations
+        st.session_state.test_all_test_pairs = test_all_test_pairs
         st.session_state.inject_noise = inject_noise
         st.session_state.noise_type = noise_type
         st.session_state.noise_std = noise_std
@@ -938,6 +1204,35 @@ def main():
 
         progress_bar.empty()
         status_text.text(f"evaluation complete on {len(results)} tasks!")
+
+        # Debug: Show which tasks have multiple test examples
+        if st.session_state.get("test_all_test_pairs", False):
+            multi_test_tasks = []
+            for result in results:
+                sample_data = result.get("sample_data", {})
+                num_test_examples = sample_data.get("num_test_examples", 1)
+                if num_test_examples > 1:
+                    multi_test_tasks.append(
+                        {
+                            "task_id": result["task_id"],
+                            "task_idx": result.get(
+                                "global_task_index", result.get("task_idx")
+                            ),
+                            "num_test_examples": num_test_examples,
+                        }
+                    )
+
+            if multi_test_tasks:
+                st.sidebar.success(
+                    f"✅ Found {len(multi_test_tasks)} multi-test tasks:"
+                )
+                for task in multi_test_tasks:
+                    st.sidebar.write(
+                        f"  - Task {task['task_id']} (idx {task['task_idx']}): {task['num_test_examples']} test examples"
+                    )
+            else:
+                st.sidebar.warning("⚠️ No multi-test tasks found in evaluation results")
+
         st.rerun()
 
     if "evaluation_results" in st.session_state:
@@ -966,8 +1261,13 @@ def main():
             )
             counterfactual_info = f" (counterfactuals: {counterfactual_transform})"
 
+        # Add test pairs info if applicable
+        test_pairs_info = ""
+        if st.session_state.get("test_all_test_pairs", False):
+            test_pairs_info = " (all test pairs)"
+
         st.subheader(
-            f"📊 evaluation results ({current_task_set}){noise_info}{counterfactual_info}"
+            f"📊 evaluation results ({current_task_set}){test_pairs_info}{noise_info}{counterfactual_info}"
         )
 
         # create results dataframe
@@ -984,25 +1284,36 @@ def main():
                 if "pair_indices" in result:
                     combination_info += f" {result['pair_indices']}"
 
+            # Add test example info if available
+            test_example_info = ""
+            if "test_example_idx" in result:
+                test_example_info = f" - test {result['test_example_idx']}"
+
             df_data.append(
                 {
                     "idx": result["global_task_index"],
-                    "task_id": task_id_display + combination_info,
+                    "task_id": task_id_display + combination_info + test_example_info,
                     "perfect": f"{result['perfect_accuracy']:.3f}",
                     "pixel": f"{result['pixel_accuracy']:.3f}",
                     "near_miss": f"{result['near_miss_accuracy']:.3f}",
-                    "status": "✅ perfect"
-                    if result["perfect_accuracy"] == 1.0
-                    else "⚠️ partial"
-                    if result["pixel_accuracy"] > 0.5
-                    else "❌ failed",
+                    "status": (
+                        "✅ perfect"
+                        if result["perfect_accuracy"] == 1.0
+                        else "⚠️ partial"
+                        if result["pixel_accuracy"] > 0.5
+                        else "❌ failed"
+                    ),
                 }
             )
 
         df = pd.DataFrame(df_data)
 
         # display summary stats
-        col1, col2, col3, col4 = st.columns(4)
+        if st.session_state.get("test_all_test_pairs", False):
+            col1, col2, col3, col4, col5 = st.columns(5)
+        else:
+            col1, col2, col3, col4 = st.columns(4)
+
         with col1:
             st.metric("total tasks", len(results))
         with col2:
@@ -1014,6 +1325,27 @@ def main():
         with col4:
             avg_near_miss = np.mean([r["near_miss_accuracy"] for r in results])
             st.metric("avg near-miss", f"{avg_near_miss:.3f}")
+
+        # Add additional test pairs stats if enabled
+        if st.session_state.get("test_all_test_pairs", False):
+            with col5:
+                # Count tasks with multiple test examples
+                multi_test_tasks = 0
+                multi_test_perfect = 0
+                for result in results:
+                    sample_data = result.get("sample_data", {})
+                    num_test_examples = sample_data.get("num_test_examples", 1)
+                    if num_test_examples > 1:
+                        multi_test_tasks += 1
+                        if result["perfect_accuracy"] == 1.0:
+                            multi_test_perfect += 1
+
+                if multi_test_tasks > 0:
+                    st.metric(
+                        "multi-test tasks", f"{multi_test_perfect}/{multi_test_tasks}"
+                    )
+                else:
+                    st.metric("multi-test tasks", "0/0")
 
         # interactive table
         st.subheader("📋 task results table")
@@ -1039,8 +1371,12 @@ def main():
             if "sample_data" in selected_task:
                 # New format - direct sample data
                 sample_data = selected_task["sample_data"]
+                test_example_idx = selected_task.get("test_example_idx")
                 fig = visualize_prediction_comparison(
-                    sample_data, selected_task["predictions"], evaluation_mode
+                    sample_data,
+                    selected_task["predictions"],
+                    evaluation_mode,
+                    test_example_idx,
                 )
                 st.pyplot(fig)
             else:
@@ -1106,8 +1442,13 @@ def main():
             )
             counterfactual_info = f" (counterfactuals: {counterfactual_transform})"
 
+        # Add test pairs info if applicable
+        test_pairs_info = ""
+        if st.session_state.get("test_all_test_pairs", False):
+            test_pairs_info = " (all test pairs)"
+
         st.subheader(
-            f"🔄 combination test results ({current_task_set}) - {evaluation_mode} mode{noise_info}{counterfactual_info}"
+            f"🔄 combination test results ({current_task_set}) - {evaluation_mode} mode{test_pairs_info}{noise_info}{counterfactual_info}"
         )
 
         # create combination results dataframe with consistent indexing
@@ -1115,30 +1456,51 @@ def main():
         combo_index_mapping = []  # Store mapping from dataframe index to (task_idx, combo_idx)
 
         for result in results:
+            # Build combination string
+            combination_str = (
+                f"({result['pair_indices'][0]}, {result['pair_indices'][1]})"
+            )
+            if result.get("is_counterfactual", False):
+                combination_str += " (counterfactual)"
+
+            # Add test example info if available
+            if "test_example_idx" in result:
+                combination_str += f" - test {result['test_example_idx']}"
+
             combo_df_data.append(
                 {
                     "idx": result["global_task_index"],  # Global task index
                     "task_id": result["task_id"],  # Task ID (filename)
-                    "combination": f"({result['pair_indices'][0]}, {result['pair_indices'][1]}){' (counterfactual)' if result.get('is_counterfactual', False) else ''}",
+                    "combination": combination_str,
                     "perfect": f"{result['perfect_accuracy']:.3f}",
                     "pixel": f"{result['pixel_accuracy']:.3f}",
                     "near_miss": f"{result['near_miss_accuracy']:.3f}",
-                    "status": "✅ perfect"
-                    if result["perfect_accuracy"] == 1.0
-                    else "⚠️ partial"
-                    if result["pixel_accuracy"] > 0.5
-                    else "❌ failed",
+                    "status": (
+                        "✅ perfect"
+                        if result["perfect_accuracy"] == 1.0
+                        else "⚠️ partial"
+                        if result["pixel_accuracy"] > 0.5
+                        else "❌ failed"
+                    ),
                 }
             )
             # Store mapping for later lookup
             combo_index_mapping.append(
-                (result["global_task_index"], result["combination_idx"])
+                (
+                    result["global_task_index"],
+                    result["combination_idx"],
+                    result.get("test_example_idx"),
+                )
             )
 
         combo_df = pd.DataFrame(combo_df_data)
 
         # display summary stats
-        col1, col2, col3, col4, col5 = st.columns(5)
+        if st.session_state.get("test_all_test_pairs", False):
+            col1, col2, col3, col4, col5, col6 = st.columns(6)
+        else:
+            col1, col2, col3, col4, col5 = st.columns(5)
+
         with col1:
             st.metric("total combinations", len(combo_df_data))
         with col2:
@@ -1158,6 +1520,27 @@ def main():
         with col5:
             avg_near_miss = np.mean([float(r["near_miss"]) for r in combo_df_data])
             st.metric("avg near-miss", f"{avg_near_miss:.3f}")
+
+        # Add additional test pairs stats if enabled
+        if st.session_state.get("test_all_test_pairs", False):
+            with col6:
+                # Count combinations with multiple test examples
+                multi_test_combos = 0
+                multi_test_perfect = 0
+                for result in results:
+                    sample_data = result.get("sample_data", {})
+                    num_test_examples = sample_data.get("num_test_examples", 1)
+                    if num_test_examples > 1:
+                        multi_test_combos += 1
+                        if result["perfect_accuracy"] == 1.0:
+                            multi_test_perfect += 1
+
+                if multi_test_combos > 0:
+                    st.metric(
+                        "multi-test combos", f"{multi_test_perfect}/{multi_test_combos}"
+                    )
+                else:
+                    st.metric("multi-test combos", "0/0")
 
         # display combination table with selection
         st.subheader("📋 combination results table")
@@ -1179,7 +1562,9 @@ def main():
 
             # use the mapping to find the correct combination
             if selected_idx < len(combo_index_mapping):
-                global_task_index, combo_idx = combo_index_mapping[selected_idx]
+                global_task_index, combo_idx, test_example_idx = combo_index_mapping[
+                    selected_idx
+                ]
 
                 # find the selected task and combination
             selected_task = None
@@ -1189,21 +1574,26 @@ def main():
                 if (
                     result["global_task_index"] == global_task_index
                     and result["combination_idx"] == combo_idx
+                    and result.get("test_example_idx") == test_example_idx
                 ):
                     selected_task = result
                     selected_combo = result
                     break
 
             if selected_combo is not None:
-                st.subheader(
-                    f"🔍 visualizing task {selected_task['task_id']} combination {selected_combo['combination_idx']}"
-                )
+                # Build visualization title
+                title = f"🔍 visualizing task {selected_task['task_id']} combination {selected_combo['combination_idx']}"
+                if test_example_idx is not None:
+                    title += f" test example {test_example_idx}"
+                st.subheader(title)
 
                 # visualize the selected combination
+                test_example_idx = selected_combo.get("test_example_idx")
                 fig = visualize_prediction_comparison(
                     selected_combo["sample_data"],
                     selected_combo["predictions"],
                     evaluation_mode,
+                    test_example_idx,
                 )
                 st.pyplot(fig)
 
