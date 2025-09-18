@@ -24,6 +24,7 @@ class TaskSubset(ARCDataset):
         arc_agi1_dir: str,
         holdout: bool = True,
         use_first_combination_only: bool = True,
+        require_multiple_test_pairs: bool = False,
     ):
         """
         create a task subset with only the specified task indices.
@@ -34,6 +35,7 @@ class TaskSubset(ARCDataset):
             arc_agi1_dir: path to arc-agi1 dataset directory
             holdout: whether to enable holdout mode
             use_first_combination_only: whether to use only the first combination of each task
+            require_multiple_test_pairs: whether to only include tasks with multiple test pairs
         """
         # initialize the base dataset
         super().__init__(
@@ -41,6 +43,7 @@ class TaskSubset(ARCDataset):
             config,
             holdout=holdout,
             use_first_combination_only=use_first_combination_only,
+            require_multiple_test_pairs=require_multiple_test_pairs,
         )
 
         # validate that all selected tasks are valid

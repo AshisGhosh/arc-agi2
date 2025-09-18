@@ -64,8 +64,13 @@ class OverfitExperiment:
         returns:
             list of selected task indices
         """
-        # load full dataset to get valid task indices
-        full_dataset = ARCDataset(self.config.arc_agi1_dir, self.config, holdout=True)
+        # load full dataset to get valid task indices (only tasks with multiple test pairs)
+        full_dataset = ARCDataset(
+            self.config.arc_agi1_dir,
+            self.config,
+            holdout=True,
+            require_multiple_test_pairs=True,
+        )
         valid_task_indices = set(full_dataset.valid_tasks)
         total_tasks = len(full_dataset.tasks)  # Total tasks in dataset (0-399)
 
@@ -81,7 +86,7 @@ class OverfitExperiment:
             if invalid_indices:
                 raise ValueError(
                     f"invalid task indices: {invalid_indices}. "
-                    f"Valid range: 0-{total_tasks-1}, Valid tasks: {len(valid_task_indices)}"
+                    f"Valid range: 0-{total_tasks-1}, Valid tasks (with multiple test pairs): {len(valid_task_indices)}"
                 )
             selected_indices = task_indices[:n_tasks]
         else:
@@ -102,6 +107,8 @@ class OverfitExperiment:
             "random_seed": random_seed,
             "total_available_tasks": total_tasks,
             "selection_method": "random" if task_indices is None else "manual",
+            "require_multiple_test_pairs": True,
+            "valid_tasks_count": len(valid_task_indices),
         }
 
         with open(self.experiment_dir / "task_selection.json", "w") as f:
@@ -117,6 +124,7 @@ class OverfitExperiment:
             arc_agi1_dir=self.config.arc_agi1_dir,
             holdout=True,
             use_first_combination_only=False,  # Use ALL combinations for training
+            require_multiple_test_pairs=True,
         )
 
     def train_on_tasks(
@@ -351,48 +359,66 @@ class OverfitExperiment:
 
                 # Process each task in the batch
                 for i in range(rule_latent_inputs.size(0)):
-                    # Evaluate on test target
-                    test_logits = model.decoder(
-                        outputs["rule_latents"][i : i + 1], test_inputs[i : i + 1]
-                    )
-                    test_target = test_outputs[i : i + 1]
+                    # Get number of test examples for this task
+                    num_test = batch["num_test_examples"][i]
 
-                    # calculate metrics using existing functions
-                    batch_size = test_logits.size(0)
-                    total_samples += batch_size
+                    # Evaluate on all test examples for this task
+                    for test_idx in range(num_test):
+                        # Get specific test example
+                        test_input = test_inputs[
+                            i, test_idx : test_idx + 1
+                        ]  # [1, 30, 30]
+                        test_output = test_outputs[
+                            i, test_idx : test_idx + 1
+                        ]  # [1, 30, 30]
 
-                    # use existing accuracy functions
-                    perfect_matches += (
-                        calculate_perfect_accuracy(test_logits, test_target)
-                        * batch_size
-                    )
-
-                    pixel_correct += (
-                        calculate_pixel_accuracy(test_logits, test_target) * batch_size
-                    )
-
-                    near_miss_correct += (
-                        calculate_near_miss_accuracy(test_logits, test_target)
-                        * batch_size
-                    )
-
-                    # foreground metrics
-                    perfect_matches_foreground += (
-                        calculate_perfect_accuracy_foreground(test_logits, test_target)
-                        * batch_size
-                    )
-
-                    pixel_correct_foreground += (
-                        calculate_pixel_accuracy_foreground(test_logits, test_target)
-                        * batch_size
-                    )
-
-                    near_miss_correct_foreground += (
-                        calculate_near_miss_accuracy_foreground(
-                            test_logits, test_target
+                        # Evaluate on this test example
+                        test_logits = model.decoder(
+                            outputs["rule_latents"][i : i + 1], test_input
                         )
-                        * batch_size
-                    )
+                        test_target = test_output
+
+                        # calculate metrics using existing functions
+                        batch_size = test_logits.size(0)
+                        total_samples += batch_size
+
+                        # use existing accuracy functions
+                        perfect_matches += (
+                            calculate_perfect_accuracy(test_logits, test_target)
+                            * batch_size
+                        )
+
+                        pixel_correct += (
+                            calculate_pixel_accuracy(test_logits, test_target)
+                            * batch_size
+                        )
+
+                        near_miss_correct += (
+                            calculate_near_miss_accuracy(test_logits, test_target)
+                            * batch_size
+                        )
+
+                        # foreground metrics
+                        perfect_matches_foreground += (
+                            calculate_perfect_accuracy_foreground(
+                                test_logits, test_target
+                            )
+                            * batch_size
+                        )
+
+                        pixel_correct_foreground += (
+                            calculate_pixel_accuracy_foreground(
+                                test_logits, test_target
+                            )
+                            * batch_size
+                        )
+
+                        near_miss_correct_foreground += (
+                            calculate_near_miss_accuracy_foreground(
+                                test_logits, test_target
+                            )
+                            * batch_size
+                        )
 
                     # evaluate on holdout target (if available)
                     if has_holdout[i]:

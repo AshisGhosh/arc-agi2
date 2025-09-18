@@ -132,6 +132,7 @@ class ARCDataset(Dataset):
         config: Config,
         holdout: bool = False,
         use_first_combination_only: bool = False,
+        require_multiple_test_pairs: bool = False,
     ):
         """
         Initialize dataset.
@@ -141,11 +142,13 @@ class ARCDataset(Dataset):
             config: Configuration object
             holdout: If True, hold out last train example for validation
             use_first_combination_only: If True, always use first combination (for evaluation)
+            require_multiple_test_pairs: If True, only include tasks with multiple test pairs
         """
         self.raw_data_dir = Path(raw_data_dir)
         self.config = config
         self.holdout = holdout
         self.use_first_combination_only = use_first_combination_only
+        self.require_multiple_test_pairs = require_multiple_test_pairs
 
         # Load raw tasks
         self.tasks = self._load_raw_tasks()
@@ -256,6 +259,7 @@ class ARCDataset(Dataset):
         """Filter tasks with sufficient examples for training."""
         valid_indices = []
         for i, task in enumerate(self.tasks):
+            # Basic requirements
             if self.holdout:
                 # For holdout mode, need at least 3 training examples
                 # (2 for rule latent creation + 1 for holdout + at least 1 remaining for training)
@@ -265,7 +269,28 @@ class ARCDataset(Dataset):
                 # For regular mode, need at least 2 training examples
                 if len(task["train"]) >= 2:
                     valid_indices.append(i)
+
+        # Apply multiple test pairs filter if requested
+        if self.require_multiple_test_pairs:
+            multiple_test_indices = self._filter_tasks_with_multiple_test_pairs()
+            valid_indices = [
+                idx for idx in valid_indices if idx in multiple_test_indices
+            ]
+
         return valid_indices
+
+    def _filter_tasks_with_multiple_test_pairs(self) -> List[int]:
+        """Filter tasks that have multiple test examples."""
+        multiple_test_indices = []
+        for i, task in enumerate(self.tasks):
+            # Get test examples (both regular and counterfactual)
+            test_examples = self._get_test_examples(task, is_counterfactual=False)
+
+            # Check if task has multiple test examples
+            if len(test_examples) > 1:
+                multiple_test_indices.append(i)
+
+        return multiple_test_indices
 
     def _create_combination_mapping(self):
         """Create mapping from linear index to (task_idx, combination_idx) pairs."""

@@ -12,6 +12,7 @@ import json
 import pandas as pd
 from pathlib import Path
 from typing import Dict, Any, List, Tuple
+from dataclasses import dataclass
 
 from algo.config import Config
 from algo.data import ARCDataset
@@ -27,6 +28,163 @@ from scripts.visualization_utils import (
 
 # set page config
 st.set_page_config(page_title="arc model predictions", page_icon="🤖", layout="wide")
+
+
+@dataclass
+class NoiseConfig:
+    """Configuration for noise injection parameters."""
+
+    # Rule latent noise
+    inject_noise: bool = False
+    noise_type: str = "gaussian"
+    noise_std: float = 1.0
+    noise_range: float = 1.0
+    noise_ratio: float = 1.0
+
+    # Support example noise - A input
+    noise_a_input: bool = False
+    noise_a_input_type: str = "gaussian"
+    noise_a_input_std: float = 1.0
+    noise_a_input_range: float = 1.0
+    noise_a_input_ratio: float = 1.0
+
+    # Support example noise - A output
+    noise_a_output: bool = False
+    noise_a_output_type: str = "gaussian"
+    noise_a_output_std: float = 1.0
+    noise_a_output_range: float = 1.0
+    noise_a_output_ratio: float = 1.0
+
+    # Support example noise - B input
+    noise_b_input: bool = False
+    noise_b_input_type: str = "gaussian"
+    noise_b_input_std: float = 1.0
+    noise_b_input_range: float = 1.0
+    noise_b_input_ratio: float = 1.0
+
+    # Support example noise - B output
+    noise_b_output: bool = False
+    noise_b_output_type: str = "gaussian"
+    noise_b_output_std: float = 1.0
+    noise_b_output_range: float = 1.0
+    noise_b_output_ratio: float = 1.0
+
+    # Test input noise
+    noise_test_inputs: bool = False
+    noise_test_type: str = "gaussian"
+    noise_test_std: float = 1.0
+    noise_test_range: float = 1.0
+    noise_test_ratio: float = 1.0
+
+    def has_any_noise(self) -> bool:
+        """Check if any noise is enabled."""
+        return (
+            self.inject_noise
+            or self.noise_a_input
+            or self.noise_a_output
+            or self.noise_b_input
+            or self.noise_b_output
+            or self.noise_test_inputs
+        )
+
+    def get_noise_components(self) -> List[str]:
+        """Get list of active noise components."""
+        components = []
+        if self.inject_noise:
+            components.append("rule_latent")
+        if self.noise_a_input:
+            components.append("A_input")
+        if self.noise_a_output:
+            components.append("A_output")
+        if self.noise_b_input:
+            components.append("B_input")
+        if self.noise_b_output:
+            components.append("B_output")
+        if self.noise_test_inputs:
+            components.append("test_inputs")
+        return components
+
+    def get_noise_info_string(self) -> str:
+        """Get formatted noise info string for display."""
+        if not self.has_any_noise():
+            return ""
+
+        components = self.get_noise_components()
+        components_str = ", ".join(components)
+
+        if self.noise_type == "gaussian":
+            return f" (noise: {self.noise_type}, std={self.noise_std:.1f}, ratio={self.noise_ratio:.1f}, components: {components_str})"
+        elif self.noise_type == "uniform":
+            return f" (noise: {self.noise_type}, range={self.noise_range:.1f}, ratio={self.noise_ratio:.1f}, components: {components_str})"
+        else:
+            return f" (noise: {self.noise_type}, ratio={self.noise_ratio:.1f}, components: {components_str})"
+
+
+def create_noise_config_from_ui(
+    inject_noise,
+    noise_type,
+    noise_std,
+    noise_range,
+    noise_ratio,
+    noise_a_input,
+    noise_a_input_type,
+    noise_a_input_std,
+    noise_a_input_range,
+    noise_a_input_ratio,
+    noise_a_output,
+    noise_a_output_type,
+    noise_a_output_std,
+    noise_a_output_range,
+    noise_a_output_ratio,
+    noise_b_input,
+    noise_b_input_type,
+    noise_b_input_std,
+    noise_b_input_range,
+    noise_b_input_ratio,
+    noise_b_output,
+    noise_b_output_type,
+    noise_b_output_std,
+    noise_b_output_range,
+    noise_b_output_ratio,
+    noise_test_inputs,
+    noise_test_type,
+    noise_test_std,
+    noise_test_range,
+    noise_test_ratio,
+) -> NoiseConfig:
+    """Create NoiseConfig from UI parameters."""
+    return NoiseConfig(
+        inject_noise=inject_noise,
+        noise_type=noise_type,
+        noise_std=noise_std,
+        noise_range=noise_range,
+        noise_ratio=noise_ratio,
+        noise_a_input=noise_a_input,
+        noise_a_input_type=noise_a_input_type,
+        noise_a_input_std=noise_a_input_std,
+        noise_a_input_range=noise_a_input_range,
+        noise_a_input_ratio=noise_a_input_ratio,
+        noise_a_output=noise_a_output,
+        noise_a_output_type=noise_a_output_type,
+        noise_a_output_std=noise_a_output_std,
+        noise_a_output_range=noise_a_output_range,
+        noise_a_output_ratio=noise_a_output_ratio,
+        noise_b_input=noise_b_input,
+        noise_b_input_type=noise_b_input_type,
+        noise_b_input_std=noise_b_input_std,
+        noise_b_input_range=noise_b_input_range,
+        noise_b_input_ratio=noise_b_input_ratio,
+        noise_b_output=noise_b_output,
+        noise_b_output_type=noise_b_output_type,
+        noise_b_output_std=noise_b_output_std,
+        noise_b_output_range=noise_b_output_range,
+        noise_b_output_ratio=noise_b_output_ratio,
+        noise_test_inputs=noise_test_inputs,
+        noise_test_type=noise_test_type,
+        noise_test_std=noise_test_std,
+        noise_test_range=noise_test_range,
+        noise_test_ratio=noise_test_ratio,
+    )
 
 
 def extract_sample_from_batch(batch, sample_idx, evaluation_mode="test"):
@@ -156,6 +314,107 @@ def generate_noise_latent(
         return (1 - noise_ratio) * original_latent + noise_ratio * noise
 
 
+def generate_noise_tensor(
+    original_tensor, noise_type, noise_std=None, noise_range=None, noise_ratio=1.0
+):
+    """generate noise to replace part or all of any tensor (examples, test inputs, etc.)."""
+    if noise_ratio == 0.0:
+        return original_tensor
+
+    # generate noise based on type
+    if noise_type == "gaussian":
+        noise = torch.randn_like(original_tensor) * noise_std
+    elif noise_type == "uniform":
+        noise = torch.rand_like(original_tensor) * 2 * noise_range - noise_range
+    elif noise_type == "zeros":
+        noise = torch.zeros_like(original_tensor)
+    elif noise_type == "ones":
+        noise = torch.ones_like(original_tensor)
+    else:
+        raise ValueError(f"unknown noise type: {noise_type}")
+
+    # mix original and noise based on ratio
+    if noise_ratio == 1.0:
+        return noise
+    else:
+        return (1 - noise_ratio) * original_tensor + noise_ratio * noise
+
+
+def apply_noise_to_examples(rule_latent_examples, noise_config: NoiseConfig):
+    """apply noise to individual training examples (A input, A output, B input, B output)."""
+    # create a copy to avoid modifying the original
+    noisy_examples = []
+    for i, example in enumerate(rule_latent_examples):
+        noisy_example = {}
+
+        # Determine which example this is (A=0, B=1)
+        is_a = i == 0
+
+        # Apply noise to input
+        if is_a and noise_config.noise_a_input:
+            noisy_example["input"] = generate_noise_tensor(
+                example["input"],
+                noise_config.noise_a_input_type,
+                noise_config.noise_a_input_std,
+                noise_config.noise_a_input_range,
+                noise_config.noise_a_input_ratio,
+            )
+        elif not is_a and noise_config.noise_b_input:
+            noisy_example["input"] = generate_noise_tensor(
+                example["input"],
+                noise_config.noise_b_input_type,
+                noise_config.noise_b_input_std,
+                noise_config.noise_b_input_range,
+                noise_config.noise_b_input_ratio,
+            )
+        else:
+            noisy_example["input"] = example["input"]
+
+        # Apply noise to output
+        if is_a and noise_config.noise_a_output:
+            noisy_example["output"] = generate_noise_tensor(
+                example["output"],
+                noise_config.noise_a_output_type,
+                noise_config.noise_a_output_std,
+                noise_config.noise_a_output_range,
+                noise_config.noise_a_output_ratio,
+            )
+        elif not is_a and noise_config.noise_b_output:
+            noisy_example["output"] = generate_noise_tensor(
+                example["output"],
+                noise_config.noise_b_output_type,
+                noise_config.noise_b_output_std,
+                noise_config.noise_b_output_range,
+                noise_config.noise_b_output_ratio,
+            )
+        else:
+            noisy_example["output"] = example["output"]
+
+        noisy_examples.append(noisy_example)
+
+    return noisy_examples
+
+
+def apply_noise_to_test_inputs(
+    test_examples, noise_type, noise_std=None, noise_range=None, noise_ratio=1.0
+):
+    """apply noise to test input examples."""
+    if noise_ratio == 0.0:
+        return test_examples
+
+    # create a copy to avoid modifying the original
+    noisy_test_examples = []
+    for example in test_examples:
+        noisy_example = {}
+        noisy_example["input"] = generate_noise_tensor(
+            example["input"], noise_type, noise_std, noise_range, noise_ratio
+        )
+        noisy_example["output"] = example["output"]  # don't noise the target output
+        noisy_test_examples.append(noisy_example)
+
+    return noisy_test_examples
+
+
 def calculate_accuracy_metrics(
     predictions: torch.Tensor, targets: torch.Tensor
 ) -> Dict[str, float]:
@@ -189,11 +448,7 @@ def evaluate_model_on_tasks(
     config,
     evaluation_mode="test",
     progress_bar=None,
-    inject_noise=False,
-    noise_type="gaussian",
-    noise_std=1.0,
-    noise_range=1.0,
-    noise_ratio=1.0,
+    noise_config: NoiseConfig = None,
     enable_color_augmentation=False,
     augmentation_variants=1,
     preserve_background=True,
@@ -211,16 +466,15 @@ def evaluate_model_on_tasks(
         config: Configuration object
         evaluation_mode: "test" for test targets, "holdout" for holdout targets
         progress_bar: Streamlit progress bar
-        inject_noise: Whether to inject noise into rule latent
-        noise_type: Type of noise ("gaussian", "uniform", "zeros", "ones")
-        noise_std: Standard deviation for gaussian noise
-        noise_range: Range for uniform noise
-        noise_ratio: Fraction of rule latent to replace with noise
+        noise_config: NoiseConfig object containing all noise injection parameters
         enable_color_augmentation: Whether to enable color relabeling
         augmentation_variants: Number of augmented versions per example
         preserve_background: Whether to preserve background color
         augmentation_seed: Random seed for augmentation
     """
+    if noise_config is None:
+        noise_config = NoiseConfig()
+
     results = []
 
     # Create augmented dataset if either color augmentation or counterfactuals are enabled
@@ -303,6 +557,27 @@ def evaluate_model_on_tasks(
                 num_test_examples = combo["num_test_examples"]
                 holdout_example = combo.get("holdout_example")
 
+                # Apply noise to training examples if requested
+                if (
+                    noise_config.noise_a_input
+                    or noise_config.noise_a_output
+                    or noise_config.noise_b_input
+                    or noise_config.noise_b_output
+                ):
+                    rule_latent_examples = apply_noise_to_examples(
+                        rule_latent_examples, noise_config
+                    )
+
+                # Apply noise to test inputs if requested
+                if noise_config.noise_test_inputs:
+                    test_examples = apply_noise_to_test_inputs(
+                        test_examples,
+                        noise_config.noise_test_type,
+                        noise_config.noise_test_std,
+                        noise_config.noise_test_range,
+                        noise_config.noise_test_ratio,
+                    )
+
                 # Extract the preprocessed tensors for rule latent creation
                 example1_input = rule_latent_examples[0][
                     "input"
@@ -326,10 +601,14 @@ def evaluate_model_on_tasks(
                 )
 
                 # inject noise into rule latent if requested
-                if inject_noise:
+                if noise_config.inject_noise:
                     original_latent = outputs["rule_latents"][0:1]
                     noisy_latent = generate_noise_latent(
-                        original_latent, noise_type, noise_std, noise_range, noise_ratio
+                        original_latent,
+                        noise_config.noise_type,
+                        noise_config.noise_std,
+                        noise_config.noise_range,
+                        noise_config.noise_ratio,
                     )
                     outputs["rule_latents"][0:1] = noisy_latent
 
@@ -548,11 +827,7 @@ def test_all_combinations(
     config,
     evaluation_mode="test",
     progress_bar=None,
-    inject_noise=False,
-    noise_type="gaussian",
-    noise_std=1.0,
-    noise_range=1.0,
-    noise_ratio=1.0,
+    noise_config: NoiseConfig = None,
     enable_color_augmentation=False,
     augmentation_variants=1,
     preserve_background=True,
@@ -570,17 +845,16 @@ def test_all_combinations(
         config: Configuration object
         evaluation_mode: "test" for test targets, "holdout" for holdout targets
         progress_bar: Streamlit progress bar
-        inject_noise: Whether to inject noise into rule latent
-        noise_type: Type of noise ("gaussian", "uniform", "zeros", "ones")
-        noise_std: Standard deviation for gaussian noise
-        noise_range: Range for uniform noise
-        noise_ratio: Fraction of rule latent to replace with noise
+        noise_config: NoiseConfig object containing all noise injection parameters
         enable_color_augmentation: Whether to enable color relabeling
         augmentation_variants: Number of augmented versions per example
         preserve_background: Whether to preserve background color
         augmentation_seed: Random seed for augmentation
         test_all_test_pairs: Whether to evaluate on all test examples for each combination
     """
+    if noise_config is None:
+        noise_config = NoiseConfig()
+
     # Set deterministic training for reproducible results
     config.set_deterministic_training()
 
@@ -654,6 +928,27 @@ def test_all_combinations(
                 num_test_examples = combo["num_test_examples"]
                 holdout_example = combo.get("holdout_example")
 
+                # Apply noise to training examples if requested
+                if (
+                    noise_config.noise_a_input
+                    or noise_config.noise_a_output
+                    or noise_config.noise_b_input
+                    or noise_config.noise_b_output
+                ):
+                    rule_latent_examples = apply_noise_to_examples(
+                        rule_latent_examples, noise_config
+                    )
+
+                # Apply noise to test inputs if requested
+                if noise_config.noise_test_inputs:
+                    test_examples = apply_noise_to_test_inputs(
+                        test_examples,
+                        noise_config.noise_test_type,
+                        noise_config.noise_test_std,
+                        noise_config.noise_test_range,
+                        noise_config.noise_test_ratio,
+                    )
+
                 # Extract the preprocessed tensors
                 example1_input = rule_latent_examples[0][
                     "input"
@@ -667,9 +962,13 @@ def test_all_combinations(
                 )
 
                 # inject noise into rule latent if requested
-                if inject_noise:
+                if noise_config.inject_noise:
                     rule_latent = generate_noise_latent(
-                        rule_latent, noise_type, noise_std, noise_range, noise_ratio
+                        rule_latent,
+                        noise_config.noise_type,
+                        noise_config.noise_std,
+                        noise_config.noise_range,
+                        noise_config.noise_ratio,
                     )
 
                 # evaluate on target(s)
@@ -1016,6 +1315,248 @@ def main():
             help="fraction of rule latent to replace with noise (1.0 = full replacement)",
         )
 
+    st.sidebar.subheader("support example noise")
+
+    # Support A input noise
+    noise_a_input = st.sidebar.checkbox(
+        "noise support A input",
+        value=False,
+        help="inject noise into support example A input to test model robustness",
+    )
+
+    noise_a_input_type = "gaussian"
+    noise_a_input_std = 1.0
+    noise_a_input_range = 1.0
+    noise_a_input_ratio = 1.0
+
+    if noise_a_input:
+        noise_a_input_type = st.sidebar.selectbox(
+            "A input noise type",
+            ["gaussian", "uniform", "zeros", "ones"],
+            index=0,
+            help="type of noise to inject into support A input",
+        )
+
+        if noise_a_input_type == "gaussian":
+            noise_a_input_std = st.sidebar.slider(
+                "A input noise std",
+                min_value=0.1,
+                max_value=2.0,
+                value=1.0,
+                step=0.1,
+                help="standard deviation for gaussian noise on support A input",
+            )
+        elif noise_a_input_type == "uniform":
+            noise_a_input_range = st.sidebar.slider(
+                "A input noise range",
+                min_value=0.1,
+                max_value=2.0,
+                value=1.0,
+                step=0.1,
+                help="range for uniform noise on support A input [-range, +range]",
+            )
+
+        noise_a_input_ratio = st.sidebar.slider(
+            "A input noise ratio",
+            min_value=0.0,
+            max_value=1.0,
+            value=1.0,
+            step=0.1,
+            help="fraction of support A input to replace with noise (1.0 = full replacement)",
+        )
+
+    # Support A output noise
+    noise_a_output = st.sidebar.checkbox(
+        "noise support A output",
+        value=False,
+        help="inject noise into support example A output to test model robustness",
+    )
+
+    noise_a_output_type = "gaussian"
+    noise_a_output_std = 1.0
+    noise_a_output_range = 1.0
+    noise_a_output_ratio = 1.0
+
+    if noise_a_output:
+        noise_a_output_type = st.sidebar.selectbox(
+            "A output noise type",
+            ["gaussian", "uniform", "zeros", "ones"],
+            index=0,
+            help="type of noise to inject into support A output",
+        )
+
+        if noise_a_output_type == "gaussian":
+            noise_a_output_std = st.sidebar.slider(
+                "A output noise std",
+                min_value=0.1,
+                max_value=2.0,
+                value=1.0,
+                step=0.1,
+                help="standard deviation for gaussian noise on support A output",
+            )
+        elif noise_a_output_type == "uniform":
+            noise_a_output_range = st.sidebar.slider(
+                "A output noise range",
+                min_value=0.1,
+                max_value=2.0,
+                value=1.0,
+                step=0.1,
+                help="range for uniform noise on support A output [-range, +range]",
+            )
+
+        noise_a_output_ratio = st.sidebar.slider(
+            "A output noise ratio",
+            min_value=0.0,
+            max_value=1.0,
+            value=1.0,
+            step=0.1,
+            help="fraction of support A output to replace with noise (1.0 = full replacement)",
+        )
+
+    # Support B input noise
+    noise_b_input = st.sidebar.checkbox(
+        "noise support B input",
+        value=False,
+        help="inject noise into support example B input to test model robustness",
+    )
+
+    noise_b_input_type = "gaussian"
+    noise_b_input_std = 1.0
+    noise_b_input_range = 1.0
+    noise_b_input_ratio = 1.0
+
+    if noise_b_input:
+        noise_b_input_type = st.sidebar.selectbox(
+            "B input noise type",
+            ["gaussian", "uniform", "zeros", "ones"],
+            index=0,
+            help="type of noise to inject into support B input",
+        )
+
+        if noise_b_input_type == "gaussian":
+            noise_b_input_std = st.sidebar.slider(
+                "B input noise std",
+                min_value=0.1,
+                max_value=2.0,
+                value=1.0,
+                step=0.1,
+                help="standard deviation for gaussian noise on support B input",
+            )
+        elif noise_b_input_type == "uniform":
+            noise_b_input_range = st.sidebar.slider(
+                "B input noise range",
+                min_value=0.1,
+                max_value=2.0,
+                value=1.0,
+                step=0.1,
+                help="range for uniform noise on support B input [-range, +range]",
+            )
+
+        noise_b_input_ratio = st.sidebar.slider(
+            "B input noise ratio",
+            min_value=0.0,
+            max_value=1.0,
+            value=1.0,
+            step=0.1,
+            help="fraction of support B input to replace with noise (1.0 = full replacement)",
+        )
+
+    # Support B output noise
+    noise_b_output = st.sidebar.checkbox(
+        "noise support B output",
+        value=False,
+        help="inject noise into support example B output to test model robustness",
+    )
+
+    noise_b_output_type = "gaussian"
+    noise_b_output_std = 1.0
+    noise_b_output_range = 1.0
+    noise_b_output_ratio = 1.0
+
+    if noise_b_output:
+        noise_b_output_type = st.sidebar.selectbox(
+            "B output noise type",
+            ["gaussian", "uniform", "zeros", "ones"],
+            index=0,
+            help="type of noise to inject into support B output",
+        )
+
+        if noise_b_output_type == "gaussian":
+            noise_b_output_std = st.sidebar.slider(
+                "B output noise std",
+                min_value=0.1,
+                max_value=2.0,
+                value=1.0,
+                step=0.1,
+                help="standard deviation for gaussian noise on support B output",
+            )
+        elif noise_b_output_type == "uniform":
+            noise_b_output_range = st.sidebar.slider(
+                "B output noise range",
+                min_value=0.1,
+                max_value=2.0,
+                value=1.0,
+                step=0.1,
+                help="range for uniform noise on support B output [-range, +range]",
+            )
+
+        noise_b_output_ratio = st.sidebar.slider(
+            "B output noise ratio",
+            min_value=0.0,
+            max_value=1.0,
+            value=1.0,
+            step=0.1,
+            help="fraction of support B output to replace with noise (1.0 = full replacement)",
+        )
+
+    st.sidebar.subheader("test input noise")
+    noise_test_inputs = st.sidebar.checkbox(
+        "noise test inputs",
+        value=False,
+        help="inject noise into test inputs to test model robustness",
+    )
+
+    noise_test_type = "gaussian"
+    noise_test_std = 1.0
+    noise_test_range = 1.0
+    noise_test_ratio = 1.0
+
+    if noise_test_inputs:
+        noise_test_type = st.sidebar.selectbox(
+            "test noise type",
+            ["gaussian", "uniform", "zeros", "ones"],
+            index=0,
+            help="type of noise to inject into test inputs",
+        )
+
+        if noise_test_type == "gaussian":
+            noise_test_std = st.sidebar.slider(
+                "test noise std",
+                min_value=0.1,
+                max_value=2.0,
+                value=1.0,
+                step=0.1,
+                help="standard deviation for gaussian noise on test inputs",
+            )
+        elif noise_test_type == "uniform":
+            noise_test_range = st.sidebar.slider(
+                "test noise range",
+                min_value=0.1,
+                max_value=2.0,
+                value=1.0,
+                step=0.1,
+                help="range for uniform noise on test inputs [-range, +range]",
+            )
+
+        noise_test_ratio = st.sidebar.slider(
+            "test noise ratio",
+            min_value=0.0,
+            max_value=1.0,
+            value=1.0,
+            step=0.1,
+            help="fraction of test inputs to replace with noise (1.0 = full replacement)",
+        )
+
     st.sidebar.subheader("color augmentation")
     enable_color_augmentation = st.sidebar.checkbox(
         "enable color relabeling",
@@ -1131,17 +1672,46 @@ def main():
             else:
                 task_indices = None
 
+            noise_config = create_noise_config_from_ui(
+                inject_noise,
+                noise_type,
+                noise_std,
+                noise_range,
+                noise_ratio,
+                noise_a_input,
+                noise_a_input_type,
+                noise_a_input_std,
+                noise_a_input_range,
+                noise_a_input_ratio,
+                noise_a_output,
+                noise_a_output_type,
+                noise_a_output_std,
+                noise_a_output_range,
+                noise_a_output_ratio,
+                noise_b_input,
+                noise_b_input_type,
+                noise_b_input_std,
+                noise_b_input_range,
+                noise_b_input_ratio,
+                noise_b_output,
+                noise_b_output_type,
+                noise_b_output_std,
+                noise_b_output_range,
+                noise_b_output_ratio,
+                noise_test_inputs,
+                noise_test_type,
+                noise_test_std,
+                noise_test_range,
+                noise_test_ratio,
+            )
+
             results = test_all_combinations(
                 model,
                 test_dataset,
                 config,
                 evaluation_mode,
                 progress_bar,
-                inject_noise,
-                noise_type,
-                noise_std,
-                noise_range,
-                noise_ratio,
+                noise_config,
                 enable_color_augmentation,
                 augmentation_variants,
                 preserve_background,
@@ -1164,17 +1734,46 @@ def main():
             else:
                 task_indices = None
 
+            noise_config = create_noise_config_from_ui(
+                inject_noise,
+                noise_type,
+                noise_std,
+                noise_range,
+                noise_ratio,
+                noise_a_input,
+                noise_a_input_type,
+                noise_a_input_std,
+                noise_a_input_range,
+                noise_a_input_ratio,
+                noise_a_output,
+                noise_a_output_type,
+                noise_a_output_std,
+                noise_a_output_range,
+                noise_a_output_ratio,
+                noise_b_input,
+                noise_b_input_type,
+                noise_b_input_std,
+                noise_b_input_range,
+                noise_b_input_ratio,
+                noise_b_output,
+                noise_b_output_type,
+                noise_b_output_std,
+                noise_b_output_range,
+                noise_b_output_ratio,
+                noise_test_inputs,
+                noise_test_type,
+                noise_test_std,
+                noise_test_range,
+                noise_test_ratio,
+            )
+
             results = evaluate_model_on_tasks(
                 model,
                 dataset,
                 config,
                 evaluation_mode,
                 progress_bar,
-                inject_noise,
-                noise_type,
-                noise_std,
-                noise_range,
-                noise_ratio,
+                noise_config,
                 enable_color_augmentation,
                 augmentation_variants,
                 preserve_background,
@@ -1195,6 +1794,31 @@ def main():
         st.session_state.noise_std = noise_std
         st.session_state.noise_range = noise_range
         st.session_state.noise_ratio = noise_ratio
+        st.session_state.noise_a_input = noise_a_input
+        st.session_state.noise_a_input_type = noise_a_input_type
+        st.session_state.noise_a_input_std = noise_a_input_std
+        st.session_state.noise_a_input_range = noise_a_input_range
+        st.session_state.noise_a_input_ratio = noise_a_input_ratio
+        st.session_state.noise_a_output = noise_a_output
+        st.session_state.noise_a_output_type = noise_a_output_type
+        st.session_state.noise_a_output_std = noise_a_output_std
+        st.session_state.noise_a_output_range = noise_a_output_range
+        st.session_state.noise_a_output_ratio = noise_a_output_ratio
+        st.session_state.noise_b_input = noise_b_input
+        st.session_state.noise_b_input_type = noise_b_input_type
+        st.session_state.noise_b_input_std = noise_b_input_std
+        st.session_state.noise_b_input_range = noise_b_input_range
+        st.session_state.noise_b_input_ratio = noise_b_input_ratio
+        st.session_state.noise_b_output = noise_b_output
+        st.session_state.noise_b_output_type = noise_b_output_type
+        st.session_state.noise_b_output_std = noise_b_output_std
+        st.session_state.noise_b_output_range = noise_b_output_range
+        st.session_state.noise_b_output_ratio = noise_b_output_ratio
+        st.session_state.noise_test_inputs = noise_test_inputs
+        st.session_state.noise_test_type = noise_test_type
+        st.session_state.noise_test_std = noise_test_std
+        st.session_state.noise_test_range = noise_test_range
+        st.session_state.noise_test_ratio = noise_test_ratio
         st.session_state.enable_color_augmentation = enable_color_augmentation
         st.session_state.augmentation_variants = augmentation_variants
         st.session_state.preserve_background = preserve_background
@@ -1241,17 +1865,48 @@ def main():
 
         # show noise info if applicable
         noise_info = ""
-        if st.session_state.get("inject_noise", False):
-            noise_type = st.session_state.get("noise_type", "gaussian")
-            noise_ratio = st.session_state.get("noise_ratio", 1.0)
-            if noise_type == "gaussian":
-                noise_std = st.session_state.get("noise_std", 1.0)
-                noise_info = f" (noise: {noise_type}, std={noise_std:.1f}, ratio={noise_ratio:.1f})"
-            elif noise_type == "uniform":
-                noise_range = st.session_state.get("noise_range", 1.0)
-                noise_info = f" (noise: {noise_type}, range={noise_range:.1f}, ratio={noise_ratio:.1f})"
-            else:
-                noise_info = f" (noise: {noise_type}, ratio={noise_ratio:.1f})"
+        if (
+            st.session_state.get("inject_noise", False)
+            or st.session_state.get("noise_a_input", False)
+            or st.session_state.get("noise_a_output", False)
+            or st.session_state.get("noise_b_input", False)
+            or st.session_state.get("noise_b_output", False)
+            or st.session_state.get("noise_test_inputs", False)
+        ):
+            # Create NoiseConfig from session state for display
+            noise_config = create_noise_config_from_ui(
+                st.session_state.get("inject_noise", False),
+                st.session_state.get("noise_type", "gaussian"),
+                st.session_state.get("noise_std", 1.0),
+                st.session_state.get("noise_range", 1.0),
+                st.session_state.get("noise_ratio", 1.0),
+                st.session_state.get("noise_a_input", False),
+                st.session_state.get("noise_a_input_type", "gaussian"),
+                st.session_state.get("noise_a_input_std", 1.0),
+                st.session_state.get("noise_a_input_range", 1.0),
+                st.session_state.get("noise_a_input_ratio", 1.0),
+                st.session_state.get("noise_a_output", False),
+                st.session_state.get("noise_a_output_type", "gaussian"),
+                st.session_state.get("noise_a_output_std", 1.0),
+                st.session_state.get("noise_a_output_range", 1.0),
+                st.session_state.get("noise_a_output_ratio", 1.0),
+                st.session_state.get("noise_b_input", False),
+                st.session_state.get("noise_b_input_type", "gaussian"),
+                st.session_state.get("noise_b_input_std", 1.0),
+                st.session_state.get("noise_b_input_range", 1.0),
+                st.session_state.get("noise_b_input_ratio", 1.0),
+                st.session_state.get("noise_b_output", False),
+                st.session_state.get("noise_b_output_type", "gaussian"),
+                st.session_state.get("noise_b_output_std", 1.0),
+                st.session_state.get("noise_b_output_range", 1.0),
+                st.session_state.get("noise_b_output_ratio", 1.0),
+                st.session_state.get("noise_test_inputs", False),
+                st.session_state.get("noise_test_type", "gaussian"),
+                st.session_state.get("noise_test_std", 1.0),
+                st.session_state.get("noise_test_range", 1.0),
+                st.session_state.get("noise_test_ratio", 1.0),
+            )
+            noise_info = noise_config.get_noise_info_string()
 
         # show counterfactual info if applicable
         counterfactual_info = ""
@@ -1422,17 +2077,48 @@ def main():
 
         # show noise info if applicable
         noise_info = ""
-        if st.session_state.get("inject_noise", False):
-            noise_type = st.session_state.get("noise_type", "gaussian")
-            noise_ratio = st.session_state.get("noise_ratio", 1.0)
-            if noise_type == "gaussian":
-                noise_std = st.session_state.get("noise_std", 1.0)
-                noise_info = f" (noise: {noise_type}, std={noise_std:.1f}, ratio={noise_ratio:.1f})"
-            elif noise_type == "uniform":
-                noise_range = st.session_state.get("noise_range", 1.0)
-                noise_info = f" (noise: {noise_type}, range={noise_range:.1f}, ratio={noise_ratio:.1f})"
-            else:
-                noise_info = f" (noise: {noise_type}, ratio={noise_ratio:.1f})"
+        if (
+            st.session_state.get("inject_noise", False)
+            or st.session_state.get("noise_a_input", False)
+            or st.session_state.get("noise_a_output", False)
+            or st.session_state.get("noise_b_input", False)
+            or st.session_state.get("noise_b_output", False)
+            or st.session_state.get("noise_test_inputs", False)
+        ):
+            # Create NoiseConfig from session state for display
+            noise_config = create_noise_config_from_ui(
+                st.session_state.get("inject_noise", False),
+                st.session_state.get("noise_type", "gaussian"),
+                st.session_state.get("noise_std", 1.0),
+                st.session_state.get("noise_range", 1.0),
+                st.session_state.get("noise_ratio", 1.0),
+                st.session_state.get("noise_a_input", False),
+                st.session_state.get("noise_a_input_type", "gaussian"),
+                st.session_state.get("noise_a_input_std", 1.0),
+                st.session_state.get("noise_a_input_range", 1.0),
+                st.session_state.get("noise_a_input_ratio", 1.0),
+                st.session_state.get("noise_a_output", False),
+                st.session_state.get("noise_a_output_type", "gaussian"),
+                st.session_state.get("noise_a_output_std", 1.0),
+                st.session_state.get("noise_a_output_range", 1.0),
+                st.session_state.get("noise_a_output_ratio", 1.0),
+                st.session_state.get("noise_b_input", False),
+                st.session_state.get("noise_b_input_type", "gaussian"),
+                st.session_state.get("noise_b_input_std", 1.0),
+                st.session_state.get("noise_b_input_range", 1.0),
+                st.session_state.get("noise_b_input_ratio", 1.0),
+                st.session_state.get("noise_b_output", False),
+                st.session_state.get("noise_b_output_type", "gaussian"),
+                st.session_state.get("noise_b_output_std", 1.0),
+                st.session_state.get("noise_b_output_range", 1.0),
+                st.session_state.get("noise_b_output_ratio", 1.0),
+                st.session_state.get("noise_test_inputs", False),
+                st.session_state.get("noise_test_type", "gaussian"),
+                st.session_state.get("noise_test_std", 1.0),
+                st.session_state.get("noise_test_range", 1.0),
+                st.session_state.get("noise_test_ratio", 1.0),
+            )
+            noise_info = noise_config.get_noise_info_string()
 
         # show counterfactual info if applicable
         counterfactual_info = ""
