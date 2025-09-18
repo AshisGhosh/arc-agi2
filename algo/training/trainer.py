@@ -122,7 +122,7 @@ class ARCTrainer:
 
     def train_epoch_rule_latent(self, train_loader: DataLoader) -> Dict[str, float]:
         """
-        Train for one epoch using rule latent training approach.
+        Train for one epoch using rule latent training approach with multiple test examples.
 
         Args:
             train_loader: Training data loader with new data structure
@@ -133,6 +133,7 @@ class ARCTrainer:
         self.model.train()
         total_loss = 0.0
         total_holdout_loss = 0.0
+        total_examples = 0  # Track total examples for proper normalization
         loss_components = {"cross_entropy_loss": 0.0, "accuracy": 0.0}
         holdout_components = {"cross_entropy_loss": 0.0, "accuracy": 0.0}
 
@@ -144,11 +145,19 @@ class ARCTrainer:
             rule_latent_inputs = batch["rule_latent_inputs"].to(
                 self.device
             )  # [B, 2, 2, 3, 64, 64]
-            test_inputs = batch["test_inputs"].to(self.device)  # [B, 1, 30, 30]
-            test_outputs = batch["test_outputs"].to(self.device)  # [B, 1, 30, 30]
+            test_inputs = batch["test_inputs"].to(
+                self.device
+            )  # [B, max_test_examples, 30, 30]
+            test_outputs = batch["test_outputs"].to(
+                self.device
+            )  # [B, max_test_examples, 30, 30]
+            test_masks = batch["test_masks"].to(self.device)  # [B, max_test_examples]
             holdout_inputs = batch["holdout_inputs"].to(self.device)  # [B, 1, 30, 30]
             holdout_outputs = batch["holdout_outputs"].to(self.device)  # [B, 1, 30, 30]
             has_holdout = batch["has_holdout"].to(self.device)  # [B]
+            num_test_examples = batch[
+                "num_test_examples"
+            ]  # [B] list of number of test examples per task
             raw_rule_latent_targets = batch[
                 "raw_rule_latent_targets"
             ]  # [B] list of raw targets (ARC format)
@@ -172,25 +181,37 @@ class ARCTrainer:
             # Calculate training loss for all tasks
             batch_training_loss = 0.0
             batch_holdout_loss = 0.0
+            batch_total_examples = 0  # Track examples in this batch
 
             # Process all tasks at once
             for i in range(batch_size):
                 # Get rule latent for this task
                 rule_latent = rule_latents[i : i + 1]  # [1, 128]
 
-                # 1. Test example prediction (main target)
-                test_logits = self.model.decoder(
-                    rule_latent, test_inputs[i : i + 1]
-                )  # [1, 10, 30, 30]
-                test_loss, test_comp = calculate_classification_loss(
-                    test_logits, test_outputs[i : i + 1], self.config
-                )
-                batch_training_loss += test_loss
+                # 1. Test examples prediction (all test examples for this task)
+                task_num_test = num_test_examples[i]
+                for test_idx in range(task_num_test):
+                    if test_masks[i, test_idx]:  # Only process valid test examples
+                        test_input = test_inputs[
+                            i, test_idx : test_idx + 1
+                        ]  # [1, 30, 30]
+                        test_output = test_outputs[
+                            i, test_idx : test_idx + 1
+                        ]  # [1, 30, 30]
 
-                # Update test metrics
-                for key, value in test_comp.items():
-                    if key != "total_loss":
-                        loss_components[key] += value
+                        test_logits = self.model.decoder(
+                            rule_latent, test_input
+                        )  # [1, 10, 30, 30]
+                        test_loss, test_comp = calculate_classification_loss(
+                            test_logits, test_output, self.config
+                        )
+                        batch_training_loss += test_loss
+                        batch_total_examples += 1
+
+                        # Update test metrics
+                        for key, value in test_comp.items():
+                            if key != "total_loss":
+                                loss_components[key] += value
 
                 # 2. Rule latent example 1 prediction (to prevent memorization)
                 # Use raw targets from batch (ARC format)
@@ -204,6 +225,7 @@ class ARCTrainer:
                     ex1_logits, ex1_output, self.config
                 )
                 batch_training_loss += ex1_loss
+                batch_total_examples += 1
                 for key, value in ex1_comp.items():
                     if key != "total_loss":
                         loss_components[key] += value
@@ -219,6 +241,7 @@ class ARCTrainer:
                     ex2_logits, ex2_output, self.config
                 )
                 batch_training_loss += ex2_loss
+                batch_total_examples += 1
                 for key, value in ex2_comp.items():
                     if key != "total_loss":
                         loss_components[key] += value
@@ -239,41 +262,51 @@ class ARCTrainer:
                         if key != "total_loss":
                             holdout_components[key] += value
 
+            # Normalize batch loss by number of examples in this batch
+            if batch_total_examples > 0:
+                normalized_batch_loss = batch_training_loss / batch_total_examples
+            else:
+                normalized_batch_loss = batch_training_loss
+
             # Backward pass
             self.optimizer.zero_grad()
-            batch_training_loss.backward()
+            normalized_batch_loss.backward()
             torch.nn.utils.clip_grad_norm_(
                 self.model.parameters(), self.config.max_grad_norm
             )
             self.optimizer.step()
 
-            # Update metrics
+            # Update metrics (use original unnormalized loss for tracking)
             total_loss += batch_training_loss.item()
+            total_examples += batch_total_examples
 
             # Update progress bar
             pbar.set_postfix(
                 {
                     "loss": f"{batch_training_loss.item():.4f}",
+                    "examples": batch_total_examples,
                     "holdout": f"{batch_holdout_loss:.4f}"
                     if batch_holdout_loss > 0
                     else "N/A",
                 }
             )
 
-        # Calculate averages
-        num_samples = len(train_loader)
+        # Calculate averages - normalize by total examples, not batch count
         metrics = {
-            "total_loss": total_loss / num_samples,
-            **{k: v / num_samples for k, v in loss_components.items()},
+            "total_loss": total_loss / total_examples if total_examples > 0 else 0.0,
+            **{
+                k: v / total_examples if total_examples > 0 else 0.0
+                for k, v in loss_components.items()
+            },
         }
 
         # Add holdout metrics if available
         if total_holdout_loss > 0:
             metrics.update(
                 {
-                    "holdout_loss": total_holdout_loss / num_samples,
+                    "holdout_loss": total_holdout_loss / len(train_loader),
                     **{
-                        f"holdout_{k}": v / num_samples
+                        f"holdout_{k}": v / len(train_loader)
                         for k, v in holdout_components.items()
                     },
                 }

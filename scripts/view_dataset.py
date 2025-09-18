@@ -142,23 +142,75 @@ def main():
             list(set(task_idx for task_idx, _ in dataset.combination_mapping))
         )
 
+        # create mapping from task_id to task_idx for search functionality
+        task_id_to_idx = {}
+        if hasattr(dataset, "tasks"):
+            for i, task in enumerate(dataset.tasks):
+                task_id = task.get("task_id", f"task_{i}")
+                task_id_to_idx[task_id] = i
+
         st.success(
             f"✅ loaded {len(unique_task_indices)} unique tasks from {dataset_choice}"
         )
         st.success(f"✅ total combinations: {len(dataset)}")
 
         # task selection (after dataset is loaded)
-        task_idx = st.sidebar.number_input(
-            "task index",
-            min_value=0,
-            max_value=len(unique_task_indices) - 1,
-            value=0,
-            step=1,
-            help=f"enter task index (0 to {len(unique_task_indices) - 1})",
+        st.sidebar.subheader("task selection")
+
+        # search method selection
+        search_method = st.sidebar.radio(
+            "search method",
+            ["by task index", "by task id"],
+            index=0,
+            help="choose how to search for tasks",
         )
 
-        # get the actual task index from unique list
-        actual_task_idx = unique_task_indices[task_idx]
+        if search_method == "by task index":
+            task_idx = st.sidebar.number_input(
+                "task index",
+                min_value=0,
+                max_value=len(unique_task_indices) - 1,
+                value=0,
+                step=1,
+                help=f"enter task index (0 to {len(unique_task_indices) - 1})",
+            )
+            # get the actual task index from unique list
+            actual_task_idx = unique_task_indices[task_idx]
+
+        else:  # by task id
+            # create searchable list of task ids
+            available_task_ids = sorted(list(task_id_to_idx.keys()))
+
+            # search box for task id
+            search_term = st.sidebar.text_input(
+                "search task id",
+                value="",
+                placeholder="e.g., 27a28665, 239be575...",
+                help="type part of the task id to search",
+            )
+
+            # filter task ids based on search term
+            if search_term:
+                filtered_task_ids = [
+                    task_id
+                    for task_id in available_task_ids
+                    if search_term.lower() in task_id.lower()
+                ]
+            else:
+                filtered_task_ids = available_task_ids
+
+            if filtered_task_ids:
+                st.sidebar.info(f"found {len(filtered_task_ids)} matching tasks")
+                selected_task_id = st.sidebar.selectbox(
+                    "select task id",
+                    filtered_task_ids,
+                    index=0,
+                    help="select from filtered task ids",
+                )
+                actual_task_idx = task_id_to_idx[selected_task_id]
+            else:
+                st.sidebar.warning("no tasks found matching search term")
+                actual_task_idx = unique_task_indices[0]  # fallback to first task
 
         # dataset info
         col1, col2, col3, col4 = st.columns(4)
@@ -167,7 +219,16 @@ def main():
         with col2:
             st.metric("total combinations", len(dataset))
         with col3:
-            st.metric("current task", actual_task_idx)
+            if search_method == "by task index":
+                st.metric("current task", f"index {actual_task_idx}")
+            else:
+                # find the task id for the current task index
+                current_task_id = "unknown"
+                if hasattr(dataset, "tasks") and actual_task_idx < len(dataset.tasks):
+                    current_task_id = dataset.tasks[actual_task_idx].get(
+                        "task_id", f"task_{actual_task_idx}"
+                    )
+                st.metric("current task", f"{current_task_id}")
         with col4:
             if holdout_mode and dataset_choice == "arc_agi1":
                 # count tasks with holdout data
@@ -300,7 +361,7 @@ def main():
         with col2:
             st.write("**data structure**")
             st.write("rule latent examples: 2")
-            st.write("test example: 1")
+            st.write(f"test examples: {task_data.get('num_test_examples', 1)}")
             if task_data.get("holdout_example") is not None:
                 st.write("holdout example: 1")
             else:
@@ -320,6 +381,49 @@ def main():
             else:
                 st.write("❌ no holdout data")
 
+        # test examples display
+        st.subheader("🧪 test examples")
+        test_examples = task_data.get("test_examples", [])
+        num_test_examples = task_data.get("num_test_examples", len(test_examples))
+
+        if num_test_examples > 0:
+            # Create columns for test examples (max 3 per row)
+            cols_per_row = min(3, num_test_examples)
+
+            for i in range(0, num_test_examples, cols_per_row):
+                cols = st.columns(cols_per_row)
+                for j, col in enumerate(cols):
+                    test_idx = i + j
+                    if test_idx < num_test_examples:
+                        with col:
+                            st.write(f"**test example {test_idx + 1}**")
+
+                            # Test input
+                            test_input_np = tensor_to_grayscale_numpy(
+                                test_examples[test_idx]["input"]
+                            )
+                            rgb_test_input = apply_arc_color_palette(test_input_np)
+                            fig, ax = plt.subplots(1, 1, figsize=(3, 3))
+                            ax.imshow(rgb_test_input)
+                            ax.set_title(f"input {test_idx + 1}", fontsize=10)
+                            ax.axis("off")
+                            st.pyplot(fig, width=300)
+                            plt.close(fig)
+
+                            # Test output
+                            test_output_np = tensor_to_grayscale_numpy(
+                                test_examples[test_idx]["output"]
+                            )
+                            rgb_test_output = apply_arc_color_palette(test_output_np)
+                            fig, ax = plt.subplots(1, 1, figsize=(3, 3))
+                            ax.imshow(rgb_test_output)
+                            ax.set_title(f"output {test_idx + 1}", fontsize=10)
+                            ax.axis("off")
+                            st.pyplot(fig, width=300)
+                            plt.close(fig)
+        else:
+            st.write("❌ no test examples available")
+
         # holdout vs test comparison
         if has_holdout and holdout_mode and dataset_choice == "arc_agi1":
             st.subheader("🔄 holdout vs test comparison")
@@ -327,10 +431,8 @@ def main():
             col1, col2 = st.columns(2)
 
             with col1:
-                st.write("**test input**")
-                test_input_np = tensor_to_grayscale_numpy(
-                    task_data["test_example"]["input"]
-                )
+                st.write("**first test input**")
+                test_input_np = tensor_to_grayscale_numpy(test_examples[0]["input"])
                 rgb_test_input = apply_arc_color_palette(test_input_np)
                 fig, ax = plt.subplots(1, 1, figsize=(4, 4))
                 ax.imshow(rgb_test_input)
@@ -353,7 +455,7 @@ def main():
                 plt.close(fig)
 
             # check if they're the same
-            test_input = task_data["test_example"]["input"]
+            test_input = test_examples[0]["input"]
             holdout_input = task_data["holdout_example"]["input"]
             are_same = torch.equal(test_input, holdout_input)
 
@@ -382,10 +484,11 @@ def main():
 
         with col2:
             st.write("**test images (grayscale)**")
-            test_img = task_data["test_example"]["input"]
+            test_img = test_examples[0]["input"]  # Use first test example for stats
             st.write(f"- shape: {test_img.shape}")
             st.write(f"- data type: {test_img.dtype}")
             st.write(f"- value range: [{test_img.min():.0f}, {test_img.max():.0f}]")
+            st.write(f"- number of test examples: {num_test_examples}")
 
         with col3:
             if has_holdout:

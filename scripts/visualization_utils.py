@@ -141,109 +141,154 @@ def visualize_task_combination(
     is_counterfactual = task_data.get("combination_info", {}).get(
         "is_counterfactual", False
     )
-    # create figure - always use 2x4 grid for consistency
-    fig, axes = plt.subplots(2, 4, figsize=(16, 8))
+    # create figure - use 3x4 grid for more compact layout
+    fig, axes = plt.subplots(3, 4, figsize=(16, 12))
     fig.suptitle(
         f"arc task {task_idx} - combination {combination_idx}{' (counterfactual)' if is_counterfactual else ''}",
         fontsize=16,
     )
 
-    # get rule latent inputs and test example
+    # get rule latent inputs and test examples
     rule_latent_examples = task_data["rule_latent_examples"]
-    test_example = task_data["test_example"]
+    test_examples = task_data["test_examples"]
+    test_example = test_examples[0]  # Use first test example for visualization
 
+    # Row 1: Example 1 input/output pair
     # 1. ex1 input
-    axes[0, 0].set_title("ex1 input", fontsize=12)
+    axes[0, 0].set_title("ex1 input", fontsize=10)
     img1 = denormalize_rgb(rule_latent_examples[0]["input"])
     img1_np = tensor_to_numpy(img1)
     axes[0, 0].imshow(img1_np)
     axes[0, 0].axis("off")
 
     # 2. ex1 output (to be rotated with cf)
-    axes[0, 1].set_title("ex1 output", fontsize=12)
+    axes[0, 1].set_title("ex1 output", fontsize=10)
     img2 = denormalize_rgb(rule_latent_examples[0]["output"])
     img2_np = tensor_to_numpy(img2)
     axes[0, 1].imshow(img2_np)
     axes[0, 1].axis("off")
 
     # 3. ex2 input
-    axes[0, 2].set_title("ex2 input", fontsize=12)
+    axes[0, 2].set_title("ex2 input", fontsize=10)
     img3 = denormalize_rgb(rule_latent_examples[1]["input"])
     img3_np = tensor_to_numpy(img3)
     axes[0, 2].imshow(img3_np)
     axes[0, 2].axis("off")
 
-    # 4. holdout input (if available)
-    if show_holdout and task_data.get("holdout_example") is not None:
-        axes[0, 3].set_title("holdout input", fontsize=12)
-        holdout_input_np = tensor_to_grayscale_numpy(
-            task_data["holdout_example"]["input"]
-        )
-        rgb_holdout_input = apply_arc_color_palette(holdout_input_np)
-        axes[0, 3].imshow(rgb_holdout_input)
-        axes[0, 3].axis("off")
-    else:
-        # Hide holdout input if not available
-        axes[0, 3].set_title("holdout input (n/a)", fontsize=12)
-        axes[0, 3].text(
-            0.5,
-            0.5,
-            "No holdout data",
-            ha="center",
-            va="center",
-            transform=axes[0, 3].transAxes,
-        )
-        axes[0, 3].axis("off")
-
-    # 5. ex2 output (to be rotated with cf) - show training target with counterfactual
-    axes[1, 0].set_title(
-        "ex2 output (cf)" if is_counterfactual else "ex2 output", fontsize=12
+    # 4. ex2 output (to be rotated with cf)
+    axes[0, 3].set_title(
+        "ex2 output (cf)" if is_counterfactual else "ex2 output", fontsize=10
     )
     img4 = denormalize_rgb(rule_latent_examples[1]["output"])
     img4_np = tensor_to_numpy(img4)
-    axes[1, 0].imshow(img4_np)
-    axes[1, 0].axis("off")
+    axes[0, 3].imshow(img4_np)
+    axes[0, 3].axis("off")
 
-    # 6. test input
-    axes[1, 1].set_title("test input", fontsize=12)
+    # Row 2: Test input/output pair
+    # 5. test input
+    axes[1, 0].set_title("test input", fontsize=10)
     test_input_np = tensor_to_grayscale_numpy(test_example["input"])
     rgb_test_input = apply_arc_color_palette(test_input_np)
-    axes[1, 1].imshow(rgb_test_input)
-    axes[1, 1].axis("off")
+    axes[1, 0].imshow(rgb_test_input)
+    axes[1, 0].axis("off")
 
-    # 7. test output (to be rotated with cf)
-    axes[1, 2].set_title(
-        "test output (cf)" if is_counterfactual else "test output", fontsize=12
+    # 6. test output (to be rotated with cf)
+    axes[1, 1].set_title(
+        "test output (cf)" if is_counterfactual else "test output", fontsize=10
     )
     test_output_np = tensor_to_grayscale_numpy(test_example["output"])
     rgb_test_output = apply_arc_color_palette(test_output_np)
-    axes[1, 2].imshow(rgb_test_output)
-    axes[1, 2].axis("off")
+    axes[1, 1].imshow(rgb_test_output)
+    axes[1, 1].axis("off")
 
-    # 8. holdout output (if available)
-    if show_holdout and task_data.get("holdout_example") is not None:
-        axes[1, 3].set_title(
-            "holdout output (cf)" if is_counterfactual else "holdout output",
-            fontsize=12,
-        )
-        holdout_output_np = tensor_to_grayscale_numpy(
-            task_data["holdout_example"]["output"]
-        )
-        rgb_holdout_output = apply_arc_color_palette(holdout_output_np)
-        axes[1, 3].imshow(rgb_holdout_output)
+    # 7. Additional test examples (if any)
+    if len(test_examples) > 1:
+        axes[1, 2].set_title("test input 2", fontsize=10)
+        test2_input_np = tensor_to_grayscale_numpy(test_examples[1]["input"])
+        rgb_test2_input = apply_arc_color_palette(test2_input_np)
+        axes[1, 2].imshow(rgb_test2_input)
+        axes[1, 2].axis("off")
+
+        axes[1, 3].set_title("test output 2", fontsize=10)
+        test2_output_np = tensor_to_grayscale_numpy(test_examples[1]["output"])
+        rgb_test2_output = apply_arc_color_palette(test2_output_np)
+        axes[1, 3].imshow(rgb_test2_output)
         axes[1, 3].axis("off")
     else:
-        # Hide holdout output if not available
-        axes[1, 3].set_title("holdout output (n/a)", fontsize=12)
+        # Hide additional test examples if not available
+        axes[1, 2].set_title("test input 2 (n/a)", fontsize=10)
+        axes[1, 2].text(
+            0.5,
+            0.5,
+            "Only 1 test",
+            ha="center",
+            va="center",
+            transform=axes[1, 2].transAxes,
+        )
+        axes[1, 2].axis("off")
+
+        axes[1, 3].set_title("test output 2 (n/a)", fontsize=10)
         axes[1, 3].text(
             0.5,
             0.5,
-            "No holdout data",
+            "Only 1 test",
             ha="center",
             va="center",
             transform=axes[1, 3].transAxes,
         )
         axes[1, 3].axis("off")
+
+    # Row 3: Holdout input/output pair (if available)
+    if show_holdout and task_data.get("holdout_example") is not None:
+        axes[2, 0].set_title("holdout input", fontsize=10)
+        holdout_input_np = tensor_to_grayscale_numpy(
+            task_data["holdout_example"]["input"]
+        )
+        rgb_holdout_input = apply_arc_color_palette(holdout_input_np)
+        axes[2, 0].imshow(rgb_holdout_input)
+        axes[2, 0].axis("off")
+
+        axes[2, 1].set_title(
+            "holdout output (cf)" if is_counterfactual else "holdout output",
+            fontsize=10,
+        )
+        holdout_output_np = tensor_to_grayscale_numpy(
+            task_data["holdout_example"]["output"]
+        )
+        rgb_holdout_output = apply_arc_color_palette(holdout_output_np)
+        axes[2, 1].imshow(rgb_holdout_output)
+        axes[2, 1].axis("off")
+
+        # Hide unused cells
+        axes[2, 2].axis("off")
+        axes[2, 3].axis("off")
+    else:
+        # Hide holdout if not available
+        axes[2, 0].set_title("holdout input (n/a)", fontsize=10)
+        axes[2, 0].text(
+            0.5,
+            0.5,
+            "No holdout data",
+            ha="center",
+            va="center",
+            transform=axes[2, 0].transAxes,
+        )
+        axes[2, 0].axis("off")
+
+        axes[2, 1].set_title("holdout output (n/a)", fontsize=10)
+        axes[2, 1].text(
+            0.5,
+            0.5,
+            "No holdout data",
+            ha="center",
+            va="center",
+            transform=axes[2, 1].transAxes,
+        )
+        axes[2, 1].axis("off")
+
+        # Hide unused cells
+        axes[2, 2].axis("off")
+        axes[2, 3].axis("off")
 
     # add grid to all subplots
     for ax in axes.flat:
@@ -255,11 +300,21 @@ def visualize_task_combination(
     return fig
 
 
-def visualize_prediction_comparison(sample, prediction, evaluation_mode="test"):
+def visualize_prediction_comparison(
+    sample, prediction, evaluation_mode="test", test_example_idx=None
+):
     """Visualize model predictions compared to ground truth."""
     # create figure with 2x4 grid
     fig, axes = plt.subplots(2, 4, figsize=(16, 8))
-    fig.suptitle(f"model prediction comparison ({evaluation_mode} mode)", fontsize=16)
+
+    # Add test example info to title if available
+    title = f"model prediction comparison ({evaluation_mode} mode)"
+    if test_example_idx is not None:
+        title += f" - test example {test_example_idx}"
+    elif "test_examples" in sample and len(sample["test_examples"]) > 1:
+        title += f" - test example 0 (showing first of {len(sample['test_examples'])} test examples)"
+
+    fig.suptitle(title, fontsize=16)
 
     # example 1 - handle RGB images from rule latent inputs
     axes[0, 0].set_title("example 1 input", fontsize=12)
@@ -329,7 +384,18 @@ def visualize_prediction_comparison(sample, prediction, evaluation_mode="test"):
         target_data = sample["holdout_example"]
         axes[1, 0].set_title("holdout input", fontsize=12)
     else:
-        target_data = sample.get("test_example")
+        # Handle both old (test_example) and new (test_examples) formats
+        if "test_examples" in sample and len(sample["test_examples"]) > 0:
+            # New format - use specified test example index or first one
+            if test_example_idx is not None and test_example_idx < len(
+                sample["test_examples"]
+            ):
+                target_data = sample["test_examples"][test_example_idx]
+            else:
+                target_data = sample["test_examples"][0]
+        else:
+            # Old format fallback
+            target_data = sample.get("test_example")
         axes[1, 0].set_title("test input", fontsize=12)
 
     if target_data and "input" in target_data:

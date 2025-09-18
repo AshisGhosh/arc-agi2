@@ -24,6 +24,7 @@ class TaskSubset(ARCDataset):
         arc_agi1_dir: str,
         holdout: bool = True,
         use_first_combination_only: bool = True,
+        require_multiple_test_pairs: bool = False,
     ):
         """
         create a task subset with only the specified task indices.
@@ -34,6 +35,7 @@ class TaskSubset(ARCDataset):
             arc_agi1_dir: path to arc-agi1 dataset directory
             holdout: whether to enable holdout mode
             use_first_combination_only: whether to use only the first combination of each task
+            require_multiple_test_pairs: whether to only include tasks with multiple test pairs
         """
         # initialize the base dataset
         super().__init__(
@@ -41,6 +43,7 @@ class TaskSubset(ARCDataset):
             config,
             holdout=holdout,
             use_first_combination_only=use_first_combination_only,
+            require_multiple_test_pairs=require_multiple_test_pairs,
         )
 
         # validate that all selected tasks are valid
@@ -86,8 +89,8 @@ class TaskSubset(ARCDataset):
             all_examples, i, j, is_counterfactual
         )
 
-        # Create test example using the base class helper
-        test_example = self._get_test_example(task, is_counterfactual)
+        # Create test examples using the base class helper
+        test_examples = self._get_test_examples(task, is_counterfactual)
 
         # Create holdout target using the base class helper
         holdout_example = self._get_holdout_example(task, is_counterfactual)
@@ -96,7 +99,8 @@ class TaskSubset(ARCDataset):
             # Core data - only what's needed for this combination
             "rule_latent_examples": rule_latent_inputs,  # 2 examples for encoder (ResNet format)
             "rule_latent_targets": rule_latent_targets,  # 2 examples for decoder (ARC format)
-            "test_example": test_example,  # Single test example
+            "test_examples": test_examples,  # All test examples
+            "num_test_examples": len(test_examples),  # Number of test examples
             "holdout_example": holdout_example,  # Optional holdout
             # Top-level metadata
             "task_idx": task_idx,  # Top-level task index
