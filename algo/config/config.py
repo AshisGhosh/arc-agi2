@@ -11,7 +11,7 @@ class Config:
     """Configuration for SimpleARC model training."""
 
     # Model architecture
-    rule_dim: int = 128
+    rule_dim: int = 32
     input_size: Tuple[int, int] = (30, 30)
     process_size: Tuple[int, int] = (64, 64)
 
@@ -57,9 +57,14 @@ class Config:
     preserve_background: bool = True  # Keep background color (0) unchanged
 
     # Counterfactual augmentation
-    enable_counterfactuals: bool = True
+    enable_counterfactuals: bool = False
     counterfactual_transform: str = (
         "rotate_90"  # "rotate_90", "rotate_180", "rotate_270", "reflect_h", "reflect_v"
+    )
+
+    # Rule latent regularization
+    rule_latent_regularization_weight: float = (
+        0.1  # Weight for rule latent similarity regularization
     )
 
     # Color palette (ARC official 10 colors)

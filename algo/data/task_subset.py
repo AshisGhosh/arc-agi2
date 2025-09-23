@@ -6,7 +6,7 @@ provides a unified way to create task subsets that work with the new batching st
 """
 
 from typing import List
-from algo.data import ARCDataset
+from .dataset import ARCDataset, get_augmentation_group
 
 
 class TaskSubset(ARCDataset):
@@ -95,6 +95,9 @@ class TaskSubset(ARCDataset):
         # Create holdout target using the base class helper
         holdout_example = self._get_holdout_example(task, is_counterfactual)
 
+        # Determine augmentation group for regularization
+        augmentation_group = get_augmentation_group(task, is_counterfactual, i, j)
+
         return {
             # Core data - only what's needed for this combination
             "rule_latent_examples": rule_latent_inputs,  # 2 examples for encoder (ResNet format)
@@ -109,4 +112,5 @@ class TaskSubset(ARCDataset):
             "combination_idx": combination_idx,  # Top-level combination index
             "pair_indices": (i, j),  # Top-level pair indices
             "total_combinations": len(self.combinations[task_idx]),  # Top-level count
+            "augmentation_group": augmentation_group,  # Augmentation group for regularization
         }
