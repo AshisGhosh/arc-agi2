@@ -8,7 +8,10 @@ import json
 
 from ..config import Config
 from ..models import SimpleARCModel
-from .losses import calculate_classification_loss
+from .losses import (
+    calculate_classification_loss,
+    calculate_rule_latent_regularization_loss,
+)
 
 
 class ARCTrainer:
@@ -178,6 +181,14 @@ class ARCTrainer:
                 example1_inputs, example1_outputs, example2_inputs, example2_outputs
             )  # [B, 128]
 
+            # Calculate rule latent regularization loss
+            reg_loss, reg_components = calculate_rule_latent_regularization_loss(
+                rule_latents,
+                batch["task_indices"],
+                batch["augmentation_groups"],
+                self.config.rule_latent_regularization_weight,
+            )
+
             # Calculate training loss for all tasks
             batch_training_loss = 0.0
             batch_holdout_loss = 0.0
@@ -268,9 +279,12 @@ class ARCTrainer:
             else:
                 normalized_batch_loss = batch_training_loss
 
+            # Add regularization loss to total loss
+            total_batch_loss = normalized_batch_loss + reg_loss
+
             # Backward pass
             self.optimizer.zero_grad()
-            normalized_batch_loss.backward()
+            total_batch_loss.backward()
             torch.nn.utils.clip_grad_norm_(
                 self.model.parameters(), self.config.max_grad_norm
             )
@@ -284,6 +298,7 @@ class ARCTrainer:
             pbar.set_postfix(
                 {
                     "loss": f"{batch_training_loss.item():.4f}",
+                    "reg": f"{reg_loss.item():.4f}",
                     "examples": batch_total_examples,
                     "holdout": f"{batch_holdout_loss:.4f}"
                     if batch_holdout_loss > 0
@@ -298,6 +313,8 @@ class ARCTrainer:
                 k: v / total_examples if total_examples > 0 else 0.0
                 for k, v in loss_components.items()
             },
+            # Add regularization metrics
+            **reg_components,
         }
 
         # Add holdout metrics if available

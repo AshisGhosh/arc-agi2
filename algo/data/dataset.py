@@ -11,6 +11,57 @@ from .preprocessing import preprocess_example_image, preprocess_target_image
 from .augmentation import generate_augmented_examples
 
 
+def get_augmentation_group(
+    task: Dict[str, Any], is_counterfactual: bool, i: int, j: int
+) -> int:
+    """
+    Get augmentation group ID for regularization.
+
+    Groups:
+    0: original examples (no augmentation)
+    1: color-relabeled examples only
+    2: counterfactual examples only
+    3: counterfactual + color-relabeled examples
+
+    Args:
+        task: Task dictionary
+        is_counterfactual: Whether this is a counterfactual combination
+        i, j: Pair indices for the combination
+
+    Returns:
+        Augmentation group ID (0-3)
+    """
+    # determine if this combination uses augmented examples
+    is_augmented = False
+
+    if is_counterfactual:
+        # for counterfactual, check if we're using counterfactual augmented examples
+        if (
+            task.get("counterfactual_augmented_train")
+            and i >= len(task["counterfactual_train"])
+            and j >= len(task["counterfactual_train"])
+        ):
+            is_augmented = True
+    else:
+        # for regular, check if we're using augmented examples
+        if (
+            task.get("augmented_train")
+            and i >= len(task["train"])
+            and j >= len(task["train"])
+        ):
+            is_augmented = True
+
+    # determine group
+    if is_counterfactual and is_augmented:
+        return 3  # counterfactual + color
+    elif is_counterfactual:
+        return 2  # counterfactual only
+    elif is_augmented:
+        return 1  # color only
+    else:
+        return 0  # original
+
+
 def custom_collate_fn(batch):
     """
     Custom collate function for ARC dataset with variable-length test examples.
@@ -45,6 +96,7 @@ def custom_collate_fn(batch):
     pair_indices = []
     total_combinations = []
     num_test_examples = []
+    augmentation_groups = []
 
     # Collect raw rule latent examples for decoder
     raw_rule_latent_examples = []
@@ -96,6 +148,7 @@ def custom_collate_fn(batch):
         pair_indices.append(sample["pair_indices"])
         total_combinations.append(sample["total_combinations"])
         num_test_examples.append(sample["num_test_examples"])
+        augmentation_groups.append(sample["augmentation_group"])
 
     return {
         "rule_latent_inputs": rule_latent_inputs,  # [B, 2, 2, 3, 64, 64]
@@ -114,6 +167,7 @@ def custom_collate_fn(batch):
         "pair_indices": pair_indices,  # [B] list of pair indices
         "total_combinations": total_combinations,  # [B] list of total combinations per task
         "num_test_examples": num_test_examples,  # [B] list of number of test examples per task
+        "augmentation_groups": augmentation_groups,  # [B] list of augmentation group IDs
     }
 
 
@@ -631,6 +685,9 @@ class ARCDataset(Dataset):
         # Create holdout example (if available)
         holdout_example = self._get_holdout_example(task, is_counterfactual)
 
+        # Determine augmentation group for regularization
+        augmentation_group = get_augmentation_group(task, is_counterfactual, i, j)
+
         return {
             # Core data - only what's needed for this combination
             "rule_latent_examples": rule_latent_inputs,  # 2 examples for encoder (ResNet format)
@@ -645,6 +702,7 @@ class ARCDataset(Dataset):
             "combination_idx": combination_idx,  # Top-level combination index
             "pair_indices": (i, j),  # Top-level pair indices
             "total_combinations": len(self.combinations[task_idx]),  # Top-level count
+            "augmentation_group": augmentation_group,  # Augmentation group for regularization
         }
 
     def _get_test_examples(

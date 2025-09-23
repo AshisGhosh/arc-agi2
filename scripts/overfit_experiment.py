@@ -69,7 +69,7 @@ class OverfitExperiment:
             self.config.arc_agi1_dir,
             self.config,
             holdout=True,
-            require_multiple_test_pairs=True,
+            require_multiple_test_pairs=False,
         )
         valid_task_indices = set(full_dataset.valid_tasks)
         total_tasks = len(full_dataset.tasks)  # Total tasks in dataset (0-399)
@@ -107,7 +107,7 @@ class OverfitExperiment:
             "random_seed": random_seed,
             "total_available_tasks": total_tasks,
             "selection_method": "random" if task_indices is None else "manual",
-            "require_multiple_test_pairs": True,
+            "require_multiple_test_pairs": False,
             "valid_tasks_count": len(valid_task_indices),
         }
 
@@ -124,7 +124,7 @@ class OverfitExperiment:
             arc_agi1_dir=self.config.arc_agi1_dir,
             holdout=True,
             use_first_combination_only=False,  # Use ALL combinations for training
-            require_multiple_test_pairs=True,
+            require_multiple_test_pairs=False,
         )
 
     def train_on_tasks(
@@ -156,6 +156,7 @@ class OverfitExperiment:
             shuffle=True,
             num_workers=2,
             pin_memory=True,
+            persistent_workers=True,  # keep workers alive between epochs
             collate_fn=custom_collate_fn,
         )
 
@@ -194,8 +195,10 @@ class OverfitExperiment:
             if epoch % 10 == 0 or epoch < 10:
                 elapsed = time.time() - start_time
                 current_lr = trainer.optimizer.param_groups[0]["lr"]
+                reg_loss = train_metrics.get("rule_latent_regularization", 0.0)
+                active_groups = train_metrics.get("active_groups", 0)
                 print(
-                    f"epoch {epoch:4d}: loss={avg_loss:.6f}, lr={current_lr:.2e} (elapsed: {elapsed:.1f}s)"
+                    f"epoch {epoch:4d}: loss={avg_loss:.6f}, reg={reg_loss:.6f}, groups={active_groups}, lr={current_lr:.2e} (elapsed: {elapsed:.1f}s)"
                 )
 
             # save best model
@@ -280,6 +283,7 @@ class OverfitExperiment:
             shuffle=False,
             num_workers=2,
             pin_memory=True,
+            persistent_workers=True,  # keep workers alive between epochs
             collate_fn=custom_collate_fn,
         )
 
@@ -642,7 +646,7 @@ def main():
     """main experiment function."""
     parser = argparse.ArgumentParser(description="n-task overfitting experiment")
     parser.add_argument(
-        "--n_tasks", "-n", type=int, default=10, help="number of tasks to overfit on"
+        "--n_tasks", "-n", type=int, default=50, help="number of tasks to overfit on"
     )
     parser.add_argument(
         "--task-indices", type=int, nargs="+", help="specific task indices to use"

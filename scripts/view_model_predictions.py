@@ -112,12 +112,68 @@ class NoiseConfig:
         components = self.get_noise_components()
         components_str = ", ".join(components)
 
-        if self.noise_type == "gaussian":
-            return f" (noise: {self.noise_type}, std={self.noise_std:.1f}, ratio={self.noise_ratio:.1f}, components: {components_str})"
-        elif self.noise_type == "uniform":
-            return f" (noise: {self.noise_type}, range={self.noise_range:.1f}, ratio={self.noise_ratio:.1f}, components: {components_str})"
+        # Determine which noise parameters to display based on active components
+        if self.inject_noise and not any(
+            [
+                self.noise_a_input,
+                self.noise_a_output,
+                self.noise_b_input,
+                self.noise_b_output,
+                self.noise_test_inputs,
+            ]
+        ):
+            # Only rule latent noise is active
+            if self.noise_type == "gaussian":
+                return f" (noise: {self.noise_type}, std={self.noise_std:.1f}, ratio={self.noise_ratio:.1f}, components: {components_str})"
+            elif self.noise_type == "uniform":
+                return f" (noise: {self.noise_type}, range={self.noise_range:.1f}, ratio={self.noise_ratio:.1f}, components: {components_str})"
+            else:
+                return f" (noise: {self.noise_type}, ratio={self.noise_ratio:.1f}, components: {components_str})"
         else:
-            return f" (noise: {self.noise_type}, ratio={self.noise_ratio:.1f}, components: {components_str})"
+            # Support example noise is active - show the first active support noise parameters
+            if self.noise_a_input:
+                if self.noise_a_input_type == "gaussian":
+                    return f" (noise: {self.noise_a_input_type}, std={self.noise_a_input_std:.1f}, ratio={self.noise_a_input_ratio:.1f}, components: {components_str})"
+                elif self.noise_a_input_type == "uniform":
+                    return f" (noise: {self.noise_a_input_type}, range={self.noise_a_input_range:.1f}, ratio={self.noise_a_input_ratio:.1f}, components: {components_str})"
+                else:
+                    return f" (noise: {self.noise_a_input_type}, ratio={self.noise_a_input_ratio:.1f}, components: {components_str})"
+            elif self.noise_a_output:
+                if self.noise_a_output_type == "gaussian":
+                    return f" (noise: {self.noise_a_output_type}, std={self.noise_a_output_std:.1f}, ratio={self.noise_a_output_ratio:.1f}, components: {components_str})"
+                elif self.noise_a_output_type == "uniform":
+                    return f" (noise: {self.noise_a_output_type}, range={self.noise_a_output_range:.1f}, ratio={self.noise_a_output_ratio:.1f}, components: {components_str})"
+                else:
+                    return f" (noise: {self.noise_a_output_type}, ratio={self.noise_a_output_ratio:.1f}, components: {components_str})"
+            elif self.noise_b_input:
+                if self.noise_b_input_type == "gaussian":
+                    return f" (noise: {self.noise_b_input_type}, std={self.noise_b_input_std:.1f}, ratio={self.noise_b_input_ratio:.1f}, components: {components_str})"
+                elif self.noise_b_input_type == "uniform":
+                    return f" (noise: {self.noise_b_input_type}, range={self.noise_b_input_range:.1f}, ratio={self.noise_b_input_ratio:.1f}, components: {components_str})"
+                else:
+                    return f" (noise: {self.noise_b_input_type}, ratio={self.noise_b_input_ratio:.1f}, components: {components_str})"
+            elif self.noise_b_output:
+                if self.noise_b_output_type == "gaussian":
+                    return f" (noise: {self.noise_b_output_type}, std={self.noise_b_output_std:.1f}, ratio={self.noise_b_output_ratio:.1f}, components: {components_str})"
+                elif self.noise_b_output_type == "uniform":
+                    return f" (noise: {self.noise_b_output_type}, range={self.noise_b_output_range:.1f}, ratio={self.noise_b_output_ratio:.1f}, components: {components_str})"
+                else:
+                    return f" (noise: {self.noise_b_output_type}, ratio={self.noise_b_output_ratio:.1f}, components: {components_str})"
+            elif self.noise_test_inputs:
+                if self.noise_test_type == "gaussian":
+                    return f" (noise: {self.noise_test_type}, std={self.noise_test_std:.1f}, ratio={self.noise_test_ratio:.1f}, components: {components_str})"
+                elif self.noise_test_type == "uniform":
+                    return f" (noise: {self.noise_test_type}, range={self.noise_test_range:.1f}, ratio={self.noise_test_ratio:.1f}, components: {components_str})"
+                else:
+                    return f" (noise: {self.noise_test_type}, ratio={self.noise_test_ratio:.1f}, components: {components_str})"
+            else:
+                # Fallback to rule latent noise
+                if self.noise_type == "gaussian":
+                    return f" (noise: {self.noise_type}, std={self.noise_std:.1f}, ratio={self.noise_ratio:.1f}, components: {components_str})"
+                elif self.noise_type == "uniform":
+                    return f" (noise: {self.noise_type}, range={self.noise_range:.1f}, ratio={self.noise_ratio:.1f}, components: {components_str})"
+                else:
+                    return f" (noise: {self.noise_type}, ratio={self.noise_ratio:.1f}, components: {components_str})"
 
 
 def create_noise_config_from_ui(
@@ -257,13 +313,19 @@ def load_experiment_info(experiment_dir: Path) -> Dict[str, Any]:
     return info
 
 
-def load_model_checkpoint(checkpoint_path: str, config: Config) -> SimpleARCModel:
+def load_model_checkpoint(
+    checkpoint_path: str, config: Config = None
+) -> SimpleARCModel:
     """load model from checkpoint."""
-    model = SimpleARCModel(config)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
 
-    checkpoint = torch.load(
-        checkpoint_path, map_location=config.device, weights_only=False
-    )
+    # Use config from checkpoint if available, otherwise use provided config
+    if "config" in checkpoint:
+        config = checkpoint["config"]
+    elif config is None:
+        config = Config()
+
+    model = SimpleARCModel(config)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.to(config.device)
     model.eval()
@@ -1213,9 +1275,19 @@ def main():
         st.stop()
 
     try:
-        config = Config()
-        model = SimpleARCModel(config)
+        # Load checkpoint first to get the config
         checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
+
+        # Load config from checkpoint if available, otherwise use default
+        if "config" in checkpoint:
+            config = checkpoint["config"]
+            st.sidebar.info("✅ loaded config from checkpoint")
+        else:
+            config = Config()
+            st.sidebar.warning("⚠️ no config in checkpoint, using default config")
+
+        # Create model with the loaded config
+        model = SimpleARCModel(config)
         model.load_state_dict(checkpoint["model_state_dict"])
         model.eval()
         st.sidebar.success("✅ model loaded successfully")

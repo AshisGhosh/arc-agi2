@@ -5,6 +5,7 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    shm_size: 2gb  # increase shared memory for PyTorch DataLoader workers
     volumes:
       # mount source code for development (excluding .venv)
       - .:/workspace
