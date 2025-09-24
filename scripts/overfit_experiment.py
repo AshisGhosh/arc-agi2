@@ -116,6 +116,92 @@ class OverfitExperiment:
 
         return selected_indices
 
+    def _save_initial_training_info(self, task_indices: List[int], model) -> None:
+        """Save initial training info with config and model details."""
+        model_info = model.get_model_info()
+
+        training_info = {
+            "experiment_name": self.experiment_name,
+            "start_time": datetime.now().isoformat(),
+            "config": {
+                "decoder_type": getattr(self.config, "decoder_type", "mlp"),
+                "batch_size": self.config.batch_size,
+                "learning_rate": self.config.learning_rate,
+                "weight_decay": self.config.weight_decay,
+                "num_epochs": self.config.num_epochs,
+                "max_grad_norm": self.config.max_grad_norm,
+                "dropout": self.config.dropout,
+                "rule_dim": self.config.rule_dim,
+                "input_size": list(self.config.input_size),
+                "process_size": list(self.config.process_size),
+                "early_stopping_patience": self.config.early_stopping_patience,
+                "use_color_relabeling": self.config.use_color_relabeling,
+                "augmentation_variants": self.config.augmentation_variants,
+                "preserve_background": self.config.preserve_background,
+                "enable_counterfactuals": self.config.enable_counterfactuals,
+                "counterfactual_transform": self.config.counterfactual_transform,
+                "rule_latent_regularization_weight": self.config.rule_latent_regularization_weight,
+                "device": str(self.config.device),
+                "random_seed": self.config.random_seed,
+                "deterministic": self.config.deterministic,
+            },
+            "model": {
+                "model_type": model_info["model_type"],
+                "total_parameters": model_info["total_parameters"],
+                "trainable_parameters": model_info["trainable_parameters"],
+                "frozen_parameters": model_info["frozen_parameters"],
+            },
+            "tasks": {
+                "n_tasks": len(task_indices),
+                "task_indices": task_indices,
+            },
+            "training": {
+                "best_epoch": None,
+                "best_loss": None,
+                "total_epochs": None,
+                "training_time_seconds": None,
+                "early_stopping_patience": self.config.early_stopping_patience,
+                "status": "started",
+            },
+        }
+
+        with open(self.experiment_dir / "training_info.json", "w") as f:
+            json.dump(training_info, f, indent=2)
+
+    def _update_training_info_with_results(
+        self,
+        best_epoch: int,
+        best_loss: float,
+        total_epochs: int,
+        training_time: float,
+        early_stopping_patience: int,
+    ) -> None:
+        """Update training info with final results."""
+        training_info_path = self.experiment_dir / "training_info.json"
+
+        if training_info_path.exists():
+            with open(training_info_path, "r") as f:
+                training_info = json.load(f)
+        else:
+            # fallback if file doesn't exist
+            training_info = {}
+
+        # update training results
+        training_info["training"].update(
+            {
+                "best_epoch": best_epoch,
+                "best_loss": best_loss,
+                "total_epochs": total_epochs,
+                "training_time_seconds": training_time,
+                "early_stopping_patience": early_stopping_patience,
+                "status": "completed",
+                "end_time": datetime.now().isoformat(),
+            }
+        )
+
+        with open(training_info_path, "w") as f:
+            json.dump(training_info, f, indent=2)
+
     def create_task_subset(self, task_indices: List[int]) -> TaskSubset:
         """create dataset subset with only selected tasks."""
         return TaskSubset(
@@ -173,6 +259,9 @@ class OverfitExperiment:
         print(f"training on {len(task_dataset)} samples")
         print(f"batch size: {self.config.batch_size}")
         print(f"learning rate: {self.config.learning_rate}")
+
+        # save initial training info with config
+        self._save_initial_training_info(task_indices, model)
 
         # custom overfitting training loop
         start_time = time.time()
@@ -240,21 +329,10 @@ class OverfitExperiment:
         print(f"  best loss: {best_loss:.6f}")
         print(f"  training time: {training_time:.1f}s")
 
-        # save training info
-        training_info = {
-            "best_epoch": best_epoch,
-            "best_loss": best_loss,
-            "total_epochs": epoch + 1,
-            "training_time_seconds": training_time,
-            "early_stopping_patience": early_stopping_patience,
-            "tasks": {
-                "n_tasks": len(task_indices),
-                "task_indices": task_indices,
-            },
-        }
-
-        with open(self.experiment_dir / "training_info.json", "w") as f:
-            json.dump(training_info, f, indent=2)
+        # update training info with final results
+        self._update_training_info_with_results(
+            best_epoch, best_loss, epoch + 1, training_time, early_stopping_patience
+        )
 
         return str(self.experiment_dir / "best_model.pt")
 

@@ -79,27 +79,49 @@ def save_training_info(
     dataset_name: str,
     train_size: int,
     val_size: int,
-    total_params: int,
+    model_info: dict,
 ) -> None:
     """save training information to json file."""
     training_info = {
+        "experiment_name": experiment_dir.name,
         "dataset": dataset_name,
+        "start_time": datetime.now().isoformat(),
         "config": {
+            "decoder_type": getattr(config, "decoder_type", "mlp"),
             "batch_size": config.batch_size,
             "learning_rate": config.learning_rate,
+            "weight_decay": config.weight_decay,
             "num_epochs": config.num_epochs,
+            "max_grad_norm": config.max_grad_norm,
+            "dropout": config.dropout,
             "rule_dim": config.rule_dim,
+            "input_size": list(config.input_size),
+            "process_size": list(config.process_size),
+            "early_stopping_patience": config.early_stopping_patience,
+            "use_color_relabeling": config.use_color_relabeling,
+            "augmentation_variants": config.augmentation_variants,
+            "preserve_background": config.preserve_background,
+            "enable_counterfactuals": config.enable_counterfactuals,
+            "counterfactual_transform": config.counterfactual_transform,
+            "rule_latent_regularization_weight": config.rule_latent_regularization_weight,
             "device": str(config.device),
+            "random_seed": config.random_seed,
+            "deterministic": config.deterministic,
         },
         "data_split": {
             "train_size": train_size,
             "val_size": val_size,
             "total_size": train_size + val_size,
         },
-        "model_info": {
-            "total_parameters": total_params,
+        "model": {
+            "model_type": model_info["model_type"],
+            "total_parameters": model_info["total_parameters"],
+            "trainable_parameters": model_info["trainable_parameters"],
+            "frozen_parameters": model_info["frozen_parameters"],
         },
-        "timestamp": datetime.now().isoformat(),
+        "training": {
+            "status": "started",
+        },
     }
 
     with open(experiment_dir / "training_info.json", "w") as f:
@@ -179,7 +201,7 @@ def main():
         args.dataset,
         train_size,
         val_size,
-        model_info["total_parameters"],
+        model_info,
     )
 
     # Create trainer with custom checkpoint path
