@@ -15,7 +15,7 @@ from typing import Dict, Any, List, Tuple
 from dataclasses import dataclass
 
 from algo.config import Config
-from algo.data import ARCDataset
+from algo.data import create_dataset
 from algo.data.task_subset import TaskSubset
 from algo.models import create_model
 from scripts.visualization_utils import (
@@ -272,18 +272,32 @@ def extract_sample_from_batch(batch, sample_idx, evaluation_mode="test"):
             "output": batch["holdout_outputs"][sample_idx],
         }
 
-    # Extract training examples from rule_latent_inputs (2 examples for encoder)
-    for i in range(2):  # Always 2 examples for rule latent
-        sample["train_examples"].append(
-            {
-                "input": batch["rule_latent_inputs"][
-                    sample_idx, i, 0
-                ],  # [B, 2, 2, 3, 64, 64] -> [3, 64, 64]
-                "output": batch["rule_latent_inputs"][
-                    sample_idx, i, 1
-                ],  # [B, 2, 2, 3, 64, 64] -> [3, 64, 64]
-            }
-        )
+    # Extract training examples from support_example_inputs_rgb (2 examples for encoder)
+    # Check if we have RGB support examples (ResNet) or just grayscale (Patch)
+    if batch["support_example_inputs_rgb"][sample_idx] is not None:
+        # ResNet dataset - use RGB support examples
+        rgb_support_inputs = batch["support_example_inputs_rgb"][sample_idx]
+        rgb_support_outputs = batch["support_example_outputs_rgb"][sample_idx]
+
+        for i in range(2):  # Always 2 examples for support
+            sample["train_examples"].append(
+                {
+                    "input": rgb_support_inputs[i],  # [3, 64, 64]
+                    "output": rgb_support_outputs[i],  # [3, 64, 64]
+                }
+            )
+    else:
+        # Patch dataset - use grayscale support examples
+        grayscale_support_inputs = batch["support_example_inputs"][sample_idx]
+        grayscale_support_outputs = batch["support_example_outputs"][sample_idx]
+
+        for i in range(2):  # Always 2 examples for support
+            sample["train_examples"].append(
+                {
+                    "input": grayscale_support_inputs[i],  # [1, 30, 30]
+                    "output": grayscale_support_outputs[i],  # [1, 30, 30]
+                }
+            )
 
     return sample
 
@@ -400,11 +414,11 @@ def generate_noise_tensor(
         return (1 - noise_ratio) * original_tensor + noise_ratio * noise
 
 
-def apply_noise_to_examples(rule_latent_examples, noise_config: NoiseConfig):
+def apply_noise_to_examples(support_examples, noise_config: NoiseConfig):
     """apply noise to individual training examples (A input, A output, B input, B output)."""
     # create a copy to avoid modifying the original
     noisy_examples = []
-    for i, example in enumerate(rule_latent_examples):
+    for i, example in enumerate(support_examples):
         noisy_example = {}
 
         # Determine which example this is (A=0, B=1)
@@ -612,7 +626,7 @@ def evaluate_model_on_tasks(
                 is_counterfactual = combo["is_counterfactual"]
 
                 # Get the preprocessed data from the combination
-                rule_latent_examples = combo["rule_latent_examples"]
+                support_examples = combo["support_examples"]
                 test_examples = combo["test_examples"]
                 num_test_examples = combo["num_test_examples"]
                 holdout_example = combo.get("holdout_example")
@@ -624,8 +638,8 @@ def evaluate_model_on_tasks(
                     or noise_config.noise_b_input
                     or noise_config.noise_b_output
                 ):
-                    rule_latent_examples = apply_noise_to_examples(
-                        rule_latent_examples, noise_config
+                    support_examples = apply_noise_to_examples(
+                        support_examples, noise_config
                     )
 
                 # Apply noise to test inputs if requested
@@ -638,27 +652,48 @@ def evaluate_model_on_tasks(
                         noise_config.noise_test_ratio,
                     )
 
-                # Extract the preprocessed tensors for rule latent creation
-                example1_input = rule_latent_examples[0][
-                    "input"
-                ]  # Already has batch dimension
-                example1_output = rule_latent_examples[0]["output"]
-                example2_input = rule_latent_examples[1]["input"]
-                example2_output = rule_latent_examples[1]["output"]
+                # Check if we have RGB support examples (ResNet) or just grayscale (Patch)
+                if (
+                    "support_examples_rgb" in combo
+                    and combo["support_examples_rgb"] is not None
+                ):
+                    # ResNet dataset - use RGB support examples
+                    rgb_support_examples = combo["support_examples_rgb"]
+                    example1_input = rgb_support_examples[0]["input"]  # [1, 3, 64, 64]
+                    example1_output = rgb_support_examples[0][
+                        "output"
+                    ]  # [1, 3, 64, 64]
+                    example2_input = rgb_support_examples[1]["input"]  # [1, 3, 64, 64]
+                    example2_output = rgb_support_examples[1][
+                        "output"
+                    ]  # [1, 3, 64, 64]
 
-                # Create rule latent inputs tensor [1, 2, 2, 3, 64, 64]
-                rule_latent_inputs = torch.zeros([1, 2, 2, 3, 64, 64])
-                rule_latent_inputs[0, 0, 0] = example1_input.squeeze(0)  # [3, 64, 64]
-                rule_latent_inputs[0, 0, 1] = example1_output.squeeze(0)
-                rule_latent_inputs[0, 1, 0] = example2_input.squeeze(0)
-                rule_latent_inputs[0, 1, 1] = example2_output.squeeze(0)
+                    # Create rule latent inputs tensor [1, 2, 2, 3, 64, 64]
+                    rule_latent_inputs = torch.zeros([1, 2, 2, 3, 64, 64])
+                    rule_latent_inputs[0, 0, 0] = example1_input.squeeze(
+                        0
+                    )  # [3, 64, 64]
+                    rule_latent_inputs[0, 0, 1] = example1_output.squeeze(0)
+                    rule_latent_inputs[0, 1, 0] = example2_input.squeeze(0)
+                    rule_latent_inputs[0, 1, 1] = example2_output.squeeze(0)
 
-                # Run model inference
-                outputs = model.forward_rule_latent_training(
-                    rule_latent_inputs,
-                    all_train_inputs,
-                    num_train,
-                )
+                    # Run model inference
+                    outputs = model.forward_rule_latent_training(
+                        rule_latent_inputs,
+                        all_train_inputs,
+                        num_train,
+                    )
+                else:
+                    # Patch dataset - use grayscale support examples
+                    # For patch models, we need to use the model's forward method directly
+                    example1_input = support_examples[0]["input"]  # [1, 1, 30, 30]
+                    example1_output = support_examples[0]["output"]  # [1, 1, 30, 30]
+                    example2_input = support_examples[1]["input"]  # [1, 1, 30, 30]
+                    example2_output = support_examples[1]["output"]  # [1, 1, 30, 30]
+
+                    # For patch models, we'll handle this differently in the evaluation loop
+                    # For now, create a dummy outputs structure
+                    outputs = {"rule_latents": None}
 
                 # inject noise into rule latent if requested
                 if noise_config.inject_noise:
@@ -697,24 +732,24 @@ def evaluate_model_on_tasks(
                                     {
                                         "input": tensor_to_numpy(
                                             denormalize_rgb(
-                                                rule_latent_examples[0]["input"]
+                                                support_examples[0]["input"]
                                             )
                                         ),
                                         "output": tensor_to_numpy(
                                             denormalize_rgb(
-                                                rule_latent_examples[0]["output"]
+                                                support_examples[0]["output"]
                                             )
                                         ),
                                     },
                                     {
                                         "input": tensor_to_numpy(
                                             denormalize_rgb(
-                                                rule_latent_examples[1]["input"]
+                                                support_examples[1]["input"]
                                             )
                                         ),
                                         "output": tensor_to_numpy(
                                             denormalize_rgb(
-                                                rule_latent_examples[1]["output"]
+                                                support_examples[1]["output"]
                                             )
                                         ),
                                     },
@@ -807,18 +842,18 @@ def evaluate_model_on_tasks(
                     "train_examples": [
                         {
                             "input": tensor_to_numpy(
-                                denormalize_rgb(rule_latent_examples[0]["input"])
+                                denormalize_rgb(support_examples[0]["input"])
                             ),
                             "output": tensor_to_numpy(
-                                denormalize_rgb(rule_latent_examples[0]["output"])
+                                denormalize_rgb(support_examples[0]["output"])
                             ),
                         },
                         {
                             "input": tensor_to_numpy(
-                                denormalize_rgb(rule_latent_examples[1]["input"])
+                                denormalize_rgb(support_examples[1]["input"])
                             ),
                             "output": tensor_to_numpy(
-                                denormalize_rgb(rule_latent_examples[1]["output"])
+                                denormalize_rgb(support_examples[1]["output"])
                             ),
                         },
                     ],
@@ -983,7 +1018,7 @@ def test_all_combinations(
                 is_counterfactual = combo["is_counterfactual"]
 
                 # Get the preprocessed data from the combination
-                rule_latent_examples = combo["rule_latent_examples"]
+                support_examples = combo["support_examples"]
                 test_examples = combo["test_examples"]
                 num_test_examples = combo["num_test_examples"]
                 holdout_example = combo.get("holdout_example")
@@ -995,8 +1030,8 @@ def test_all_combinations(
                     or noise_config.noise_b_input
                     or noise_config.noise_b_output
                 ):
-                    rule_latent_examples = apply_noise_to_examples(
-                        rule_latent_examples, noise_config
+                    support_examples = apply_noise_to_examples(
+                        support_examples, noise_config
                     )
 
                 # Apply noise to test inputs if requested
@@ -1009,17 +1044,36 @@ def test_all_combinations(
                         noise_config.noise_test_ratio,
                     )
 
-                # Extract the preprocessed tensors
-                example1_input = rule_latent_examples[0][
-                    "input"
-                ]  # Already has batch dimension
-                example1_output = rule_latent_examples[0]["output"]
-                example2_input = rule_latent_examples[1]["input"]
-                example2_output = rule_latent_examples[1]["output"]
+                # Check if we have RGB support examples (ResNet) or just grayscale (Patch)
+                if (
+                    "support_examples_rgb" in combo
+                    and combo["support_examples_rgb"] is not None
+                ):
+                    # ResNet dataset - use RGB support examples for encoder
+                    rgb_support_examples = combo["support_examples_rgb"]
+                    example1_input = rgb_support_examples[0]["input"]  # [1, 3, 64, 64]
+                    example1_output = rgb_support_examples[0][
+                        "output"
+                    ]  # [1, 3, 64, 64]
+                    example2_input = rgb_support_examples[1]["input"]  # [1, 3, 64, 64]
+                    example2_output = rgb_support_examples[1][
+                        "output"
+                    ]  # [1, 3, 64, 64]
 
-                rule_latent = model.encoder(
-                    example1_input, example1_output, example2_input, example2_output
-                )
+                    rule_latent = model.encoder(
+                        example1_input, example1_output, example2_input, example2_output
+                    )
+                else:
+                    # Patch dataset - use grayscale support examples
+                    # For patch models, we need to use the model's forward method directly
+                    example1_input = support_examples[0]["input"]  # [1, 1, 30, 30]
+                    example1_output = support_examples[0]["output"]  # [1, 1, 30, 30]
+                    example2_input = support_examples[1]["input"]  # [1, 1, 30, 30]
+                    example2_output = support_examples[1]["output"]  # [1, 1, 30, 30]
+
+                    # For patch models, we'll handle this differently in the evaluation loop
+                    # For now, create a dummy rule_latent
+                    rule_latent = None
 
                 # inject noise into rule latent if requested
                 if noise_config.inject_noise:
@@ -1043,33 +1097,62 @@ def test_all_combinations(
                             )
 
                             # Create separate result for this test example
+                            # Check if we have RGB support examples (ResNet) or just grayscale (Patch)
+                            if (
+                                "support_examples_rgb" in combo
+                                and combo["support_examples_rgb"] is not None
+                            ):
+                                # ResNet dataset - use RGB support examples for visualization
+                                rgb_support_examples = combo["support_examples_rgb"]
+                                train_examples = [
+                                    {
+                                        "input": tensor_to_numpy(
+                                            denormalize_rgb(
+                                                rgb_support_examples[0]["input"]
+                                            )
+                                        ),
+                                        "output": tensor_to_numpy(
+                                            denormalize_rgb(
+                                                rgb_support_examples[0]["output"]
+                                            )
+                                        ),
+                                    },
+                                    {
+                                        "input": tensor_to_numpy(
+                                            denormalize_rgb(
+                                                rgb_support_examples[1]["input"]
+                                            )
+                                        ),
+                                        "output": tensor_to_numpy(
+                                            denormalize_rgb(
+                                                rgb_support_examples[1]["output"]
+                                            )
+                                        ),
+                                    },
+                                ]
+                            else:
+                                # Patch dataset - use grayscale support examples for visualization
+                                train_examples = [
+                                    {
+                                        "input": tensor_to_grayscale_numpy(
+                                            support_examples[0]["input"]
+                                        ),
+                                        "output": tensor_to_grayscale_numpy(
+                                            support_examples[0]["output"]
+                                        ),
+                                    },
+                                    {
+                                        "input": tensor_to_grayscale_numpy(
+                                            support_examples[1]["input"]
+                                        ),
+                                        "output": tensor_to_grayscale_numpy(
+                                            support_examples[1]["output"]
+                                        ),
+                                    },
+                                ]
+
                             test_sample_data = {
-                                "train_examples": [
-                                    {
-                                        "input": tensor_to_numpy(
-                                            denormalize_rgb(
-                                                rule_latent_examples[0]["input"]
-                                            )
-                                        ),
-                                        "output": tensor_to_numpy(
-                                            denormalize_rgb(
-                                                rule_latent_examples[0]["output"]
-                                            )
-                                        ),
-                                    },
-                                    {
-                                        "input": tensor_to_numpy(
-                                            denormalize_rgb(
-                                                rule_latent_examples[1]["input"]
-                                            )
-                                        ),
-                                        "output": tensor_to_numpy(
-                                            denormalize_rgb(
-                                                rule_latent_examples[1]["output"]
-                                            )
-                                        ),
-                                    },
-                                ],
+                                "train_examples": train_examples,
                                 "test_examples": [
                                     {
                                         "input": tensor_to_grayscale_numpy(
@@ -1133,26 +1216,55 @@ def test_all_combinations(
                 metrics = calculate_accuracy_metrics(predictions, target["output"])
 
                 # Create sample data for visualization using the same approach as view_dataset.py
-                # Create visualization data
-                sample_data = {
-                    "train_examples": [
+                # Check if we have RGB support examples (ResNet) or just grayscale (Patch)
+                if (
+                    "support_examples_rgb" in combo
+                    and combo["support_examples_rgb"] is not None
+                ):
+                    # ResNet dataset - use RGB support examples for visualization
+                    rgb_support_examples = combo["support_examples_rgb"]
+                    train_examples = [
                         {
                             "input": tensor_to_numpy(
-                                denormalize_rgb(rule_latent_examples[0]["input"])
+                                denormalize_rgb(rgb_support_examples[0]["input"])
                             ),  # [1, 3, 64, 64] -> [64, 64, 3]
                             "output": tensor_to_numpy(
-                                denormalize_rgb(rule_latent_examples[0]["output"])
+                                denormalize_rgb(rgb_support_examples[0]["output"])
                             ),
                         },
                         {
                             "input": tensor_to_numpy(
-                                denormalize_rgb(rule_latent_examples[1]["input"])
+                                denormalize_rgb(rgb_support_examples[1]["input"])
                             ),
                             "output": tensor_to_numpy(
-                                denormalize_rgb(rule_latent_examples[1]["output"])
+                                denormalize_rgb(rgb_support_examples[1]["output"])
                             ),
                         },
-                    ],
+                    ]
+                else:
+                    # Patch dataset - use grayscale support examples for visualization
+                    train_examples = [
+                        {
+                            "input": tensor_to_grayscale_numpy(
+                                support_examples[0]["input"]
+                            ),
+                            "output": tensor_to_grayscale_numpy(
+                                support_examples[0]["output"]
+                            ),
+                        },
+                        {
+                            "input": tensor_to_grayscale_numpy(
+                                support_examples[1]["input"]
+                            ),
+                            "output": tensor_to_grayscale_numpy(
+                                support_examples[1]["output"]
+                            ),
+                        },
+                    ]
+
+                # Create visualization data
+                sample_data = {
+                    "train_examples": train_examples,
                     "test_examples": [
                         {
                             "input": tensor_to_grayscale_numpy(test_example["input"]),
@@ -1295,7 +1407,7 @@ def main():
 
     config.use_color_relabeling = False
     config.enable_counterfactuals = False
-    dataset = ARCDataset(
+    dataset = create_dataset(
         config.arc_agi1_dir, config, holdout=True, use_first_combination_only=False
     )
     if task_set == "overfit tasks only":

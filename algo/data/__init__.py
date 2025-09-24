@@ -1,14 +1,72 @@
 from .preprocessing import (
-    preprocess_example_image,
-    preprocess_target_image,
+    preprocess_rgb_image,
+    preprocess_grid_image,
     grayscale_to_rgb,
 )
-from .dataset import ARCDataset, custom_collate_fn
+from .collate_functions import unified_collate_fn
+from .resnet_dataset import ResNetARCDataset
+from .patch_dataset import PatchARCDataset
+from typing import Union
+
+
+def create_dataset(
+    raw_data_dir: str,
+    config,
+    holdout: bool = False,
+    use_first_combination_only: bool = False,
+    require_multiple_test_pairs: bool = False,
+) -> Union[ResNetARCDataset, PatchARCDataset]:
+    """
+    Create the appropriate dataset based on model type.
+
+    Args:
+        raw_data_dir: Directory containing raw JSON task files
+        config: Configuration object with model_type specified
+        holdout: If True, hold out last train example for validation
+        use_first_combination_only: If True, always use first combination (for evaluation)
+        require_multiple_test_pairs: If True, only include tasks with multiple test pairs
+
+    Returns:
+        The appropriate dataset instance
+    """
+    if config.model_type == "patch_attention":
+        return PatchARCDataset(
+            raw_data_dir=raw_data_dir,
+            config=config,
+            holdout=holdout,
+            use_first_combination_only=use_first_combination_only,
+            require_multiple_test_pairs=require_multiple_test_pairs,
+        )
+    else:
+        return ResNetARCDataset(
+            raw_data_dir=raw_data_dir,
+            config=config,
+            holdout=holdout,
+            use_first_combination_only=use_first_combination_only,
+            require_multiple_test_pairs=require_multiple_test_pairs,
+        )
+
+
+def get_collate_fn(model_type: str):
+    """
+    Get the collate function for the model type.
+
+    Args:
+        model_type: "simple_arc" or "patch_attention" (both use unified_collate_fn)
+
+    Returns:
+        The unified collate function
+    """
+    return unified_collate_fn
+
 
 __all__ = [
-    "preprocess_example_image",
-    "preprocess_target_image",
+    "preprocess_rgb_image",
+    "preprocess_grid_image",
     "grayscale_to_rgb",
-    "ARCDataset",
-    "custom_collate_fn",
+    "create_dataset",
+    "get_collate_fn",
+    "unified_collate_fn",
+    "ResNetARCDataset",
+    "PatchARCDataset",
 ]

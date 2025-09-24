@@ -10,7 +10,7 @@ import torch
 import matplotlib.pyplot as plt
 
 from algo.config import Config
-from algo.data import ARCDataset
+from algo.data import create_dataset
 from scripts.visualization_utils import (
     tensor_to_grayscale_numpy,
     apply_arc_color_palette,
@@ -124,11 +124,11 @@ def main():
         with st.spinner(f"loading {dataset_choice} dataset..."):
             try:
                 if dataset_choice == "arc_agi1":
-                    dataset = ARCDataset(
+                    dataset = create_dataset(
                         config.arc_agi1_dir, config, holdout=holdout_mode
                     )
                 else:
-                    dataset = ARCDataset(config.processed_dir, config)
+                    dataset = create_dataset(config.processed_dir, config)
             except Exception as e:
                 st.error(f"❌ error during dataset initialization: {e}")
                 st.error(f"error type: {type(e).__name__}")
@@ -360,7 +360,7 @@ def main():
 
         with col2:
             st.write("**data structure**")
-            st.write("rule latent examples: 2")
+            st.write("support examples: 2")
             st.write(f"test examples: {task_data.get('num_test_examples', 1)}")
             if task_data.get("holdout_example") is not None:
                 st.write("holdout example: 1")
@@ -474,13 +474,38 @@ def main():
         col1, col2, col3 = st.columns(3)
 
         with col1:
-            st.write("**rule latent images (rgb)**")
-            example_img = task_data["rule_latent_examples"][0]["input"]
-            st.write(f"- shape: {example_img.shape}")
-            st.write(f"- data type: {example_img.dtype}")
-            st.write(
-                f"- value range: [{example_img.min():.3f}, {example_img.max():.3f}]"
-            )
+            st.write("**support images**")
+            # Check if we have RGB support examples (ResNet) or just grayscale (Patch)
+            if (
+                "support_examples_rgb" in task_data
+                and task_data["support_examples_rgb"] is not None
+            ):
+                # ResNet dataset - show RGB support examples
+                example_img = task_data["support_examples_rgb"][0]["input"]
+                st.write("**RGB support examples:**")
+                st.write(f"- shape: {example_img.shape}")
+                st.write(f"- data type: {example_img.dtype}")
+                st.write(
+                    f"- value range: [{example_img.min():.3f}, {example_img.max():.3f}]"
+                )
+
+                # Also show grayscale support examples
+                grayscale_img = task_data["support_examples"][0]["input"]
+                st.write("**Grayscale support examples:**")
+                st.write(f"- shape: {grayscale_img.shape}")
+                st.write(f"- data type: {grayscale_img.dtype}")
+                st.write(
+                    f"- value range: [{grayscale_img.min():.0f}, {grayscale_img.max():.0f}]"
+                )
+            else:
+                # Patch dataset - only grayscale support examples
+                example_img = task_data["support_examples"][0]["input"]
+                st.write("**Grayscale support examples:**")
+                st.write(f"- shape: {example_img.shape}")
+                st.write(f"- data type: {example_img.dtype}")
+                st.write(
+                    f"- value range: [{example_img.min():.0f}, {example_img.max():.0f}]"
+                )
 
         with col2:
             st.write("**test images (grayscale)**")

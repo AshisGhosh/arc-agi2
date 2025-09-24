@@ -23,7 +23,7 @@ def grayscale_to_rgb(
     return rgb_img
 
 
-def preprocess_example_image(image_data: np.ndarray, config: Config) -> torch.Tensor:
+def preprocess_rgb_image(image_data: np.ndarray, config: Config) -> torch.Tensor:
     """
     Preprocess example image for ResNet encoder.
 
@@ -75,7 +75,7 @@ def preprocess_example_image(image_data: np.ndarray, config: Config) -> torch.Te
     return img_rgb
 
 
-def preprocess_target_image(image_data: np.ndarray, config: Config) -> torch.Tensor:
+def preprocess_grid_image(image_data: np.ndarray, config: Config) -> torch.Tensor:
     """
     Preprocess target image for MLP decoder.
 

@@ -14,7 +14,7 @@ from datetime import datetime
 
 from algo.config import Config
 from algo.models import create_model
-from algo.data import ARCDataset
+from algo.data import create_dataset
 from algo.training import ARCTrainer
 
 
@@ -29,7 +29,7 @@ def create_data_loaders(config: Config) -> tuple[DataLoader, DataLoader]:
         Tuple of (train_loader, val_loader)
     """
     # Load dataset
-    dataset = ARCDataset(config.processed_dir, config)
+    dataset = create_dataset(config.processed_dir, config)
 
     # Split into train/validation (80/20)
     train_size = int(0.8 * len(dataset))

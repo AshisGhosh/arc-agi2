@@ -67,8 +67,15 @@ class Config:
         0.1  # Weight for rule latent similarity regularization
     )
 
-    # Decoder configuration
+    # Model configuration
+    model_type: str = "simple_arc"  # "simple_arc" or "patch_attention"
     decoder_type: str = "mlp"  # "mlp" or future transformer types
+
+    # Patch attention model specific configs
+    patch_size: int = 3
+    model_dim: int = 128
+    num_heads: int = 4
+    num_layers: int = 3
 
     # Color palette (ARC official 10 colors)
     color_palette: List[List[float]] = None

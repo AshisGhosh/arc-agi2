@@ -148,41 +148,89 @@ def visualize_task_combination(
         fontsize=16,
     )
 
-    # get rule latent inputs and test examples
-    rule_latent_examples = task_data["rule_latent_examples"]
+    # get support examples and test examples
+    support_examples = task_data["support_examples"]
     test_examples = task_data["test_examples"]
     test_example = test_examples[0]  # Use first test example for visualization
 
-    # Row 1: Example 1 input/output pair
-    # 1. ex1 input
-    axes[0, 0].set_title("ex1 input", fontsize=10)
-    img1 = denormalize_rgb(rule_latent_examples[0]["input"])
-    img1_np = tensor_to_numpy(img1)
-    axes[0, 0].imshow(img1_np)
-    axes[0, 0].axis("off")
-
-    # 2. ex1 output (to be rotated with cf)
-    axes[0, 1].set_title("ex1 output", fontsize=10)
-    img2 = denormalize_rgb(rule_latent_examples[0]["output"])
-    img2_np = tensor_to_numpy(img2)
-    axes[0, 1].imshow(img2_np)
-    axes[0, 1].axis("off")
-
-    # 3. ex2 input
-    axes[0, 2].set_title("ex2 input", fontsize=10)
-    img3 = denormalize_rgb(rule_latent_examples[1]["input"])
-    img3_np = tensor_to_numpy(img3)
-    axes[0, 2].imshow(img3_np)
-    axes[0, 2].axis("off")
-
-    # 4. ex2 output (to be rotated with cf)
-    axes[0, 3].set_title(
-        "ex2 output (cf)" if is_counterfactual else "ex2 output", fontsize=10
+    # Check if we have RGB support examples (ResNet) or just grayscale (Patch)
+    has_rgb_support = (
+        "support_examples_rgb" in task_data
+        and task_data["support_examples_rgb"] is not None
     )
-    img4 = denormalize_rgb(rule_latent_examples[1]["output"])
-    img4_np = tensor_to_numpy(img4)
-    axes[0, 3].imshow(img4_np)
-    axes[0, 3].axis("off")
+
+    if has_rgb_support:
+        # Use RGB support examples for visualization (ResNet dataset)
+        rgb_support_examples = task_data["support_examples_rgb"]
+
+        # Row 1: Example 1 input/output pair (RGB)
+        # 1. ex1 input
+        axes[0, 0].set_title("ex1 input (RGB)", fontsize=10)
+        img1 = denormalize_rgb(rgb_support_examples[0]["input"])
+        img1_np = tensor_to_numpy(img1)
+        axes[0, 0].imshow(img1_np)
+        axes[0, 0].axis("off")
+
+        # 2. ex1 output
+        axes[0, 1].set_title("ex1 output (RGB)", fontsize=10)
+        img2 = denormalize_rgb(rgb_support_examples[0]["output"])
+        img2_np = tensor_to_numpy(img2)
+        axes[0, 1].imshow(img2_np)
+        axes[0, 1].axis("off")
+
+        # 3. ex2 input
+        axes[0, 2].set_title("ex2 input (RGB)", fontsize=10)
+        img3 = denormalize_rgb(rgb_support_examples[1]["input"])
+        img3_np = tensor_to_numpy(img3)
+        axes[0, 2].imshow(img3_np)
+        axes[0, 2].axis("off")
+
+        # 4. ex2 output
+        axes[0, 3].set_title(
+            "ex2 output (RGB, cf)" if is_counterfactual else "ex2 output (RGB)",
+            fontsize=10,
+        )
+        img4 = denormalize_rgb(rgb_support_examples[1]["output"])
+        img4_np = tensor_to_numpy(img4)
+        axes[0, 3].imshow(img4_np)
+        axes[0, 3].axis("off")
+    else:
+        # Use grayscale support examples for visualization (Patch dataset)
+        # Row 1: Example 1 input/output pair (Grayscale)
+        # 1. ex1 input
+        axes[0, 0].set_title("ex1 input (Gray)", fontsize=10)
+        img1 = support_examples[0]["input"]
+        img1_np = tensor_to_grayscale_numpy(img1)
+        img1_rgb = apply_arc_color_palette(img1_np)
+        axes[0, 0].imshow(img1_rgb)
+        axes[0, 0].axis("off")
+
+        # 2. ex1 output
+        axes[0, 1].set_title("ex1 output (Gray)", fontsize=10)
+        img2 = support_examples[0]["output"]
+        img2_np = tensor_to_grayscale_numpy(img2)
+        img2_rgb = apply_arc_color_palette(img2_np)
+        axes[0, 1].imshow(img2_rgb)
+        axes[0, 1].axis("off")
+
+        # 3. ex2 input
+        axes[0, 2].set_title("ex2 input (Gray)", fontsize=10)
+        img3 = support_examples[1]["input"]
+        img3_np = tensor_to_grayscale_numpy(img3)
+        img3_rgb = apply_arc_color_palette(img3_np)
+        axes[0, 2].imshow(img3_rgb)
+        axes[0, 2].axis("off")
+
+        # 4. ex2 output
+        axes[0, 3].set_title(
+            "ex2 output (Gray, cf)" if is_counterfactual else "ex2 output (Gray)",
+            fontsize=10,
+        )
+        img4 = support_examples[1]["output"]
+        img4_np = tensor_to_grayscale_numpy(img4)
+        img4_rgb = apply_arc_color_palette(img4_np)
+        axes[0, 3].imshow(img4_rgb)
+        axes[0, 3].axis("off")
 
     # Row 2: Test input/output pair
     # 5. test input

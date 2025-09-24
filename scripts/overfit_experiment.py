@@ -18,9 +18,9 @@ from datetime import datetime
 
 from algo.config import Config
 from algo.models import create_model
-from algo.data import ARCDataset, custom_collate_fn
+from algo.data import create_dataset, get_collate_fn
 from algo.data.task_subset import TaskSubset
-from algo.training import ARCTrainer
+from algo.training import create_trainer
 from scripts.evaluate import (
     calculate_perfect_accuracy,
     calculate_pixel_accuracy,
@@ -65,7 +65,7 @@ class OverfitExperiment:
             list of selected task indices
         """
         # load full dataset to get valid task indices (only tasks with multiple test pairs)
-        full_dataset = ARCDataset(
+        full_dataset = create_dataset(
             self.config.arc_agi1_dir,
             self.config,
             holdout=True,
@@ -202,8 +202,9 @@ class OverfitExperiment:
         with open(training_info_path, "w") as f:
             json.dump(training_info, f, indent=2)
 
-    def create_task_subset(self, task_indices: List[int]) -> TaskSubset:
+    def create_task_subset(self, task_indices: List[int]):
         """create dataset subset with only selected tasks."""
+        # Use unified TaskSubset for both model types
         return TaskSubset(
             task_indices=task_indices,
             config=self.config,
@@ -211,6 +212,7 @@ class OverfitExperiment:
             holdout=True,
             use_first_combination_only=False,  # Use ALL combinations for training
             require_multiple_test_pairs=False,
+            model_type=self.config.model_type,
         )
 
     def train_on_tasks(
@@ -236,6 +238,8 @@ class OverfitExperiment:
         task_dataset = self.create_task_subset(task_indices)
 
         # create data loader (no validation split for overfitting)
+        # Get appropriate collate function for model type
+        collate_fn = get_collate_fn(self.config.model_type)
         train_loader = DataLoader(
             task_dataset,
             batch_size=self.config.batch_size,
@@ -243,14 +247,14 @@ class OverfitExperiment:
             num_workers=2,
             pin_memory=True,
             persistent_workers=True,  # keep workers alive between epochs
-            collate_fn=custom_collate_fn,
+            collate_fn=collate_fn,
         )
 
         # create model
         model = create_model(self.config)
 
         # create trainer with overfitting config
-        trainer = ARCTrainer(model, self.config, task_dataset)
+        trainer = create_trainer(model, self.config, task_dataset)
 
         # override config for overfitting
         trainer.config.num_epochs = epochs
@@ -273,8 +277,8 @@ class OverfitExperiment:
             # update trainer's current epoch for proper logging
             trainer.current_epoch = epoch
 
-            # train one epoch using rule latent training method
-            train_metrics = trainer.train_epoch_rule_latent(train_loader)
+            # train one epoch using the standard interface
+            train_metrics = trainer.train_epoch(train_loader)
             avg_loss = train_metrics["total_loss"]
 
             # update scheduler
@@ -355,6 +359,7 @@ class OverfitExperiment:
         task_dataset = self.create_task_subset(task_indices)
 
         # create data loader
+        collate_fn = get_collate_fn(self.config.model_type)
         eval_loader = DataLoader(
             task_dataset,
             batch_size=self.config.batch_size,
@@ -362,7 +367,7 @@ class OverfitExperiment:
             num_workers=2,
             pin_memory=True,
             persistent_workers=True,  # keep workers alive between epochs
-            collate_fn=custom_collate_fn,
+            collate_fn=collate_fn,
         )
 
         # create model and load checkpoint
@@ -392,7 +397,6 @@ class OverfitExperiment:
             for batch_idx, batch in enumerate(eval_loader):
                 # Move batch to device
                 device = next(model.parameters()).device
-                rule_latent_inputs = batch["rule_latent_inputs"].to(device)
                 test_inputs = batch["test_inputs"].to(device)
                 test_outputs = batch["test_outputs"].to(device)
                 holdout_inputs = batch["holdout_inputs"].to(device)
@@ -402,8 +406,13 @@ class OverfitExperiment:
                 # Get task indices for this batch
                 task_indices = batch["task_indices"]
 
+                # Get support examples (RGB for ResNet, grayscale for Patch)
+                support_example_inputs_rgb = batch["support_example_inputs_rgb"]
+                support_example_outputs_rgb = batch["support_example_outputs_rgb"]
+                support_example_inputs = batch["support_example_inputs"]
+
                 # Get all training examples for each task in the batch
-                batch_size = rule_latent_inputs.size(0)
+                batch_size = len(support_example_inputs)
                 max_train = 0
                 all_train_inputs_list = []
                 num_train_list = []
@@ -423,24 +432,52 @@ class OverfitExperiment:
                     all_train_inputs_list.append(train_inputs)
                     num_train_list.append(len(train_inputs))
 
-                # Pad all training inputs to consistent shape
-                all_train_inputs = torch.zeros([batch_size, max_train, 1, 30, 30]).to(
-                    device
-                )
+                # Create rule latent inputs from support examples
+                # Check if we have RGB support examples (ResNet) or just grayscale (Patch)
+                if support_example_inputs_rgb[0] is not None:
+                    # ResNet dataset - create rule_latent_inputs from RGB support examples
+                    rule_latent_inputs = torch.zeros([batch_size, 2, 2, 3, 64, 64]).to(
+                        device
+                    )
+                    for i in range(batch_size):
+                        # Use RGB support examples for ResNet
+                        rule_latent_inputs[i, 0, 0] = support_example_inputs_rgb[i][
+                            0
+                        ]  # [3, 64, 64]
+                        rule_latent_inputs[i, 0, 1] = support_example_outputs_rgb[i][
+                            0
+                        ]  # [3, 64, 64]
+                        rule_latent_inputs[i, 1, 0] = support_example_inputs_rgb[i][
+                            1
+                        ]  # [3, 64, 64]
+                        rule_latent_inputs[i, 1, 1] = support_example_outputs_rgb[i][
+                            1
+                        ]  # [3, 64, 64]
 
-                for i, train_inputs in enumerate(all_train_inputs_list):
-                    for j, train_input in enumerate(train_inputs):
-                        all_train_inputs[i, j] = train_input
+                    # Pad all training inputs to consistent shape
+                    all_train_inputs = torch.zeros(
+                        [batch_size, max_train, 1, 30, 30]
+                    ).to(device)
+                    for i, train_inputs in enumerate(all_train_inputs_list):
+                        for j, train_input in enumerate(train_inputs):
+                            all_train_inputs[i, j] = train_input
 
-                num_train = torch.tensor(num_train_list, dtype=torch.long).to(device)
+                    num_train = torch.tensor(num_train_list, dtype=torch.long).to(
+                        device
+                    )
 
-                # Forward pass with batched rule latent training
-                outputs = model.forward_rule_latent_training(
-                    rule_latent_inputs, all_train_inputs, num_train
-                )
+                    # Forward pass with batched rule latent training
+                    outputs = model.forward_rule_latent_training(
+                        rule_latent_inputs, all_train_inputs, num_train
+                    )
+                else:
+                    # Patch dataset - use grayscale support examples
+                    # For patch models, we need to handle this differently
+                    # For now, create a dummy outputs structure
+                    outputs = {"rule_latents": None}
 
                 # Process each task in the batch
-                for i in range(rule_latent_inputs.size(0)):
+                for i in range(batch_size):
                     # Get number of test examples for this task
                     num_test = batch["num_test_examples"][i]
 
