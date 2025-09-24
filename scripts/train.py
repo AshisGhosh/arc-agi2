@@ -13,7 +13,7 @@ import json
 from datetime import datetime
 
 from algo.config import Config
-from algo.models import SimpleARCModel
+from algo.models import create_model
 from algo.data import ARCDataset
 from algo.training import ARCTrainer
 
@@ -160,22 +160,26 @@ def main():
     train_loader, val_loader = create_data_loaders(config)
 
     # Create model
-    model = SimpleARCModel(config)
+    model = create_model(config)
 
     # Print model info
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-
+    model_info = model.get_model_info()
     print("\nModel info:")
-    print(f"  Total parameters: {total_params:,}")
-    print(f"  Trainable parameters: {trainable_params:,}")
-    print(f"  Frozen parameters: {total_params - trainable_params:,}")
+    print(f"  Model type: {model_info['model_type']}")
+    print(f"  Total parameters: {model_info['total_parameters']:,}")
+    print(f"  Trainable parameters: {model_info['trainable_parameters']:,}")
+    print(f"  Frozen parameters: {model_info['frozen_parameters']:,}")
 
     # Save training info
     train_size = len(train_loader.dataset)
     val_size = len(val_loader.dataset)
     save_training_info(
-        experiment_dir, config, args.dataset, train_size, val_size, total_params
+        experiment_dir,
+        config,
+        args.dataset,
+        train_size,
+        val_size,
+        model_info["total_parameters"],
     )
 
     # Create trainer with custom checkpoint path

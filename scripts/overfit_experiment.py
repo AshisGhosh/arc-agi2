@@ -17,7 +17,7 @@ import time
 from datetime import datetime
 
 from algo.config import Config
-from algo.models import SimpleARCModel
+from algo.models import create_model
 from algo.data import ARCDataset, custom_collate_fn
 from algo.data.task_subset import TaskSubset
 from algo.training import ARCTrainer
@@ -161,7 +161,7 @@ class OverfitExperiment:
         )
 
         # create model
-        model = SimpleARCModel(self.config)
+        model = create_model(self.config)
 
         # create trainer with overfitting config
         trainer = ARCTrainer(model, self.config, task_dataset)
@@ -288,7 +288,7 @@ class OverfitExperiment:
         )
 
         # create model and load checkpoint
-        model = SimpleARCModel(self.config)
+        model = create_model(self.config)
         checkpoint = torch.load(
             checkpoint_path, map_location=self.config.device, weights_only=False
         )
@@ -646,7 +646,7 @@ def main():
     """main experiment function."""
     parser = argparse.ArgumentParser(description="n-task overfitting experiment")
     parser.add_argument(
-        "--n_tasks", "-n", type=int, default=50, help="number of tasks to overfit on"
+        "--n_tasks", "-n", type=int, default=10, help="number of tasks to overfit on"
     )
     parser.add_argument(
         "--task-indices", type=int, nargs="+", help="specific task indices to use"

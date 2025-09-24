@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from algo.config import Config
 from algo.data import ARCDataset
 from algo.data.task_subset import TaskSubset
-from algo.models.simple_arc import SimpleARCModel
+from algo.models import create_model
 from scripts.visualization_utils import (
     tensor_to_numpy,
     tensor_to_grayscale_numpy,
@@ -313,9 +313,7 @@ def load_experiment_info(experiment_dir: Path) -> Dict[str, Any]:
     return info
 
 
-def load_model_checkpoint(
-    checkpoint_path: str, config: Config = None
-) -> SimpleARCModel:
+def load_model_checkpoint(checkpoint_path: str, config: Config = None):
     """load model from checkpoint."""
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
 
@@ -325,7 +323,7 @@ def load_model_checkpoint(
     elif config is None:
         config = Config()
 
-    model = SimpleARCModel(config)
+    model = create_model(config)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.to(config.device)
     model.eval()
@@ -1287,7 +1285,7 @@ def main():
             st.sidebar.warning("⚠️ no config in checkpoint, using default config")
 
         # Create model with the loaded config
-        model = SimpleARCModel(config)
+        model = create_model(config)
         model.load_state_dict(checkpoint["model_state_dict"])
         model.eval()
         st.sidebar.success("✅ model loaded successfully")
