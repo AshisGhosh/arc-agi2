@@ -1477,7 +1477,7 @@ def test_all_combinations(
                             support1_output,
                             support2_input,
                             support2_output,
-                            target["input"],
+                            test_input_clean,
                         )
                     else:
                         # ResNet model - use decoder with rule latents
@@ -1512,7 +1512,7 @@ def test_all_combinations(
                             support1_output,
                             support2_input,
                             support2_output,
-                            target["input"],
+                            test_input_clean,
                         )
                     else:
                         # ResNet model - use decoder with rule latents
