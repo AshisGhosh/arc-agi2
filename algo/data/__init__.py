@@ -3,7 +3,7 @@ from .preprocessing import (
     preprocess_grid_image,
     grayscale_to_rgb,
 )
-from .collate_functions import unified_collate_fn
+from .collate_functions import unified_collate_fn, flatten_patch_collate_fn
 from .resnet_dataset import ResNetARCDataset
 from .patch_dataset import PatchARCDataset
 from typing import Union
@@ -47,7 +47,24 @@ def create_dataset(
         )
 
 
-def get_collate_fn(model_type: str):
+def get_collate_fn(model_type: str, use_flattening: bool = False):
+    """
+    Get the appropriate collate function for the model type.
+
+    Args:
+        model_type: Type of model ("simple_arc" or "patch_attention")
+        use_flattening: Whether to use flattening collate for patch models
+
+    Returns:
+        The appropriate collate function
+    """
+    if model_type == "patch_attention" and use_flattening:
+        return flatten_patch_collate_fn
+    else:
+        return unified_collate_fn
+
+
+def get_collate_fn_legacy(model_type: str):
     """
     Get the collate function for the model type.
 

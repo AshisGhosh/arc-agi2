@@ -78,8 +78,8 @@ class PatchCrossAttentionModel(BaseARCModel):
         Tokenize a support pair (X_s, Y_s) into X and Δ tokens.
 
         Args:
-            support_input: [H, W] with values 0-9
-            support_output: [H, W] with values 0-9
+            support_input: [B, H, W] with values 0-9
+            support_output: [B, H, W] with values 0-9
 
         Returns:
             Dictionary with 'x_tokens' and 'delta_tokens'
@@ -89,17 +89,15 @@ class PatchCrossAttentionModel(BaseARCModel):
         support_input = support_input.to(device)
         support_output = support_output.to(device)
 
-        # Tokenize input
-        x_tokens = self.patch_tokenizer(
-            support_input.unsqueeze(0)
-        )  # [1, num_patches, model_dim]
+        # Tokenize input - patch_tokenizer expects [B, H, W]
+        x_tokens = self.patch_tokenizer(support_input)  # [B, num_patches, model_dim]
         x_tokens = self.pos_encoding(x_tokens)  # Add positional encoding
 
         # Compute delta tokens
         delta_colors = compute_delta_tokens(
-            support_input.unsqueeze(0), support_output.unsqueeze(0)
-        )  # [1, H, W] with values 0-19
-        delta_tokens = self.delta_tokenizer(delta_colors)  # [1, num_patches, model_dim]
+            support_input, support_output
+        )  # [B, H, W] with values 0-19
+        delta_tokens = self.delta_tokenizer(delta_colors)  # [B, num_patches, model_dim]
         delta_tokens = self.pos_encoding(delta_tokens)  # Add positional encoding
 
         return {"x_tokens": x_tokens, "delta_tokens": delta_tokens}
@@ -120,10 +118,10 @@ class PatchCrossAttentionModel(BaseARCModel):
             example1_output: [B, 30, 30] - First output (grayscale format)
             example2_input: [B, 30, 30] - Second input (grayscale format)
             example2_output: [B, 30, 30] - Second output (grayscale format)
-            target_input: [total_queries, 30, 30] - Target input (grayscale format)
+            target_input: [B, 30, 30] - Target input (grayscale format)
 
         Returns:
-            logits: [total_queries, 10, 30, 30] - Per-pixel classification logits
+            logits: [B, 10, 30, 30] - Per-pixel classification logits
         """
         # Ensure all inputs are on the same device as model parameters
         device = next(self.parameters()).device
@@ -133,58 +131,35 @@ class PatchCrossAttentionModel(BaseARCModel):
         example2_output = example2_output.to(device)
         target_input = target_input.to(device)
 
-        B = example1_input.size(0)
+        # Tokenize support pairs for entire batch
+        support1_tokens = self.tokenize_support_pair(example1_input, example1_output)
+        support2_tokens = self.tokenize_support_pair(example2_input, example2_output)
 
-        # Tokenize support pairs (already in grayscale format)
-        support1_tokens = self.tokenize_support_pair(
-            example1_input[0], example1_output[0]
-        )
-        support2_tokens = self.tokenize_support_pair(
-            example2_input[0], example2_output[0]
-        )
-
-        # Build support context: [X₁, Δ₁, X₂, Δ₂]
+        # Build support context: [X₁, Δ₁, X₂, Δ₂] for each batch item
         support_tokens = torch.cat(
             [
-                support1_tokens["x_tokens"],  # [1, 100, d]
-                support1_tokens["delta_tokens"],  # [1, 100, d]
-                support2_tokens["x_tokens"],  # [1, 100, d]
-                support2_tokens["delta_tokens"],  # [1, 100, d]
+                support1_tokens["x_tokens"],  # [B, 100, d]
+                support1_tokens["delta_tokens"],  # [B, 100, d]
+                support2_tokens["x_tokens"],  # [B, 100, d]
+                support2_tokens["delta_tokens"],  # [B, 100, d]
             ],
             dim=1,
-        )  # [1, 400, d]
-
-        # Expand support tokens to match batch size
-        support_tokens = support_tokens.expand(B, -1, -1)  # [B, 400, d]
+        )  # [B, 400, d]
 
         # One-time RMSNorm on support tokens
         support_tokens = self.support_norm(support_tokens)
 
-        # Process all query inputs
-        all_logits = []
-        for i in range(target_input.size(0)):
-            # Get test input - should be [30, 30]
-            test_input = target_input[i]  # [30, 30]
+        # Process all query inputs in parallel
+        # target_input is [B, 30, 30], tokenize all at once
+        test_tokens = self.patch_tokenizer(target_input)  # [B, 100, d]
+        test_tokens = self.pos_encoding(test_tokens)  # Add positional encoding
 
-            # Tokenize test input (already in grayscale format)
-            # Add batch dimension for tokenizer: [30, 30] -> [1, 30, 30]
-            test_tokens = self.patch_tokenizer(test_input.unsqueeze(0))  # [1, 100, d]
-            test_tokens = self.pos_encoding(test_tokens)  # Add positional encoding
+        # Cross-attention: test tokens attend to support tokens
+        # Both test_tokens and support_tokens are [B, num_patches, d]
+        updated_test_tokens = self.decoder(test_tokens, support_tokens)  # [B, 100, d]
 
-            # Use support tokens for this specific query (expand to match test_tokens batch size)
-            query_support_tokens = support_tokens[:1]  # [1, 400, d]
-
-            # Cross-attention: test tokens attend to support tokens
-            updated_test_tokens = self.decoder(
-                test_tokens, query_support_tokens
-            )  # [1, 100, d]
-
-            # Generate output logits
-            logits = self.output_head(updated_test_tokens)  # [1, 10, 30, 30]
-            all_logits.append(logits)
-
-        # Concatenate all logits
-        final_logits = torch.cat(all_logits, dim=0)  # [total_queries, 10, 30, 30]
+        # Generate output logits
+        final_logits = self.output_head(updated_test_tokens)  # [B, 10, 30, 30]
 
         return final_logits
 

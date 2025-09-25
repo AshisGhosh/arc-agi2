@@ -333,7 +333,7 @@ def main():
         dataset,
         batch_size=config.batch_size,
         shuffle=False,
-        collate_fn=get_collate_fn(config.model_type),
+        collate_fn=get_collate_fn(config.model_type, use_flattening=True),
         num_workers=2,
         pin_memory=True,
     )

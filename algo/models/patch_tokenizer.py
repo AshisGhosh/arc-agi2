@@ -111,19 +111,28 @@ def compute_delta_tokens(
     support_inputs: torch.Tensor, support_outputs: torch.Tensor
 ) -> torch.Tensor:
     """
-    Compute delta tokens: onehot(Y) - onehot(X) for support pairs.
+    Compute delta tokens that preserve actual color change information.
 
-    Uses a direct encoding approach that preserves both the color change and sign:
-    - For each pixel, if input != output, encode as: output_color + (sign * 10)
-    - Sign: +1 for positive change, -1 for negative change (but we use +10/-10 offset)
-    - No change: encode as 0
+    Encoding scheme:
+    - No change (diff = 0): encode as 0
+    - Positive change (diff > 0): encode as diff (1-9)
+    - Negative change (diff < 0): encode as 10 + abs(diff) (10-19)
+
+    This preserves the actual magnitude and direction of color changes.
+
+    Examples:
+    - input=5, output=5 → diff=0 → encode as 0
+    - input=3, output=7 → diff=+4 → encode as 4
+    - input=7, output=3 → diff=-4 → encode as 14 (10 + 4)
+    - input=1, output=9 → diff=+8 → encode as 8
+    - input=9, output=1 → diff=-8 → encode as 18 (10 + 8)
 
     Args:
         support_inputs: [B, H, W] with values 0-9
         support_outputs: [B, H, W] with values 0-9
 
     Returns:
-        delta_colors: [B, H, W] with values 0-19 (preserving sign information)
+        delta_colors: [B, H, W] with values 0-19 (preserving actual delta information)
     """
     # Ensure inputs are long type
     support_inputs_long = support_inputs.long()
@@ -132,17 +141,17 @@ def compute_delta_tokens(
     # Compute the actual color difference
     color_diff = support_outputs_long - support_inputs_long  # [B, H, W]
 
-    # Create delta encoding:
-    # - If no change (diff = 0): use 0
-    # - If positive change: use output_color (0-9)
-    # - If negative change: use output_color + 10 (10-19)
+    # Create delta encoding that preserves actual change magnitude:
+    # - No change: 0
+    # - Positive change: use actual diff (1-9)
+    # - Negative change: use 10 + abs(diff) (10-19)
     delta_colors = torch.where(
         color_diff == 0,
         torch.zeros_like(color_diff),  # No change: 0
         torch.where(
             color_diff > 0,
-            support_outputs_long,  # Positive change: use output color (0-9)
-            support_outputs_long + 10,  # Negative change: use output color + 10 (10-19)
+            color_diff,  # Positive change: use actual diff (1-9)
+            10 + torch.abs(color_diff),  # Negative change: 10 + abs(diff) (10-19)
         ),
     )
 

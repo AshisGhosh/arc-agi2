@@ -238,7 +238,7 @@ class OverfitExperiment:
 
         # create data loader (no validation split for overfitting)
         # Get appropriate collate function for model type
-        collate_fn = get_collate_fn(self.config.model_type)
+        collate_fn = get_collate_fn(self.config.model_type, use_flattening=True)
         train_loader = DataLoader(
             task_dataset,
             batch_size=self.config.batch_size,
@@ -358,7 +358,7 @@ class OverfitExperiment:
         task_dataset = self.create_task_subset(task_indices)
 
         # create data loader
-        collate_fn = get_collate_fn(self.config.model_type)
+        collate_fn = get_collate_fn(self.config.model_type, use_flattening=True)
         eval_loader = DataLoader(
             task_dataset,
             batch_size=self.config.batch_size,
@@ -397,19 +397,35 @@ class OverfitExperiment:
                 # Move batch to device
                 device = next(model.parameters()).device
                 test_inputs = batch["test_inputs"].to(device)
-                test_outputs = batch["test_outputs"].to(device)
-                holdout_inputs = batch["holdout_inputs"].to(device)
-                holdout_outputs = batch["holdout_outputs"].to(device)
-                has_holdout = batch["has_holdout"].to(device)
+                test_outputs = batch["test_targets"].to(
+                    device
+                )  # Use test_targets from flattened collate
+                # Note: holdout inputs/outputs not available in flattened format
+                holdout_inputs = None
+                holdout_outputs = None
+                has_holdout = torch.zeros(
+                    test_inputs.size(0), dtype=torch.bool, device=device
+                )
 
                 # Get task indices for this batch
                 task_indices = batch["task_indices"]
 
-                # Get support examples (RGB for ResNet, grayscale for Patch)
-                support_example_inputs_rgb = batch["support_example_inputs_rgb"]
-                support_example_outputs_rgb = batch["support_example_outputs_rgb"]
-                support_example_inputs = batch["support_example_inputs"]
-                support_example_outputs = batch["support_example_outputs"]
+                # For flattened format, we have individual support pairs
+                # Create dummy support examples structure for compatibility
+                support_example_inputs_rgb = [None] * len(
+                    task_indices
+                )  # Not available in flattened format
+                support_example_outputs_rgb = [None] * len(
+                    task_indices
+                )  # Not available in flattened format
+                support_example_inputs = [
+                    [batch["support1_inputs"][i], batch["support2_inputs"][i]]
+                    for i in range(len(task_indices))
+                ]
+                support_example_outputs = [
+                    [batch["support1_outputs"][i], batch["support2_outputs"][i]]
+                    for i in range(len(task_indices))
+                ]
 
                 # Get all training examples for each task in the batch
                 batch_size = len(support_example_inputs)
@@ -509,7 +525,19 @@ class OverfitExperiment:
                             support2_output = (
                                 support_example_outputs[i][1].unsqueeze(0).squeeze(1)
                             )  # [1, 30, 30]
-                            test_input_clean = test_input.squeeze(1)  # [1, 30, 30]
+                            # Ensure test_input has the correct shape [1, 30, 30]
+                            if test_input.dim() == 2:
+                                # test_input is [1, 30], need to add the missing dimension
+                                test_input_clean = test_input.unsqueeze(-1).expand(
+                                    -1, -1, 30
+                                )  # [1, 30, 30]
+                            elif test_input.dim() == 3:
+                                # test_input is already [1, 30, 30]
+                                test_input_clean = test_input
+                            else:
+                                raise ValueError(
+                                    f"Unexpected test_input shape: {test_input.shape}"
+                                )
 
                             test_logits = model(
                                 support1_input,
