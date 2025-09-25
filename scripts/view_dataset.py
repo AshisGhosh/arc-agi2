@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 
 from algo.config import Config
 from algo.data import create_dataset
+from algo.data.preprocessing import preprocess_rgb_image
 from scripts.visualization_utils import (
     tensor_to_grayscale_numpy,
     apply_arc_color_palette,
@@ -34,6 +35,29 @@ def get_task_combinations(dataset, task_idx):
         return {"regular": [], "counterfactual": [], "all": []}
 
 
+def convert_grayscale_to_rgb(support_examples, config):
+    """convert grayscale support examples to rgb format using proper preprocessing pipeline."""
+    rgb_examples = []
+    for example in support_examples:
+        # convert grayscale to numpy (remove channel dimension if present)
+        gray_input = tensor_to_grayscale_numpy(example["input"])
+        gray_output = tensor_to_grayscale_numpy(example["output"])
+
+        # use the same preprocessing pipeline as resnet dataset
+        rgb_input = preprocess_rgb_image(gray_input, config)
+        rgb_output = preprocess_rgb_image(gray_output, config)
+
+        # add batch dimension to match resnet dataset format [1, 3, 64, 64]
+        rgb_input = rgb_input.unsqueeze(0)
+        rgb_output = rgb_output.unsqueeze(0)
+
+        # create rgb example in the same format as resnet dataset
+        rgb_example = {"input": rgb_input, "output": rgb_output}
+        rgb_examples.append(rgb_example)
+
+    return rgb_examples
+
+
 def main():
     """main streamlit app."""
     st.title("🔍 arc dataset viewer")
@@ -47,6 +71,14 @@ def main():
     # dataset selection
     dataset_choice = st.sidebar.selectbox(
         "select dataset", ["arc_agi1", "arc_agi2"], index=0
+    )
+
+    # dataset type selection
+    dataset_type = st.sidebar.selectbox(
+        "select dataset type",
+        ["resnet", "patch"],
+        index=1,
+        help="resnet: rgb support examples, patch: grayscale support examples",
     )
 
     # holdout mode
@@ -114,6 +146,9 @@ def main():
     try:
         config = Config()
         config.training_dataset = dataset_choice
+        config.model_type = (
+            "patch_attention" if dataset_type == "patch" else "simple_arc"
+        )
         config.use_color_relabeling = enable_color_augmentation
         config.augmentation_variants = augmentation_variants
         config.preserve_background = preserve_background
@@ -150,7 +185,7 @@ def main():
                 task_id_to_idx[task_id] = i
 
         st.success(
-            f"✅ loaded {len(unique_task_indices)} unique tasks from {dataset_choice}"
+            f"✅ loaded {len(unique_task_indices)} unique tasks from {dataset_choice} ({dataset_type} dataset)"
         )
         st.success(f"✅ total combinations: {len(dataset)}")
 
@@ -337,9 +372,18 @@ def main():
         else:
             st.info(f"ℹ️ task {actual_task_idx} has no holdout data")
 
+        # prepare task data for visualization
+        display_task_data = task_data.copy()
+
+        # for patch datasets, convert grayscale support examples to rgb for consistent display
+        if dataset_type == "patch" and task_data.get("support_examples_rgb") is None:
+            display_task_data["support_examples_rgb"] = convert_grayscale_to_rgb(
+                task_data["support_examples"], config
+            )
+
         # visualize the selected combination
         task_fig = visualize_task_combination(
-            task_data,
+            display_task_data,
             actual_task_idx,
             selected_combo["combination_idx"],
             show_holdout=has_holdout,
@@ -475,32 +519,35 @@ def main():
 
         with col1:
             st.write("**support images**")
-            # Check if we have RGB support examples (ResNet) or just grayscale (Patch)
+            # show dataset type info
+            st.write(f"**dataset type:** {dataset_type}")
+
+            # check if we have rgb support examples (resnet) or just grayscale (patch)
             if (
                 "support_examples_rgb" in task_data
                 and task_data["support_examples_rgb"] is not None
             ):
-                # ResNet dataset - show RGB support examples
+                # resnet dataset - show rgb support examples
                 example_img = task_data["support_examples_rgb"][0]["input"]
-                st.write("**RGB support examples:**")
+                st.write("**rgb support examples:**")
                 st.write(f"- shape: {example_img.shape}")
                 st.write(f"- data type: {example_img.dtype}")
                 st.write(
                     f"- value range: [{example_img.min():.3f}, {example_img.max():.3f}]"
                 )
 
-                # Also show grayscale support examples
+                # also show grayscale support examples
                 grayscale_img = task_data["support_examples"][0]["input"]
-                st.write("**Grayscale support examples:**")
+                st.write("**grayscale support examples:**")
                 st.write(f"- shape: {grayscale_img.shape}")
                 st.write(f"- data type: {grayscale_img.dtype}")
                 st.write(
                     f"- value range: [{grayscale_img.min():.0f}, {grayscale_img.max():.0f}]"
                 )
             else:
-                # Patch dataset - only grayscale support examples
+                # patch dataset - only grayscale support examples
                 example_img = task_data["support_examples"][0]["input"]
-                st.write("**Grayscale support examples:**")
+                st.write("**grayscale support examples:**")
                 st.write(f"- shape: {example_img.shape}")
                 st.write(f"- data type: {example_img.dtype}")
                 st.write(

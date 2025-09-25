@@ -741,9 +741,14 @@ def evaluate_model_on_tasks(
                                 support2_output = support_examples[1]["output"].squeeze(
                                     1
                                 )  # [1, 30, 30]
+
+                                # Ensure test input is 3D: [1, 30, 30] for patch model
                                 test_input_clean = target_input.squeeze(
                                     1
-                                )  # [1, 30, 30]
+                                )  # Remove channel dim: [1, 30, 30]
+
+                                # Patch model expects [total_queries, 30, 30] where total_queries=1 in our case
+                                # So we pass [1, 30, 30] directly
 
                                 target_logits = model(
                                     support1_input,
@@ -764,46 +769,72 @@ def evaluate_model_on_tasks(
                             )
 
                             # Create separate result for this test example
-                            test_sample_data = {
-                                "train_examples": [
-                                    {
-                                        "input": tensor_to_numpy(
-                                            denormalize_rgb(
+                            if is_patch_model:
+                                # Patch model - use grayscale support examples
+                                test_sample_data = {
+                                    "train_examples": [
+                                        {
+                                            "input": tensor_to_grayscale_numpy(
                                                 support_examples[0]["input"]
-                                            )
-                                        ),
-                                        "output": tensor_to_numpy(
-                                            denormalize_rgb(
+                                            ),
+                                            "output": tensor_to_grayscale_numpy(
                                                 support_examples[0]["output"]
-                                            )
-                                        ),
-                                    },
-                                    {
-                                        "input": tensor_to_numpy(
-                                            denormalize_rgb(
+                                            ),
+                                        },
+                                        {
+                                            "input": tensor_to_grayscale_numpy(
                                                 support_examples[1]["input"]
-                                            )
-                                        ),
-                                        "output": tensor_to_numpy(
-                                            denormalize_rgb(
+                                            ),
+                                            "output": tensor_to_grayscale_numpy(
                                                 support_examples[1]["output"]
-                                            )
-                                        ),
-                                    },
-                                ],
-                                "test_examples": [
-                                    {
-                                        "input": tensor_to_grayscale_numpy(
-                                            test_ex["input"]
-                                        ),
-                                        "output": tensor_to_grayscale_numpy(
-                                            test_ex["output"]
-                                        ),
-                                    }
-                                    for test_ex in test_examples
-                                ],
-                                "num_test_examples": num_test_examples,
-                            }
+                                            ),
+                                        },
+                                    ],
+                                }
+                            else:
+                                # ResNet model - use RGB support examples
+                                test_sample_data = {
+                                    "train_examples": [
+                                        {
+                                            "input": tensor_to_numpy(
+                                                denormalize_rgb(
+                                                    support_examples[0]["input"]
+                                                )
+                                            ),
+                                            "output": tensor_to_numpy(
+                                                denormalize_rgb(
+                                                    support_examples[0]["output"]
+                                                )
+                                            ),
+                                        },
+                                        {
+                                            "input": tensor_to_numpy(
+                                                denormalize_rgb(
+                                                    support_examples[1]["input"]
+                                                )
+                                            ),
+                                            "output": tensor_to_numpy(
+                                                denormalize_rgb(
+                                                    support_examples[1]["output"]
+                                                )
+                                            ),
+                                        },
+                                    ],
+                                }
+
+                            # Add test examples (same for both model types)
+                            test_sample_data["test_examples"] = [
+                                {
+                                    "input": tensor_to_grayscale_numpy(
+                                        test_ex["input"]
+                                    ),
+                                    "output": tensor_to_grayscale_numpy(
+                                        test_ex["output"]
+                                    ),
+                                }
+                                for test_ex in test_examples
+                            ]
+                            test_sample_data["num_test_examples"] = num_test_examples
 
                             # Add holdout data if available
                             if holdout_example is not None:
@@ -854,7 +885,14 @@ def evaluate_model_on_tasks(
                             support2_output = support_examples[1]["output"].squeeze(
                                 1
                             )  # [1, 30, 30]
-                            test_input_clean = target_input.squeeze(1)  # [1, 30, 30]
+
+                            # Ensure test input is 3D: [1, 30, 30] for patch model
+                            test_input_clean = target_input.squeeze(
+                                1
+                            )  # Remove channel dim: [1, 30, 30]
+
+                            # Patch model expects [total_queries, 30, 30] where total_queries=1 in our case
+                            # So we pass [1, 30, 30] directly
 
                             target_logits = model(
                                 support1_input,
@@ -894,7 +932,14 @@ def evaluate_model_on_tasks(
                         support2_output = support_examples[1]["output"].squeeze(
                             1
                         )  # [1, 30, 30]
-                        test_input_clean = target_input.squeeze(1)  # [1, 30, 30]
+
+                        # Ensure test input is 3D: [1, 30, 30] for patch model
+                        test_input_clean = target_input.squeeze(
+                            1
+                        )  # Remove channel dim: [1, 30, 30]
+
+                        # Patch model expects [total_queries, 30, 30] where total_queries=1 in our case
+                        # So we pass [1, 30, 30] directly
 
                         target_logits = model(
                             support1_input,
@@ -931,7 +976,14 @@ def evaluate_model_on_tasks(
                         support2_output = support_examples[1]["output"].squeeze(
                             1
                         )  # [1, 30, 30]
-                        test_input_clean = target_input.squeeze(1)  # [1, 30, 30]
+
+                        # Ensure test input is 3D: [1, 30, 30] for patch model
+                        test_input_clean = target_input.squeeze(
+                            1
+                        )  # Remove channel dim: [1, 30, 30]
+
+                        # Patch model expects [total_queries, 30, 30] where total_queries=1 in our case
+                        # So we pass [1, 30, 30] directly
 
                         target_logits = model(
                             support1_input,
@@ -950,34 +1002,74 @@ def evaluate_model_on_tasks(
                     metrics = calculate_accuracy_metrics(predictions, target_output)
 
                 # Create sample data for visualization
-                sample_data = {
-                    "train_examples": [
-                        {
-                            "input": tensor_to_numpy(
-                                denormalize_rgb(support_examples[0]["input"])
-                            ),
-                            "output": tensor_to_numpy(
-                                denormalize_rgb(support_examples[0]["output"])
-                            ),
-                        },
-                        {
-                            "input": tensor_to_numpy(
-                                denormalize_rgb(support_examples[1]["input"])
-                            ),
-                            "output": tensor_to_numpy(
-                                denormalize_rgb(support_examples[1]["output"])
-                            ),
-                        },
-                    ],
-                    "test_examples": [
-                        {
-                            "input": tensor_to_grayscale_numpy(test_example["input"]),
-                            "output": tensor_to_grayscale_numpy(test_example["output"]),
-                        }
-                        for test_example in test_examples
-                    ],
-                    "num_test_examples": num_test_examples,
-                }
+                if is_patch_model:
+                    # Patch model - use grayscale support examples
+                    sample_data = {
+                        "train_examples": [
+                            {
+                                "input": tensor_to_grayscale_numpy(
+                                    support_examples[0]["input"]
+                                ),
+                                "output": tensor_to_grayscale_numpy(
+                                    support_examples[0]["output"]
+                                ),
+                            },
+                            {
+                                "input": tensor_to_grayscale_numpy(
+                                    support_examples[1]["input"]
+                                ),
+                                "output": tensor_to_grayscale_numpy(
+                                    support_examples[1]["output"]
+                                ),
+                            },
+                        ],
+                        "test_examples": [
+                            {
+                                "input": tensor_to_grayscale_numpy(
+                                    test_example["input"]
+                                ),
+                                "output": tensor_to_grayscale_numpy(
+                                    test_example["output"]
+                                ),
+                            }
+                            for test_example in test_examples
+                        ],
+                        "num_test_examples": num_test_examples,
+                    }
+                else:
+                    # ResNet model - use RGB support examples
+                    sample_data = {
+                        "train_examples": [
+                            {
+                                "input": tensor_to_numpy(
+                                    denormalize_rgb(support_examples[0]["input"])
+                                ),
+                                "output": tensor_to_numpy(
+                                    denormalize_rgb(support_examples[0]["output"])
+                                ),
+                            },
+                            {
+                                "input": tensor_to_numpy(
+                                    denormalize_rgb(support_examples[1]["input"])
+                                ),
+                                "output": tensor_to_numpy(
+                                    denormalize_rgb(support_examples[1]["output"])
+                                ),
+                            },
+                        ],
+                        "test_examples": [
+                            {
+                                "input": tensor_to_grayscale_numpy(
+                                    test_example["input"]
+                                ),
+                                "output": tensor_to_grayscale_numpy(
+                                    test_example["output"]
+                                ),
+                            }
+                            for test_example in test_examples
+                        ],
+                        "num_test_examples": num_test_examples,
+                    }
 
                 # Add holdout data if available
                 if holdout_example is not None:
@@ -1221,9 +1313,14 @@ def test_all_combinations(
                                 support2_output = support_examples[1]["output"].squeeze(
                                     1
                                 )  # [1, 30, 30]
+
+                                # Ensure test input is 3D: [1, 30, 30] for patch model
                                 test_input_clean = test_example["input"].squeeze(
                                     1
-                                )  # [1, 30, 30]
+                                )  # Remove channel dim: [1, 30, 30]
+
+                                # Patch model expects [total_queries, 30, 30] where total_queries=1 in our case
+                                # So we pass [1, 30, 30] directly
 
                                 logits = model(
                                     support1_input,
@@ -1358,7 +1455,14 @@ def test_all_combinations(
                             support2_output = support_examples[1]["output"].squeeze(
                                 1
                             )  # [1, 30, 30]
-                            test_input_clean = target["input"].squeeze(1)  # [1, 30, 30]
+
+                            # Ensure test input is 3D: [1, 30, 30] for patch model
+                            test_input_clean = target["input"].squeeze(
+                                1
+                            )  # Remove channel dim: [1, 30, 30]
+
+                            # Patch model expects [total_queries, 30, 30] where total_queries=1 in our case
+                            # So we pass [1, 30, 30] directly
 
                             logits = model(
                                 support1_input,
@@ -1390,7 +1494,14 @@ def test_all_combinations(
                         support2_output = support_examples[1]["output"].squeeze(
                             1
                         )  # [1, 30, 30]
-                        test_input_clean = target["input"].squeeze(1)  # [1, 30, 30]
+
+                        # Ensure test input is 3D: [1, 30, 30]
+                        test_input_clean = target["input"].squeeze(
+                            1
+                        )  # Remove channel dim: [1, 30, 30]
+
+                        # Patch model expects [total_queries, 30, 30] where total_queries=1 in our case
+                        # So we pass [1, 30, 30] directly
 
                         logits = model(
                             support1_input,
@@ -1421,7 +1532,14 @@ def test_all_combinations(
                         support2_output = support_examples[1]["output"].squeeze(
                             1
                         )  # [1, 30, 30]
-                        test_input_clean = target["input"].squeeze(1)  # [1, 30, 30]
+
+                        # Ensure test input is 3D: [1, 30, 30]
+                        test_input_clean = target["input"].squeeze(
+                            1
+                        )  # Remove channel dim: [1, 30, 30]
+
+                        # Patch model expects [total_queries, 30, 30] where total_queries=1 in our case
+                        # So we pass [1, 30, 30] directly
 
                         logits = model(
                             support1_input,
@@ -1567,6 +1685,45 @@ def main():
     )
 
     exp_info = load_experiment_info(selected_exp_path)
+
+    # Display model type information
+    # Check both config and model sections for model type
+    config_info = exp_info.get("full_training_info", {}).get("config", {})
+    model_info = exp_info.get("full_training_info", {}).get("model", {})
+
+    # Try to get model type from model section first, then config
+    model_type = model_info.get("model_type") or config_info.get(
+        "model_type", "simple_arc"
+    )
+
+    # Normalize model type names
+    model_type_normalized = {
+        "patch_cross_attention": "patch_attention",
+        "patch_attention": "patch_attention",
+        "simple_arc": "simple_arc",
+    }.get(model_type, model_type)
+
+    model_type_display = {
+        "simple_arc": "SimpleARC (ResNet + MLP)",
+        "patch_attention": "PatchCrossAttention",
+    }.get(model_type_normalized, model_type)
+
+    st.sidebar.subheader("model info")
+    st.sidebar.write(f"**model type:** {model_type_display}")
+
+    # Show additional model-specific info
+    if model_type_normalized == "patch_attention":
+        st.sidebar.write("**architecture:** patch-based cross-attention")
+        st.sidebar.write(f"**patch size:** {config_info.get('patch_size', 3)}")
+        st.sidebar.write(f"**model dim:** {config_info.get('model_dim', 128)}")
+        if "total_parameters" in model_info:
+            st.sidebar.write(f"**parameters:** {model_info['total_parameters']:,}")
+    else:
+        st.sidebar.write("**architecture:** resnet encoder + mlp decoder")
+        st.sidebar.write(f"**rule dim:** {config_info.get('rule_dim', 32)}")
+        if "total_parameters" in model_info:
+            st.sidebar.write(f"**parameters:** {model_info['total_parameters']:,}")
+
     st.sidebar.subheader("experiment info")
     if "training" in exp_info:
         st.sidebar.write(
@@ -1622,6 +1779,7 @@ def main():
         model.load_state_dict(checkpoint["model_state_dict"])
         model.eval()
         st.sidebar.success("✅ model loaded successfully")
+
     except Exception as e:
         st.error(f"❌ failed to load model: {e}")
         st.stop()
@@ -1670,19 +1828,23 @@ def main():
         help="evaluate on all test examples for each task/combination",
     )
 
-    st.sidebar.subheader("rule latent analysis")
-    inject_noise = st.sidebar.checkbox(
-        "inject noise into rule latent",
-        value=False,
-        help="replace rule latent with noise to test if it's actually useful",
-    )
+    # Only show rule latent analysis for ResNet models
+    if model_type_normalized != "patch_attention":
+        st.sidebar.subheader("rule latent analysis")
+        inject_noise = st.sidebar.checkbox(
+            "inject noise into rule latent",
+            value=False,
+            help="replace rule latent with noise to test if it's actually useful",
+        )
+    else:
+        inject_noise = False
 
     noise_type = "gaussian"
     noise_std = 1.0
     noise_range = 1.0
     noise_ratio = 1.0
 
-    if inject_noise:
+    if inject_noise and model_type_normalized != "patch_attention":
         noise_type = st.sidebar.selectbox(
             "noise type",
             ["gaussian", "uniform", "zeros", "ones"],
@@ -1718,27 +1880,71 @@ def main():
             help="fraction of rule latent to replace with noise (1.0 = full replacement)",
         )
 
-    st.sidebar.subheader("support example noise")
+    # Only show support example noise for ResNet models
+    if model_type_normalized != "patch_attention":
+        st.sidebar.subheader("support example noise")
 
-    # Support A input noise
-    noise_a_input = st.sidebar.checkbox(
-        "noise support A input",
-        value=False,
-        help="inject noise into support example A input to test model robustness",
-    )
+        # Support A input noise
+        noise_a_input = st.sidebar.checkbox(
+            "noise support A input",
+            value=False,
+            help="inject noise into support example A input to test model robustness",
+        )
 
+        # Support A output noise
+        noise_a_output = st.sidebar.checkbox(
+            "noise support A output",
+            value=False,
+            help="inject noise into support example A output to test model robustness",
+        )
+
+        # Support B input noise
+        noise_b_input = st.sidebar.checkbox(
+            "noise support B input",
+            value=False,
+            help="inject noise into support example B input to test model robustness",
+        )
+
+        # Support B output noise
+        noise_b_output = st.sidebar.checkbox(
+            "noise support B output",
+            value=False,
+            help="inject noise into support example B output to test model robustness",
+        )
+    else:
+        # Set all support noise options to False for patch models
+        noise_a_input = False
+        noise_a_output = False
+        noise_b_input = False
+        noise_b_output = False
+
+    # Initialize all support noise parameters
     noise_a_input_type = "gaussian"
     noise_a_input_std = 1.0
     noise_a_input_range = 1.0
     noise_a_input_ratio = 1.0
+    noise_a_output_type = "gaussian"
+    noise_a_output_std = 1.0
+    noise_a_output_range = 1.0
+    noise_a_output_ratio = 1.0
+    noise_b_input_type = "gaussian"
+    noise_b_input_std = 1.0
+    noise_b_input_range = 1.0
+    noise_b_input_ratio = 1.0
+    noise_b_output_type = "gaussian"
+    noise_b_output_std = 1.0
+    noise_b_output_range = 1.0
+    noise_b_output_ratio = 1.0
 
-    if noise_a_input:
-        noise_a_input_type = st.sidebar.selectbox(
-            "A input noise type",
-            ["gaussian", "uniform", "zeros", "ones"],
-            index=0,
-            help="type of noise to inject into support A input",
-        )
+    # Only show support noise parameter controls for ResNet models
+    if model_type_normalized != "patch_attention":
+        if noise_a_input:
+            noise_a_input_type = st.sidebar.selectbox(
+                "A input noise type",
+                ["gaussian", "uniform", "zeros", "ones"],
+                index=0,
+                help="type of noise to inject into support A input",
+            )
 
         if noise_a_input_type == "gaussian":
             noise_a_input_std = st.sidebar.slider(
@@ -1766,150 +1972,6 @@ def main():
             value=1.0,
             step=0.1,
             help="fraction of support A input to replace with noise (1.0 = full replacement)",
-        )
-
-    # Support A output noise
-    noise_a_output = st.sidebar.checkbox(
-        "noise support A output",
-        value=False,
-        help="inject noise into support example A output to test model robustness",
-    )
-
-    noise_a_output_type = "gaussian"
-    noise_a_output_std = 1.0
-    noise_a_output_range = 1.0
-    noise_a_output_ratio = 1.0
-
-    if noise_a_output:
-        noise_a_output_type = st.sidebar.selectbox(
-            "A output noise type",
-            ["gaussian", "uniform", "zeros", "ones"],
-            index=0,
-            help="type of noise to inject into support A output",
-        )
-
-        if noise_a_output_type == "gaussian":
-            noise_a_output_std = st.sidebar.slider(
-                "A output noise std",
-                min_value=0.1,
-                max_value=2.0,
-                value=1.0,
-                step=0.1,
-                help="standard deviation for gaussian noise on support A output",
-            )
-        elif noise_a_output_type == "uniform":
-            noise_a_output_range = st.sidebar.slider(
-                "A output noise range",
-                min_value=0.1,
-                max_value=2.0,
-                value=1.0,
-                step=0.1,
-                help="range for uniform noise on support A output [-range, +range]",
-            )
-
-        noise_a_output_ratio = st.sidebar.slider(
-            "A output noise ratio",
-            min_value=0.0,
-            max_value=1.0,
-            value=1.0,
-            step=0.1,
-            help="fraction of support A output to replace with noise (1.0 = full replacement)",
-        )
-
-    # Support B input noise
-    noise_b_input = st.sidebar.checkbox(
-        "noise support B input",
-        value=False,
-        help="inject noise into support example B input to test model robustness",
-    )
-
-    noise_b_input_type = "gaussian"
-    noise_b_input_std = 1.0
-    noise_b_input_range = 1.0
-    noise_b_input_ratio = 1.0
-
-    if noise_b_input:
-        noise_b_input_type = st.sidebar.selectbox(
-            "B input noise type",
-            ["gaussian", "uniform", "zeros", "ones"],
-            index=0,
-            help="type of noise to inject into support B input",
-        )
-
-        if noise_b_input_type == "gaussian":
-            noise_b_input_std = st.sidebar.slider(
-                "B input noise std",
-                min_value=0.1,
-                max_value=2.0,
-                value=1.0,
-                step=0.1,
-                help="standard deviation for gaussian noise on support B input",
-            )
-        elif noise_b_input_type == "uniform":
-            noise_b_input_range = st.sidebar.slider(
-                "B input noise range",
-                min_value=0.1,
-                max_value=2.0,
-                value=1.0,
-                step=0.1,
-                help="range for uniform noise on support B input [-range, +range]",
-            )
-
-        noise_b_input_ratio = st.sidebar.slider(
-            "B input noise ratio",
-            min_value=0.0,
-            max_value=1.0,
-            value=1.0,
-            step=0.1,
-            help="fraction of support B input to replace with noise (1.0 = full replacement)",
-        )
-
-    # Support B output noise
-    noise_b_output = st.sidebar.checkbox(
-        "noise support B output",
-        value=False,
-        help="inject noise into support example B output to test model robustness",
-    )
-
-    noise_b_output_type = "gaussian"
-    noise_b_output_std = 1.0
-    noise_b_output_range = 1.0
-    noise_b_output_ratio = 1.0
-
-    if noise_b_output:
-        noise_b_output_type = st.sidebar.selectbox(
-            "B output noise type",
-            ["gaussian", "uniform", "zeros", "ones"],
-            index=0,
-            help="type of noise to inject into support B output",
-        )
-
-        if noise_b_output_type == "gaussian":
-            noise_b_output_std = st.sidebar.slider(
-                "B output noise std",
-                min_value=0.1,
-                max_value=2.0,
-                value=1.0,
-                step=0.1,
-                help="standard deviation for gaussian noise on support B output",
-            )
-        elif noise_b_output_type == "uniform":
-            noise_b_output_range = st.sidebar.slider(
-                "B output noise range",
-                min_value=0.1,
-                max_value=2.0,
-                value=1.0,
-                step=0.1,
-                help="range for uniform noise on support B output [-range, +range]",
-            )
-
-        noise_b_output_ratio = st.sidebar.slider(
-            "B output noise ratio",
-            min_value=0.0,
-            max_value=1.0,
-            value=1.0,
-            step=0.1,
-            help="fraction of support B output to replace with noise (1.0 = full replacement)",
         )
 
     st.sidebar.subheader("test input noise")
