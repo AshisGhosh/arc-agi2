@@ -8,7 +8,9 @@ class PatchTokenizer(nn.Module):
     Patch tokenizer for converting 30x30 images to patch tokens.
 
     Converts images to onehot encoding, then patches them into 3x3 non-overlapping patches.
-    Each patch becomes a token with 9*10=90 features (9 pixels * 10 colors).
+    Each patch becomes a token with 9*num_colors features (9 pixels * num_colors).
+
+    For delta tokens, num_colors=20 to handle positive (0-9) and negative (10-19) deltas.
     """
 
     def __init__(self, patch_size: int = 3, num_colors: int = 10, model_dim: int = 128):
@@ -18,7 +20,7 @@ class PatchTokenizer(nn.Module):
         self.model_dim = model_dim
 
         # Linear projection from patch features to model dimension
-        patch_features = patch_size * patch_size * num_colors  # 3*3*10 = 90
+        patch_features = patch_size * patch_size * num_colors  # 3*3*num_colors
         self.patch_projection = nn.Linear(patch_features, model_dim)
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
@@ -111,43 +113,37 @@ def compute_delta_tokens(
     """
     Compute delta tokens: onehot(Y) - onehot(X) for support pairs.
 
+    Uses a direct encoding approach that preserves both the color change and sign:
+    - For each pixel, if input != output, encode as: output_color + (sign * 10)
+    - Sign: +1 for positive change, -1 for negative change (but we use +10/-10 offset)
+    - No change: encode as 0
+
     Args:
         support_inputs: [B, H, W] with values 0-9
         support_outputs: [B, H, W] with values 0-9
 
     Returns:
-        delta_tokens: [B, num_patches, model_dim] - difference tokens
+        delta_colors: [B, H, W] with values 0-19 (preserving sign information)
     """
     # Ensure inputs are long type
     support_inputs_long = support_inputs.long()
     support_outputs_long = support_outputs.long()
 
-    # Convert to onehot
-    input_onehot = F.one_hot(
-        support_inputs_long, num_classes=10
-    ).float()  # [B, H, W, 10]
-    output_onehot = F.one_hot(
-        support_outputs_long, num_classes=10
-    ).float()  # [B, H, W, 10]
+    # Compute the actual color difference
+    color_diff = support_outputs_long - support_inputs_long  # [B, H, W]
 
-    # Compute difference
-    delta_onehot = output_onehot - input_onehot  # [B, H, W, 10]
-
-    # Convert back to color indices for tokenization
-    # Find the color with maximum absolute value in each position
-    delta_abs = torch.abs(delta_onehot)  # [B, H, W, 10]
-    delta_colors = torch.argmax(delta_abs, dim=-1)  # [B, H, W]
-
-    # Get the actual delta values for the selected colors
-    delta_values = delta_onehot.gather(-1, delta_colors.unsqueeze(-1)).squeeze(
-        -1
-    )  # [B, H, W]
-
-    # Create a simple mapping: if delta > 0, use color + 10, if delta < 0, use color
-    # This gives us values 0-19, but we need 0-9, so we'll use modulo
-    delta_colors = (
-        delta_colors + (delta_values > 0).long() * 10
-    )  # [B, H, W] with values 0-19
-    delta_colors = delta_colors % 10  # [B, H, W] with values 0-9
+    # Create delta encoding:
+    # - If no change (diff = 0): use 0
+    # - If positive change: use output_color (0-9)
+    # - If negative change: use output_color + 10 (10-19)
+    delta_colors = torch.where(
+        color_diff == 0,
+        torch.zeros_like(color_diff),  # No change: 0
+        torch.where(
+            color_diff > 0,
+            support_outputs_long,  # Positive change: use output color (0-9)
+            support_outputs_long + 10,  # Negative change: use output color + 10 (10-19)
+        ),
+    )
 
     return delta_colors

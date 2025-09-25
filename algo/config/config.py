@@ -68,8 +68,8 @@ class Config:
     )
 
     # Model configuration
-    model_type: str = "simple_arc"  # "simple_arc" or "patch_attention"
-    # model_type: str = "patch_attention"  # "simple_arc" or "patch_attention"
+    # model_type: str = "simple_arc"  # "simple_arc" or "patch_attention"
+    model_type: str = "patch_attention"  # "simple_arc" or "patch_attention"
 
     # Patch attention model specific configs
     patch_size: int = 3

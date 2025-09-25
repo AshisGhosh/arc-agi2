@@ -721,9 +721,10 @@ def evaluate_model_on_tasks(
                         # Evaluate on all test examples and create separate results for each
                         for test_idx in range(num_test_examples):
                             test_example = test_examples[test_idx]
-                            target_input = test_example["input"].unsqueeze(
-                                0
-                            )  # Add batch dimension
+                            # test_example["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
+                            target_input = test_example["input"].squeeze(
+                                1
+                            )  # [1, 30, 30]
                             target_output = test_example["output"].unsqueeze(0)
 
                             if is_patch_model:
@@ -742,20 +743,13 @@ def evaluate_model_on_tasks(
                                     1
                                 )  # [1, 30, 30]
 
-                                # Ensure test input is 3D: [1, 30, 30] for patch model
-                                test_input_clean = target_input.squeeze(
-                                    1
-                                )  # Remove channel dim: [1, 30, 30]
-
-                                # Patch model expects [total_queries, 30, 30] where total_queries=1 in our case
-                                # So we pass [1, 30, 30] directly
-
+                                # target_input is already [1, 30, 30], which is what the model expects
                                 target_logits = model(
                                     support1_input,
                                     support1_output,
                                     support2_input,
                                     support2_output,
-                                    test_input_clean,
+                                    target_input,
                                 )
                             else:
                                 # ResNet model - use decoder with rule latents
@@ -868,7 +862,8 @@ def evaluate_model_on_tasks(
                     # Use first test example only (original behavior)
                     test_example = test_examples[0] if test_examples else None
                     if test_example:
-                        target_input = test_example["input"].unsqueeze(0)
+                        # test_example["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
+                        target_input = test_example["input"].squeeze(1)  # [1, 30, 30]
                         target_output = test_example["output"].unsqueeze(0)
 
                         if is_patch_model:
@@ -886,20 +881,13 @@ def evaluate_model_on_tasks(
                                 1
                             )  # [1, 30, 30]
 
-                            # Ensure test input is 3D: [1, 30, 30] for patch model
-                            test_input_clean = target_input.squeeze(
-                                1
-                            )  # Remove channel dim: [1, 30, 30]
-
-                            # Patch model expects [total_queries, 30, 30] where total_queries=1 in our case
-                            # So we pass [1, 30, 30] directly
-
+                            # target_input is already [1, 30, 30], which is what the model expects
                             target_logits = model(
                                 support1_input,
                                 support1_output,
                                 support2_input,
                                 support2_output,
-                                test_input_clean,
+                                target_input,
                             )
                         else:
                             # ResNet model - use decoder with rule latents
@@ -915,7 +903,8 @@ def evaluate_model_on_tasks(
 
                 if evaluation_mode == "holdout" and holdout_example is not None:
                     # Evaluate on holdout example
-                    target_input = holdout_example["input"].unsqueeze(0)
+                    # holdout_example["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
+                    target_input = holdout_example["input"].squeeze(1)  # [1, 30, 30]
                     target_output = holdout_example["output"].unsqueeze(0)
 
                     if is_patch_model:
@@ -933,20 +922,14 @@ def evaluate_model_on_tasks(
                             1
                         )  # [1, 30, 30]
 
-                        # Ensure test input is 3D: [1, 30, 30] for patch model
-                        test_input_clean = target_input.squeeze(
-                            1
-                        )  # Remove channel dim: [1, 30, 30]
-
-                        # Patch model expects [total_queries, 30, 30] where total_queries=1 in our case
-                        # So we pass [1, 30, 30] directly
+                        # target_input is already [1, 30, 30], which is what the model expects
 
                         target_logits = model(
                             support1_input,
                             support1_output,
                             support2_input,
                             support2_output,
-                            test_input_clean,
+                            target_input,
                         )
                     else:
                         # ResNet model - use decoder with rule latents
@@ -959,7 +942,8 @@ def evaluate_model_on_tasks(
                 else:
                     # Fallback to first test example
                     test_example = test_examples[0]
-                    target_input = test_example["input"].unsqueeze(0)
+                    # test_example["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
+                    target_input = test_example["input"].squeeze(1)  # [1, 30, 30]
                     target_output = test_example["output"].unsqueeze(0)
 
                     if is_patch_model:
@@ -977,20 +961,14 @@ def evaluate_model_on_tasks(
                             1
                         )  # [1, 30, 30]
 
-                        # Ensure test input is 3D: [1, 30, 30] for patch model
-                        test_input_clean = target_input.squeeze(
-                            1
-                        )  # Remove channel dim: [1, 30, 30]
-
-                        # Patch model expects [total_queries, 30, 30] where total_queries=1 in our case
-                        # So we pass [1, 30, 30] directly
+                        # target_input is already [1, 30, 30], which is what the model expects
 
                         target_logits = model(
                             support1_input,
                             support1_output,
                             support2_input,
                             support2_output,
-                            test_input_clean,
+                            target_input,
                         )
                     else:
                         # ResNet model - use decoder with rule latents
@@ -1314,13 +1292,11 @@ def test_all_combinations(
                                     1
                                 )  # [1, 30, 30]
 
-                                # Ensure test input is 3D: [1, 30, 30] for patch model
+                                # Ensure test input is properly formatted for patch model
+                                # test_example["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
                                 test_input_clean = test_example["input"].squeeze(
                                     1
-                                )  # Remove channel dim: [1, 30, 30]
-
-                                # Patch model expects [total_queries, 30, 30] where total_queries=1 in our case
-                                # So we pass [1, 30, 30] directly
+                                )  # [1, 30, 30]
 
                                 logits = model(
                                     support1_input,
@@ -1456,13 +1432,9 @@ def test_all_combinations(
                                 1
                             )  # [1, 30, 30]
 
-                            # Ensure test input is 3D: [1, 30, 30] for patch model
-                            test_input_clean = target["input"].squeeze(
-                                1
-                            )  # Remove channel dim: [1, 30, 30]
-
-                            # Patch model expects [total_queries, 30, 30] where total_queries=1 in our case
-                            # So we pass [1, 30, 30] directly
+                            # Ensure test input is properly formatted for patch model
+                            # target["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
+                            test_input_clean = target["input"].squeeze(1)  # [1, 30, 30]
 
                             logits = model(
                                 support1_input,
@@ -1495,20 +1467,17 @@ def test_all_combinations(
                             1
                         )  # [1, 30, 30]
 
-                        # Ensure test input is 3D: [1, 30, 30]
-                        test_input_clean = target["input"].squeeze(
-                            1
-                        )  # Remove channel dim: [1, 30, 30]
-
-                        # Patch model expects [total_queries, 30, 30] where total_queries=1 in our case
-                        # So we pass [1, 30, 30] directly
+                        # Ensure test input is properly formatted for patch model
+                        # target["input"] is [1, 1, 30, 30], we need [1, 30, 30]
+                        # target["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
+                        test_input_clean = target["input"].squeeze(1)  # [1, 30, 30]
 
                         logits = model(
                             support1_input,
                             support1_output,
                             support2_input,
                             support2_output,
-                            test_input_clean,
+                            target["input"],
                         )
                     else:
                         # ResNet model - use decoder with rule latents
@@ -1533,20 +1502,17 @@ def test_all_combinations(
                             1
                         )  # [1, 30, 30]
 
-                        # Ensure test input is 3D: [1, 30, 30]
-                        test_input_clean = target["input"].squeeze(
-                            1
-                        )  # Remove channel dim: [1, 30, 30]
-
-                        # Patch model expects [total_queries, 30, 30] where total_queries=1 in our case
-                        # So we pass [1, 30, 30] directly
+                        # Ensure test input is properly formatted for patch model
+                        # target["input"] is [1, 1, 30, 30], we need [1, 30, 30]
+                        # target["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
+                        test_input_clean = target["input"].squeeze(1)  # [1, 30, 30]
 
                         logits = model(
                             support1_input,
                             support1_output,
                             support2_input,
                             support2_output,
-                            test_input_clean,
+                            target["input"],
                         )
                     else:
                         # ResNet model - use decoder with rule latents

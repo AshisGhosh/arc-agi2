@@ -1,8 +1,6 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from typing import Dict, Any, List
-import random
+from typing import Dict, Any
 
 from .base import BaseARCModel
 from .patch_tokenizer import PatchTokenizer, PositionalEncoding, compute_delta_tokens
@@ -42,6 +40,13 @@ class PatchCrossAttentionModel(BaseARCModel):
             model_dim=self.model_dim,
         )
 
+        # Separate tokenizer for delta tokens (handles 20 colors: 0-9 for positive, 10-19 for negative)
+        self.delta_tokenizer = PatchTokenizer(
+            patch_size=self.patch_size,
+            num_colors=20,  # 20 colors to handle sign information
+            model_dim=self.model_dim,
+        )
+
         self.pos_encoding = PositionalEncoding(
             num_patches_h=self.image_size // self.patch_size,
             num_patches_w=self.image_size // self.patch_size,
@@ -64,36 +69,10 @@ class PatchCrossAttentionModel(BaseARCModel):
         # RMSNorm for support tokens (one-time normalization)
         self.support_norm = nn.RMSNorm(self.model_dim)
 
-    def apply_palette_permutation(
-        self, images: torch.Tensor, permutation: List[int]
-    ) -> torch.Tensor:
-        """
-        Apply palette permutation to images.
-
-        Args:
-            images: [B, H, W] with values 0-9
-            permutation: List of 10 integers representing color mapping
-
-        Returns:
-            permuted_images: [B, H, W] with permuted colors
-        """
-        permuted_images = torch.zeros_like(images)
-        for old_color, new_color in enumerate(permutation):
-            mask = images == old_color
-            permuted_images[mask] = new_color
-        return permuted_images
-
-    def generate_palette_permutation(self) -> List[int]:
-        """Generate random palette permutation for episode."""
-        colors = list(range(10))
-        random.shuffle(colors)
-        return colors
-
     def tokenize_support_pair(
         self,
         support_input: torch.Tensor,
         support_output: torch.Tensor,
-        palette_permutation: List[int] = None,
     ) -> Dict[str, torch.Tensor]:
         """
         Tokenize a support pair (X_s, Y_s) into X and Δ tokens.
@@ -101,19 +80,14 @@ class PatchCrossAttentionModel(BaseARCModel):
         Args:
             support_input: [H, W] with values 0-9
             support_output: [H, W] with values 0-9
-            palette_permutation: Optional color permutation
 
         Returns:
             Dictionary with 'x_tokens' and 'delta_tokens'
         """
-        # Apply palette permutation if provided
-        if palette_permutation is not None:
-            support_input = self.apply_palette_permutation(
-                support_input, palette_permutation
-            )
-            support_output = self.apply_palette_permutation(
-                support_output, palette_permutation
-            )
+        # Ensure inputs are on the same device as model parameters
+        device = next(self.parameters()).device
+        support_input = support_input.to(device)
+        support_output = support_output.to(device)
 
         # Tokenize input
         x_tokens = self.patch_tokenizer(
@@ -124,8 +98,8 @@ class PatchCrossAttentionModel(BaseARCModel):
         # Compute delta tokens
         delta_colors = compute_delta_tokens(
             support_input.unsqueeze(0), support_output.unsqueeze(0)
-        )  # [1, H, W]
-        delta_tokens = self.patch_tokenizer(delta_colors)  # [1, num_patches, model_dim]
+        )  # [1, H, W] with values 0-19
+        delta_tokens = self.delta_tokenizer(delta_colors)  # [1, num_patches, model_dim]
         delta_tokens = self.pos_encoding(delta_tokens)  # Add positional encoding
 
         return {"x_tokens": x_tokens, "delta_tokens": delta_tokens}
@@ -151,17 +125,22 @@ class PatchCrossAttentionModel(BaseARCModel):
         Returns:
             logits: [total_queries, 10, 30, 30] - Per-pixel classification logits
         """
-        B = example1_input.size(0)
+        # Ensure all inputs are on the same device as model parameters
+        device = next(self.parameters()).device
+        example1_input = example1_input.to(device)
+        example1_output = example1_output.to(device)
+        example2_input = example2_input.to(device)
+        example2_output = example2_output.to(device)
+        target_input = target_input.to(device)
 
-        # Generate palette permutation for this episode
-        palette_permutation = self.generate_palette_permutation()
+        B = example1_input.size(0)
 
         # Tokenize support pairs (already in grayscale format)
         support1_tokens = self.tokenize_support_pair(
-            example1_input[0], example1_output[0], palette_permutation
+            example1_input[0], example1_output[0]
         )
         support2_tokens = self.tokenize_support_pair(
-            example2_input[0], example2_output[0], palette_permutation
+            example2_input[0], example2_output[0]
         )
 
         # Build support context: [X₁, Δ₁, X₂, Δ₂]
@@ -184,13 +163,12 @@ class PatchCrossAttentionModel(BaseARCModel):
         # Process all query inputs
         all_logits = []
         for i in range(target_input.size(0)):
+            # Get test input - should be [30, 30]
+            test_input = target_input[i]  # [30, 30]
+
             # Tokenize test input (already in grayscale format)
-            test_input_permuted = self.apply_palette_permutation(
-                target_input[i], palette_permutation
-            )
-            test_tokens = self.patch_tokenizer(
-                test_input_permuted.unsqueeze(0)
-            )  # [1, 100, d]
+            # Add batch dimension for tokenizer: [30, 30] -> [1, 30, 30]
+            test_tokens = self.patch_tokenizer(test_input.unsqueeze(0))  # [1, 100, d]
             test_tokens = self.pos_encoding(test_tokens)  # Add positional encoding
 
             # Use support tokens for this specific query (expand to match test_tokens batch size)
@@ -209,34 +187,6 @@ class PatchCrossAttentionModel(BaseARCModel):
         final_logits = torch.cat(all_logits, dim=0)  # [total_queries, 10, 30, 30]
 
         return final_logits
-
-    def _convert_resnet_to_grayscale(self, rgb_image: torch.Tensor) -> torch.Tensor:
-        """
-        Convert ResNet format (64x64 RGB) to grayscale 30x30.
-        This is a simplified conversion for compatibility.
-
-        Args:
-            rgb_image: [B, 3, 64, 64] - RGB image in [-1, 1] range
-
-        Returns:
-            grayscale: [B, 30, 30] - Grayscale image with values 0-9
-        """
-        B, C, H, W = rgb_image.shape
-
-        # Convert to grayscale (simplified)
-        gray = torch.mean(rgb_image, dim=1)  # [B, 64, 64]
-
-        # Resize to 30x30
-        gray = F.interpolate(gray.unsqueeze(1), size=(30, 30), mode="nearest").squeeze(
-            1
-        )  # [B, 30, 30]
-
-        # Convert from [-1, 1] to [0, 9] range (simplified)
-        gray = (gray + 1) / 2  # [0, 1]
-        gray = gray * 9  # [0, 9]
-        gray = torch.round(gray).long()  # [0, 9]
-
-        return gray
 
     def forward_rule_latent_training(
         self,
