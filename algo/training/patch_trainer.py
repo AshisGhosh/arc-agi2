@@ -64,17 +64,67 @@ class PatchTrainer(BaseTrainer):
 
             batch_size = support1_inputs.size(0)
 
-            # Single forward pass for entire batch
-            logits = self.model(
-                support1_inputs,
-                support1_outputs,
-                support2_inputs,
-                support2_outputs,
-                test_inputs,
-            )  # [B, 10, 30, 30]
+            # Check if we should use support examples as additional test inputs
+            use_support_as_test = getattr(self.config, "use_support_as_test", False)
 
-            # Calculate loss for entire batch
-            loss, components = self._calculate_patch_loss(logits, test_targets)
+            if use_support_as_test:
+                # Create additional test cases using support examples
+                # Each support example becomes a test input with its corresponding output as target
+                all_test_inputs = [test_inputs]  # Start with original test inputs
+                all_test_targets = [test_targets]  # Start with original test targets
+
+                # Add support1 as test case
+                all_test_inputs.append(support1_inputs)
+                all_test_targets.append(support1_outputs)
+
+                # Add support2 as test case
+                all_test_inputs.append(support2_inputs)
+                all_test_targets.append(support2_outputs)
+
+                # Concatenate all test cases
+                all_test_inputs = torch.cat(all_test_inputs, dim=0)  # [3B, 30, 30]
+                all_test_targets = torch.cat(all_test_targets, dim=0)  # [3B, 30, 30]
+
+                # Repeat support examples for each test case
+                support1_inputs_expanded = support1_inputs.repeat(
+                    3, 1, 1
+                )  # [3B, 30, 30]
+                support1_outputs_expanded = support1_outputs.repeat(
+                    3, 1, 1
+                )  # [3B, 30, 30]
+                support2_inputs_expanded = support2_inputs.repeat(
+                    3, 1, 1
+                )  # [3B, 30, 30]
+                support2_outputs_expanded = support2_outputs.repeat(
+                    3, 1, 1
+                )  # [3B, 30, 30]
+
+                # Single forward pass for entire expanded batch
+                logits = self.model(
+                    support1_inputs_expanded,
+                    support1_outputs_expanded,
+                    support2_inputs_expanded,
+                    support2_outputs_expanded,
+                    all_test_inputs,
+                )  # [3B, 10, 30, 30]
+
+                # Calculate loss for entire expanded batch
+                loss, components = self._calculate_patch_loss(logits, all_test_targets)
+
+                # Update batch size for metrics
+                batch_size = all_test_inputs.size(0)
+            else:
+                # Original behavior - single forward pass for entire batch
+                logits = self.model(
+                    support1_inputs,
+                    support1_outputs,
+                    support2_inputs,
+                    support2_outputs,
+                    test_inputs,
+                )  # [B, 10, 30, 30]
+
+                # Calculate loss for entire batch
+                loss, components = self._calculate_patch_loss(logits, test_targets)
 
             # Backward pass
             self.optimizer.zero_grad()

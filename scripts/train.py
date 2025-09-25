@@ -103,6 +103,7 @@ def save_training_info(
             "enable_counterfactuals": config.enable_counterfactuals,
             "counterfactual_transform": config.counterfactual_transform,
             "rule_latent_regularization_weight": config.rule_latent_regularization_weight,
+            "use_support_as_test": config.use_support_as_test,
             "device": str(config.device),
             "random_seed": config.random_seed,
             "deterministic": config.deterministic,

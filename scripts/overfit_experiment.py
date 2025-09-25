@@ -140,6 +140,7 @@ class OverfitExperiment:
                 "enable_counterfactuals": self.config.enable_counterfactuals,
                 "counterfactual_transform": self.config.counterfactual_transform,
                 "rule_latent_regularization_weight": self.config.rule_latent_regularization_weight,
+                "use_support_as_test": self.config.use_support_as_test,
                 "device": str(self.config.device),
                 "random_seed": self.config.random_seed,
                 "deterministic": self.config.deterministic,

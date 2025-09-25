@@ -1684,6 +1684,11 @@ def main():
         st.sidebar.write(f"**model dim:** {config_info.get('model_dim', 128)}")
         if "total_parameters" in model_info:
             st.sidebar.write(f"**parameters:** {model_info['total_parameters']:,}")
+        # Show support-as-test info for patch models
+        use_support_as_test = config_info.get("use_support_as_test", False)
+        st.sidebar.write(
+            f"**support as test:** {'✅ enabled' if use_support_as_test else '❌ disabled'}"
+        )
     else:
         st.sidebar.write("**architecture:** resnet encoder + mlp decoder")
         st.sidebar.write(f"**rule dim:** {config_info.get('rule_dim', 32)}")

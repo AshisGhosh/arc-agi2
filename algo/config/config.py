@@ -23,6 +23,9 @@ class Config:
     max_grad_norm: float = 1.0
     dropout: float = 0.1
 
+    # Patch model specific training options
+    use_support_as_test: bool = True  # Use support examples as additional test inputs
+
     # Data paths
     data_dir: str = "data/raw"
     processed_dir: str = "data/processed"
