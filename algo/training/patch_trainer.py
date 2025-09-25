@@ -44,7 +44,11 @@ class PatchTrainer(BaseTrainer):
         self.model.train()
         total_loss = 0.0
         total_examples = 0
-        loss_components = {"cross_entropy_loss": 0.0, "accuracy": 0.0}
+        loss_components = {
+            "cross_entropy_loss": 0.0,
+            "patch_loss": 0.0,
+            "accuracy": 0.0,
+        }
 
         # Progress bar
         pbar = tqdm(train_loader, desc=f"Epoch {self.current_epoch} (Patch)")
@@ -109,7 +113,7 @@ class PatchTrainer(BaseTrainer):
         self, logits: torch.Tensor, targets: torch.Tensor
     ) -> tuple:
         """
-        Calculate loss for patch-based model.
+        Calculate enhanced loss for patch-based model with both pixel and patch supervision.
 
         Args:
             logits: [B, 10, 30, 30] - Per-pixel classification logits
@@ -124,12 +128,19 @@ class PatchTrainer(BaseTrainer):
         if targets.dim() == 4 and targets.size(1) == 1:
             targets = targets.squeeze(1)  # [B, 1, 30, 30] -> [B, 30, 30]
 
-        # Flatten spatial dimensions for cross-entropy
+        # Primary pixel-level cross-entropy loss
         logits_flat = logits.reshape(B, 10, -1)  # [B, 10, 900]
         targets_flat = targets.reshape(B, -1)  # [B, 900]
+        pixel_loss = torch.nn.functional.cross_entropy(logits_flat, targets_flat.long())
 
-        # Cross-entropy loss
-        loss = torch.nn.functional.cross_entropy(logits_flat, targets_flat.long())
+        # Additional patch-level supervision for better shape learning
+        patch_loss = self._calculate_patch_level_loss(logits, targets)
+
+        # Combine losses with configurable weights
+        pixel_weight = getattr(self.config, "pixel_loss_weight", 1.0)
+        patch_weight = getattr(self.config, "patch_loss_weight", 0.1)
+
+        total_loss = pixel_weight * pixel_loss + patch_weight * patch_loss
 
         # Calculate accuracy for monitoring
         with torch.no_grad():
@@ -137,9 +148,54 @@ class PatchTrainer(BaseTrainer):
             accuracy = (predictions == targets_flat).float().mean()
 
         loss_components = {
-            "cross_entropy_loss": loss.item(),
+            "cross_entropy_loss": pixel_loss.item(),
+            "patch_loss": patch_loss.item(),
+            "total_loss": total_loss.item(),
             "accuracy": accuracy.item(),
-            "total_loss": loss.item(),
         }
 
-        return loss, loss_components
+        return total_loss, loss_components
+
+    def _calculate_patch_level_loss(
+        self, logits: torch.Tensor, targets: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Calculate patch-level loss to encourage consistent patch predictions.
+
+        This helps the model learn to generate coherent shapes at the patch level.
+        """
+        B, C, H, W = logits.shape
+        patch_size = 3  # Should match model's patch_size
+
+        # Reshape to patches
+        num_patches_h = H // patch_size
+        num_patches_w = W // patch_size
+
+        # Reshape logits to patches: [B, C, H, W] -> [B, C, num_patches_h, patch_size, num_patches_w, patch_size]
+        logits_patches = logits.view(
+            B, C, num_patches_h, patch_size, num_patches_w, patch_size
+        )
+        targets_patches = targets.view(
+            B, num_patches_h, patch_size, num_patches_w, patch_size
+        )
+
+        # Get patch-level predictions by averaging logits within each patch
+        logits_patch_avg = logits_patches.mean(
+            dim=(3, 5)
+        )  # [B, C, num_patches_h, num_patches_w]
+
+        # Get patch-level targets by taking the most common color in each patch
+        targets_patch_mode = torch.mode(
+            targets_patches.view(B, num_patches_h, num_patches_w, -1), dim=-1
+        )[0]
+
+        # Flatten for cross-entropy
+        logits_patch_flat = logits_patch_avg.view(B, C, -1)  # [B, C, num_patches]
+        targets_patch_flat = targets_patch_mode.view(B, -1)  # [B, num_patches]
+
+        # Patch-level cross-entropy loss
+        patch_loss = torch.nn.functional.cross_entropy(
+            logits_patch_flat, targets_patch_flat.long()
+        )
+
+        return patch_loss

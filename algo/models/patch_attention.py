@@ -15,7 +15,7 @@ class PatchCrossAttentionModel(BaseARCModel):
     1. Tokenize 30x30 images into 3x3 patches (100 tokens)
     2. Support pairs: (X_s, Y_s) -> compute Δ = onehot(Y_s) - onehot(X_s)
     3. Cross-attention: test tokens attend to support tokens
-    4. Output: per-pixel logits via PixelShuffle upsampling
+    4. Output: per-pixel logits via PixelShuffle upsampling with refinement
     """
 
     def __init__(self, config):

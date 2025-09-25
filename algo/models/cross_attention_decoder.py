@@ -160,9 +160,11 @@ class CrossAttentionDecoder(nn.Module):
 
 class PatchOutputHead(nn.Module):
     """
-    Output head for patch-based model.
+    Output head for patch-based model using PixelShuffle upsampling.
 
-    Converts patch tokens back to per-pixel logits.
+    Uses PixelShuffle for high-quality upsampling from patch-level to pixel-level.
+    This approach provides better spatial awareness and shape generation compared
+    to nearest neighbor interpolation or simple ConvTranspose2d.
     """
 
     def __init__(self, model_dim: int, num_colors: int, patch_size: int = 3):
@@ -171,12 +173,23 @@ class PatchOutputHead(nn.Module):
         self.num_colors = num_colors
         self.patch_size = patch_size
 
-        # Linear projection to per-patch logits
-        self.patch_logits = nn.Linear(model_dim, num_colors)
+        # Project to per-patch features with more channels for PixelShuffle
+        # PixelShuffle requires channels to be divisible by patch_size^2
+        self.patch_features = nn.Linear(model_dim, num_colors * patch_size * patch_size)
+
+        # PixelShuffle upsampling
+        self.pixel_shuffle = nn.PixelShuffle(patch_size)
+
+        # Optional refinement after PixelShuffle
+        self.refinement = nn.Sequential(
+            nn.Conv2d(num_colors, num_colors * 2, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(num_colors * 2, num_colors, kernel_size=3, padding=1),
+        )
 
     def forward(self, patch_tokens: torch.Tensor) -> torch.Tensor:
         """
-        Convert patch tokens to per-pixel logits.
+        Convert patch tokens to per-pixel logits using PixelShuffle.
 
         Args:
             patch_tokens: [B, num_patches, model_dim]
@@ -186,23 +199,27 @@ class PatchOutputHead(nn.Module):
         """
         B, num_patches, d = patch_tokens.shape
 
-        # Project to per-patch logits
-        patch_logits = self.patch_logits(patch_tokens)  # [B, num_patches, num_colors]
+        # Project to per-patch features
+        patch_features = self.patch_features(
+            patch_tokens
+        )  # [B, num_patches, num_colors * patch_size^2]
 
         # Reshape to spatial format
-        # Assume 10x10 patches for 30x30 image
         num_patches_h = num_patches_w = int(num_patches**0.5)
-        patch_logits = patch_logits.view(
-            B, num_patches_h, num_patches_w, self.num_colors
+        patch_features = patch_features.view(
+            B,
+            num_patches_h,
+            num_patches_w,
+            self.num_colors * self.patch_size * self.patch_size,
         )
-        patch_logits = patch_logits.permute(
+        patch_features = patch_features.permute(
             0, 3, 1, 2
-        )  # [B, num_colors, num_patches_h, num_patches_w]
+        )  # [B, num_colors * patch_size^2, num_patches_h, num_patches_w]
 
-        # Upsample from 10x10 to 30x30 using interpolation
-        # PixelShuffle requires channels to be divisible by patch_size^2, so we use interpolation instead
-        logits = F.interpolate(
-            patch_logits, size=(30, 30), mode="nearest"
-        )  # [B, num_colors, 30, 30]
+        # PixelShuffle upsampling from 10x10 to 30x30
+        logits = self.pixel_shuffle(patch_features)  # [B, num_colors, 30, 30]
+
+        # Apply refinement network
+        logits = self.refinement(logits)  # [B, num_colors, 30, 30]
 
         return logits
