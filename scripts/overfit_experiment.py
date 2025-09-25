@@ -124,7 +124,6 @@ class OverfitExperiment:
             "experiment_name": self.experiment_name,
             "start_time": datetime.now().isoformat(),
             "config": {
-                "decoder_type": getattr(self.config, "decoder_type", "mlp"),
                 "batch_size": self.config.batch_size,
                 "learning_rate": self.config.learning_rate,
                 "weight_decay": self.config.weight_decay,
@@ -410,6 +409,7 @@ class OverfitExperiment:
                 support_example_inputs_rgb = batch["support_example_inputs_rgb"]
                 support_example_outputs_rgb = batch["support_example_outputs_rgb"]
                 support_example_inputs = batch["support_example_inputs"]
+                support_example_outputs = batch["support_example_outputs"]
 
                 # Get all training examples for each task in the batch
                 batch_size = len(support_example_inputs)
@@ -432,49 +432,51 @@ class OverfitExperiment:
                     all_train_inputs_list.append(train_inputs)
                     num_train_list.append(len(train_inputs))
 
-                # Create rule latent inputs from support examples
-                # Check if we have RGB support examples (ResNet) or just grayscale (Patch)
-                if support_example_inputs_rgb[0] is not None:
-                    # ResNet dataset - create rule_latent_inputs from RGB support examples
-                    rule_latent_inputs = torch.zeros([batch_size, 2, 2, 3, 64, 64]).to(
-                        device
-                    )
-                    for i in range(batch_size):
-                        # Use RGB support examples for ResNet
-                        rule_latent_inputs[i, 0, 0] = support_example_inputs_rgb[i][
-                            0
-                        ]  # [3, 64, 64]
-                        rule_latent_inputs[i, 0, 1] = support_example_outputs_rgb[i][
-                            0
-                        ]  # [3, 64, 64]
-                        rule_latent_inputs[i, 1, 0] = support_example_inputs_rgb[i][
-                            1
-                        ]  # [3, 64, 64]
-                        rule_latent_inputs[i, 1, 1] = support_example_outputs_rgb[i][
-                            1
-                        ]  # [3, 64, 64]
+                # Determine model type and handle accordingly
+                is_patch_model = hasattr(model, "patch_tokenizer")
 
-                    # Pad all training inputs to consistent shape
-                    all_train_inputs = torch.zeros(
-                        [batch_size, max_train, 1, 30, 30]
-                    ).to(device)
-                    for i, train_inputs in enumerate(all_train_inputs_list):
-                        for j, train_input in enumerate(train_inputs):
-                            all_train_inputs[i, j] = train_input
-
-                    num_train = torch.tensor(num_train_list, dtype=torch.long).to(
-                        device
-                    )
-
-                    # Forward pass with batched rule latent training
-                    outputs = model.forward_rule_latent_training(
-                        rule_latent_inputs, all_train_inputs, num_train
-                    )
-                else:
-                    # Patch dataset - use grayscale support examples
-                    # For patch models, we need to handle this differently
-                    # For now, create a dummy outputs structure
+                if is_patch_model:
+                    # Patch model - no rule latents needed
                     outputs = {"rule_latents": None}
+                else:
+                    # ResNet model - create rule latent inputs from RGB support examples
+                    if support_example_inputs_rgb[0] is not None:
+                        rule_latent_inputs = torch.zeros(
+                            [batch_size, 2, 2, 3, 64, 64]
+                        ).to(device)
+                        for i in range(batch_size):
+                            # Use RGB support examples for ResNet
+                            rule_latent_inputs[i, 0, 0] = support_example_inputs_rgb[i][
+                                0
+                            ]  # [3, 64, 64]
+                            rule_latent_inputs[i, 0, 1] = support_example_outputs_rgb[
+                                i
+                            ][0]  # [3, 64, 64]
+                            rule_latent_inputs[i, 1, 0] = support_example_inputs_rgb[i][
+                                1
+                            ]  # [3, 64, 64]
+                            rule_latent_inputs[i, 1, 1] = support_example_outputs_rgb[
+                                i
+                            ][1]  # [3, 64, 64]
+
+                        # Pad all training inputs to consistent shape
+                        all_train_inputs = torch.zeros(
+                            [batch_size, max_train, 1, 30, 30]
+                        ).to(device)
+                        for i, train_inputs in enumerate(all_train_inputs_list):
+                            for j, train_input in enumerate(train_inputs):
+                                all_train_inputs[i, j] = train_input
+
+                        num_train = torch.tensor(num_train_list, dtype=torch.long).to(
+                            device
+                        )
+
+                        # Forward pass with batched rule latent training
+                        outputs = model.forward_rule_latent_training(
+                            rule_latent_inputs, all_train_inputs, num_train
+                        )
+                    else:
+                        outputs = {"rule_latents": None}
 
                 # Process each task in the batch
                 for i in range(batch_size):
@@ -492,9 +494,35 @@ class OverfitExperiment:
                         ]  # [1, 30, 30]
 
                         # Evaluate on this test example
-                        test_logits = model.decoder(
-                            outputs["rule_latents"][i : i + 1], test_input
-                        )
+                        if is_patch_model:
+                            # Patch model - use direct forward pass
+                            # Get support examples for this task
+                            support1_input = (
+                                support_example_inputs[i][0].unsqueeze(0).squeeze(1)
+                            )  # [1, 30, 30]
+                            support1_output = (
+                                support_example_outputs[i][0].unsqueeze(0).squeeze(1)
+                            )  # [1, 30, 30]
+                            support2_input = (
+                                support_example_inputs[i][1].unsqueeze(0).squeeze(1)
+                            )  # [1, 30, 30]
+                            support2_output = (
+                                support_example_outputs[i][1].unsqueeze(0).squeeze(1)
+                            )  # [1, 30, 30]
+                            test_input_clean = test_input.squeeze(1)  # [1, 30, 30]
+
+                            test_logits = model(
+                                support1_input,
+                                support1_output,
+                                support2_input,
+                                support2_output,
+                                test_input_clean,
+                            )
+                        else:
+                            # ResNet model - use decoder with rule latents
+                            test_logits = model.decoder(
+                                outputs["rule_latents"][i : i + 1], test_input
+                            )
                         test_target = test_output
 
                         # calculate metrics using existing functions
@@ -541,10 +569,37 @@ class OverfitExperiment:
 
                     # evaluate on holdout target (if available)
                     if has_holdout[i]:
-                        holdout_logits = model.decoder(
-                            outputs["rule_latents"][i : i + 1],
-                            holdout_inputs[i : i + 1],
-                        )
+                        if is_patch_model:
+                            # Patch model - use direct forward pass for holdout
+                            support1_input = (
+                                support_example_inputs[i][0].unsqueeze(0).squeeze(1)
+                            )  # [1, 30, 30]
+                            support1_output = (
+                                support_example_outputs[i][0].unsqueeze(0).squeeze(1)
+                            )  # [1, 30, 30]
+                            support2_input = (
+                                support_example_inputs[i][1].unsqueeze(0).squeeze(1)
+                            )  # [1, 30, 30]
+                            support2_output = (
+                                support_example_outputs[i][1].unsqueeze(0).squeeze(1)
+                            )  # [1, 30, 30]
+                            holdout_input_clean = holdout_inputs[i : i + 1].squeeze(
+                                1
+                            )  # [1, 30, 30]
+
+                            holdout_logits = model(
+                                support1_input,
+                                support1_output,
+                                support2_input,
+                                support2_output,
+                                holdout_input_clean,
+                            )
+                        else:
+                            # ResNet model - use decoder with rule latents
+                            holdout_logits = model.decoder(
+                                outputs["rule_latents"][i : i + 1],
+                                holdout_inputs[i : i + 1],
+                            )
                         holdout_target = holdout_outputs[i : i + 1]
 
                         # calculate holdout metrics

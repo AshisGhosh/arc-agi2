@@ -139,11 +139,15 @@ class ResNetTrainer(BaseTrainer):
 
                 # Train decoder on support input→output pairs
                 for support_idx in range(2):  # 2 support examples
-                    support_input = support_example_inputs[i][support_idx].unsqueeze(
-                        0
+                    support_input = (
+                        support_example_inputs[i][support_idx]
+                        .unsqueeze(0)
+                        .to(self.device)
                     )  # [1, 30, 30]
-                    support_output = support_example_outputs[i][support_idx].unsqueeze(
-                        0
+                    support_output = (
+                        support_example_outputs[i][support_idx]
+                        .unsqueeze(0)
+                        .to(self.device)
                     )  # [1, 30, 30]
 
                     # Evaluate decoder on support pair

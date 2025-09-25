@@ -45,7 +45,7 @@ class Config:
     early_stopping_patience: int = 50
 
     # Device
-    device: str = "cuda" if os.environ.get("CUDA_VISIBLE_DEVICES") else "cpu"
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Deterministic training
     random_seed: int = 42
@@ -69,7 +69,7 @@ class Config:
 
     # Model configuration
     model_type: str = "simple_arc"  # "simple_arc" or "patch_attention"
-    decoder_type: str = "mlp"  # "mlp" or future transformer types
+    # model_type: str = "patch_attention"  # "simple_arc" or "patch_attention"
 
     # Patch attention model specific configs
     patch_size: int = 3

@@ -54,7 +54,7 @@ class PatchTrainer(BaseTrainer):
             test_inputs = batch["test_inputs"].to(
                 self.device
             )  # [B, max_test_examples, 30, 30]
-            test_targets = batch["test_targets"].to(
+            test_targets = batch["test_outputs"].to(
                 self.device
             )  # [B, max_test_examples, 30, 30]
             test_masks = batch["test_masks"].to(self.device)  # [B, max_test_examples]
@@ -91,21 +91,34 @@ class PatchTrainer(BaseTrainer):
 
                         # Forward pass through patch model
                         # Get support examples for this task (should be grayscale [1, 30, 30])
-                        support_input = support_example_inputs[i][0].unsqueeze(
-                            0
+                        support1_input = (
+                            support_example_inputs[i][0].unsqueeze(0).to(self.device)
                         )  # [1, 30, 30]
-                        support_output = support_example_outputs[i][0].unsqueeze(
-                            0
+                        support1_output = (
+                            support_example_outputs[i][0].unsqueeze(0).to(self.device)
+                        )  # [1, 30, 30]
+                        support2_input = (
+                            support_example_inputs[i][1].unsqueeze(0).to(self.device)
+                        )  # [1, 30, 30]
+                        support2_output = (
+                            support_example_outputs[i][1].unsqueeze(0).to(self.device)
                         )  # [1, 30, 30]
 
                         # Remove channel dimension to get [1, 30, 30]
-                        support_input = support_input.squeeze(1)  # [1, 30, 30]
-                        support_output = support_output.squeeze(1)  # [1, 30, 30]
+                        support1_input = support1_input.squeeze(1)  # [1, 30, 30]
+                        support1_output = support1_output.squeeze(1)  # [1, 30, 30]
+                        support2_input = support2_input.squeeze(1)  # [1, 30, 30]
+                        support2_output = support2_output.squeeze(1)  # [1, 30, 30]
+
+                        # Remove channel dimension from test input
+                        test_input_clean = test_input.squeeze(1)  # [1, 30, 30]
 
                         logits = self.model(
-                            support_input,  # [1, 30, 30] - support input
-                            support_output,  # [1, 30, 30] - support output
-                            test_input,  # [1, 30, 30] - test input
+                            support1_input,  # [1, 30, 30] - first support input
+                            support1_output,  # [1, 30, 30] - first support output
+                            support2_input,  # [1, 30, 30] - second support input
+                            support2_output,  # [1, 30, 30] - second support output
+                            test_input_clean,  # [1, 30, 30] - test input
                         )
 
                         # Calculate loss for this test example

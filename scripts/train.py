@@ -87,7 +87,6 @@ def save_training_info(
         "dataset": dataset_name,
         "start_time": datetime.now().isoformat(),
         "config": {
-            "decoder_type": getattr(config, "decoder_type", "mlp"),
             "batch_size": config.batch_size,
             "learning_rate": config.learning_rate,
             "weight_decay": config.weight_decay,

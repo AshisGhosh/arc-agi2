@@ -310,11 +310,18 @@ def load_experiment_info(experiment_dir: Path) -> Dict[str, Any]:
     training_info_path = experiment_dir / "training_info.json"
     if training_info_path.exists():
         with open(training_info_path, "r") as f:
-            info["training"] = json.load(f)
+            training_data = json.load(f)
+            # The training_info.json file contains the full experiment data
+            # Extract the nested "training" key for compatibility
+            info["training"] = training_data.get("training", {})
+            # Extract the nested "tasks" key for compatibility
+            info["tasks"] = training_data.get("tasks", {})
+            # Also store the full data for other uses
+            info["full_training_info"] = training_data
 
-    # load task selection
+    # load task selection (fallback if not in training_info.json)
     task_selection_path = experiment_dir / "task_selection.json"
-    if task_selection_path.exists():
+    if task_selection_path.exists() and "tasks" not in info:
         with open(task_selection_path, "r") as f:
             info["tasks"] = json.load(f)
 
@@ -652,48 +659,50 @@ def evaluate_model_on_tasks(
                         noise_config.noise_test_ratio,
                     )
 
-                # Check if we have RGB support examples (ResNet) or just grayscale (Patch)
-                if (
-                    "support_examples_rgb" in combo
-                    and combo["support_examples_rgb"] is not None
-                ):
-                    # ResNet dataset - use RGB support examples
-                    rgb_support_examples = combo["support_examples_rgb"]
-                    example1_input = rgb_support_examples[0]["input"]  # [1, 3, 64, 64]
-                    example1_output = rgb_support_examples[0][
-                        "output"
-                    ]  # [1, 3, 64, 64]
-                    example2_input = rgb_support_examples[1]["input"]  # [1, 3, 64, 64]
-                    example2_output = rgb_support_examples[1][
-                        "output"
-                    ]  # [1, 3, 64, 64]
+                # Determine model type and handle accordingly
+                is_patch_model = hasattr(model, "patch_tokenizer")
 
-                    # Create rule latent inputs tensor [1, 2, 2, 3, 64, 64]
-                    rule_latent_inputs = torch.zeros([1, 2, 2, 3, 64, 64])
-                    rule_latent_inputs[0, 0, 0] = example1_input.squeeze(
-                        0
-                    )  # [3, 64, 64]
-                    rule_latent_inputs[0, 0, 1] = example1_output.squeeze(0)
-                    rule_latent_inputs[0, 1, 0] = example2_input.squeeze(0)
-                    rule_latent_inputs[0, 1, 1] = example2_output.squeeze(0)
-
-                    # Run model inference
-                    outputs = model.forward_rule_latent_training(
-                        rule_latent_inputs,
-                        all_train_inputs,
-                        num_train,
-                    )
-                else:
-                    # Patch dataset - use grayscale support examples
-                    # For patch models, we need to use the model's forward method directly
-                    example1_input = support_examples[0]["input"]  # [1, 1, 30, 30]
-                    example1_output = support_examples[0]["output"]  # [1, 1, 30, 30]
-                    example2_input = support_examples[1]["input"]  # [1, 1, 30, 30]
-                    example2_output = support_examples[1]["output"]  # [1, 1, 30, 30]
-
-                    # For patch models, we'll handle this differently in the evaluation loop
-                    # For now, create a dummy outputs structure
+                if is_patch_model:
+                    # Patch model - no rule latents needed
                     outputs = {"rule_latents": None}
+                else:
+                    # ResNet model - create rule latent inputs from RGB support examples
+                    if (
+                        "support_examples_rgb" in combo
+                        and combo["support_examples_rgb"] is not None
+                    ):
+                        # ResNet dataset - use RGB support examples
+                        rgb_support_examples = combo["support_examples_rgb"]
+                        example1_input = rgb_support_examples[0][
+                            "input"
+                        ]  # [1, 3, 64, 64]
+                        example1_output = rgb_support_examples[0][
+                            "output"
+                        ]  # [1, 3, 64, 64]
+                        example2_input = rgb_support_examples[1][
+                            "input"
+                        ]  # [1, 3, 64, 64]
+                        example2_output = rgb_support_examples[1][
+                            "output"
+                        ]  # [1, 3, 64, 64]
+
+                        # Create rule latent inputs tensor [1, 2, 2, 3, 64, 64]
+                        rule_latent_inputs = torch.zeros([1, 2, 2, 3, 64, 64])
+                        rule_latent_inputs[0, 0, 0] = example1_input.squeeze(
+                            0
+                        )  # [3, 64, 64]
+                        rule_latent_inputs[0, 0, 1] = example1_output.squeeze(0)
+                        rule_latent_inputs[0, 1, 0] = example2_input.squeeze(0)
+                        rule_latent_inputs[0, 1, 1] = example2_output.squeeze(0)
+
+                        # Run model inference
+                        outputs = model.forward_rule_latent_training(
+                            rule_latent_inputs,
+                            all_train_inputs,
+                            num_train,
+                        )
+                    else:
+                        outputs = {"rule_latents": None}
 
                 # inject noise into rule latent if requested
                 if noise_config.inject_noise:
@@ -717,10 +726,38 @@ def evaluate_model_on_tasks(
                             )  # Add batch dimension
                             target_output = test_example["output"].unsqueeze(0)
 
-                            target_logits = model.decoder(
-                                outputs["rule_latents"][0:1],
-                                target_input,
-                            )
+                            if is_patch_model:
+                                # Patch model - use direct forward pass
+                                # Get support examples for this task
+                                support1_input = support_examples[0]["input"].squeeze(
+                                    1
+                                )  # [1, 30, 30]
+                                support1_output = support_examples[0]["output"].squeeze(
+                                    1
+                                )  # [1, 30, 30]
+                                support2_input = support_examples[1]["input"].squeeze(
+                                    1
+                                )  # [1, 30, 30]
+                                support2_output = support_examples[1]["output"].squeeze(
+                                    1
+                                )  # [1, 30, 30]
+                                test_input_clean = target_input.squeeze(
+                                    1
+                                )  # [1, 30, 30]
+
+                                target_logits = model(
+                                    support1_input,
+                                    support1_output,
+                                    support2_input,
+                                    support2_output,
+                                    test_input_clean,
+                                )
+                            else:
+                                # ResNet model - use decoder with rule latents
+                                target_logits = model.decoder(
+                                    outputs["rule_latents"][0:1],
+                                    target_input,
+                                )
                             predictions = torch.argmax(target_logits, dim=1).squeeze(0)
                             metrics = calculate_accuracy_metrics(
                                 predictions, target_output
@@ -803,10 +840,35 @@ def evaluate_model_on_tasks(
                         target_input = test_example["input"].unsqueeze(0)
                         target_output = test_example["output"].unsqueeze(0)
 
-                        target_logits = model.decoder(
-                            outputs["rule_latents"][0:1],
-                            target_input,
-                        )
+                        if is_patch_model:
+                            # Patch model - use direct forward pass
+                            support1_input = support_examples[0]["input"].squeeze(
+                                1
+                            )  # [1, 30, 30]
+                            support1_output = support_examples[0]["output"].squeeze(
+                                1
+                            )  # [1, 30, 30]
+                            support2_input = support_examples[1]["input"].squeeze(
+                                1
+                            )  # [1, 30, 30]
+                            support2_output = support_examples[1]["output"].squeeze(
+                                1
+                            )  # [1, 30, 30]
+                            test_input_clean = target_input.squeeze(1)  # [1, 30, 30]
+
+                            target_logits = model(
+                                support1_input,
+                                support1_output,
+                                support2_input,
+                                support2_output,
+                                test_input_clean,
+                            )
+                        else:
+                            # ResNet model - use decoder with rule latents
+                            target_logits = model.decoder(
+                                outputs["rule_latents"][0:1],
+                                target_input,
+                            )
                         predictions = torch.argmax(target_logits, dim=1).squeeze(0)
                         metrics = calculate_accuracy_metrics(predictions, target_output)
                     else:
@@ -818,10 +880,35 @@ def evaluate_model_on_tasks(
                     target_input = holdout_example["input"].unsqueeze(0)
                     target_output = holdout_example["output"].unsqueeze(0)
 
-                    target_logits = model.decoder(
-                        outputs["rule_latents"][0:1],
-                        target_input,
-                    )
+                    if is_patch_model:
+                        # Patch model - use direct forward pass
+                        support1_input = support_examples[0]["input"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        support1_output = support_examples[0]["output"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        support2_input = support_examples[1]["input"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        support2_output = support_examples[1]["output"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        test_input_clean = target_input.squeeze(1)  # [1, 30, 30]
+
+                        target_logits = model(
+                            support1_input,
+                            support1_output,
+                            support2_input,
+                            support2_output,
+                            test_input_clean,
+                        )
+                    else:
+                        # ResNet model - use decoder with rule latents
+                        target_logits = model.decoder(
+                            outputs["rule_latents"][0:1],
+                            target_input,
+                        )
                     predictions = torch.argmax(target_logits, dim=1).squeeze(0)
                     metrics = calculate_accuracy_metrics(predictions, target_output)
                 else:
@@ -830,10 +917,35 @@ def evaluate_model_on_tasks(
                     target_input = test_example["input"].unsqueeze(0)
                     target_output = test_example["output"].unsqueeze(0)
 
-                    target_logits = model.decoder(
-                        outputs["rule_latents"][0:1],
-                        target_input,
-                    )
+                    if is_patch_model:
+                        # Patch model - use direct forward pass
+                        support1_input = support_examples[0]["input"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        support1_output = support_examples[0]["output"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        support2_input = support_examples[1]["input"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        support2_output = support_examples[1]["output"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        test_input_clean = target_input.squeeze(1)  # [1, 30, 30]
+
+                        target_logits = model(
+                            support1_input,
+                            support1_output,
+                            support2_input,
+                            support2_output,
+                            test_input_clean,
+                        )
+                    else:
+                        # ResNet model - use decoder with rule latents
+                        target_logits = model.decoder(
+                            outputs["rule_latents"][0:1],
+                            target_input,
+                        )
                     predictions = torch.argmax(target_logits, dim=1).squeeze(0)
                     metrics = calculate_accuracy_metrics(predictions, target_output)
 
@@ -1044,36 +1156,41 @@ def test_all_combinations(
                         noise_config.noise_test_ratio,
                     )
 
-                # Check if we have RGB support examples (ResNet) or just grayscale (Patch)
-                if (
-                    "support_examples_rgb" in combo
-                    and combo["support_examples_rgb"] is not None
-                ):
-                    # ResNet dataset - use RGB support examples for encoder
-                    rgb_support_examples = combo["support_examples_rgb"]
-                    example1_input = rgb_support_examples[0]["input"]  # [1, 3, 64, 64]
-                    example1_output = rgb_support_examples[0][
-                        "output"
-                    ]  # [1, 3, 64, 64]
-                    example2_input = rgb_support_examples[1]["input"]  # [1, 3, 64, 64]
-                    example2_output = rgb_support_examples[1][
-                        "output"
-                    ]  # [1, 3, 64, 64]
+                # Determine model type and handle accordingly
+                is_patch_model = hasattr(model, "patch_tokenizer")
 
-                    rule_latent = model.encoder(
-                        example1_input, example1_output, example2_input, example2_output
-                    )
-                else:
-                    # Patch dataset - use grayscale support examples
-                    # For patch models, we need to use the model's forward method directly
-                    example1_input = support_examples[0]["input"]  # [1, 1, 30, 30]
-                    example1_output = support_examples[0]["output"]  # [1, 1, 30, 30]
-                    example2_input = support_examples[1]["input"]  # [1, 1, 30, 30]
-                    example2_output = support_examples[1]["output"]  # [1, 1, 30, 30]
-
-                    # For patch models, we'll handle this differently in the evaluation loop
-                    # For now, create a dummy rule_latent
+                if is_patch_model:
+                    # Patch model - no rule latents needed
                     rule_latent = None
+                else:
+                    # ResNet model - create rule latent from RGB support examples
+                    if (
+                        "support_examples_rgb" in combo
+                        and combo["support_examples_rgb"] is not None
+                    ):
+                        # ResNet dataset - use RGB support examples for encoder
+                        rgb_support_examples = combo["support_examples_rgb"]
+                        example1_input = rgb_support_examples[0][
+                            "input"
+                        ]  # [1, 3, 64, 64]
+                        example1_output = rgb_support_examples[0][
+                            "output"
+                        ]  # [1, 3, 64, 64]
+                        example2_input = rgb_support_examples[1][
+                            "input"
+                        ]  # [1, 3, 64, 64]
+                        example2_output = rgb_support_examples[1][
+                            "output"
+                        ]  # [1, 3, 64, 64]
+
+                        rule_latent = model.encoder(
+                            example1_input,
+                            example1_output,
+                            example2_input,
+                            example2_output,
+                        )
+                    else:
+                        rule_latent = None
 
                 # inject noise into rule latent if requested
                 if noise_config.inject_noise:
@@ -1090,7 +1207,36 @@ def test_all_combinations(
                     if test_all_test_pairs and len(test_examples) > 1:
                         # Evaluate on all test examples and create separate results for each
                         for test_idx, test_example in enumerate(test_examples):
-                            logits = model.decoder(rule_latent, test_example["input"])
+                            if is_patch_model:
+                                # Patch model - use direct forward pass
+                                support1_input = support_examples[0]["input"].squeeze(
+                                    1
+                                )  # [1, 30, 30]
+                                support1_output = support_examples[0]["output"].squeeze(
+                                    1
+                                )  # [1, 30, 30]
+                                support2_input = support_examples[1]["input"].squeeze(
+                                    1
+                                )  # [1, 30, 30]
+                                support2_output = support_examples[1]["output"].squeeze(
+                                    1
+                                )  # [1, 30, 30]
+                                test_input_clean = test_example["input"].squeeze(
+                                    1
+                                )  # [1, 30, 30]
+
+                                logits = model(
+                                    support1_input,
+                                    support1_output,
+                                    support2_input,
+                                    support2_output,
+                                    test_input_clean,
+                                )
+                            else:
+                                # ResNet model - use decoder with rule latents
+                                logits = model.decoder(
+                                    rule_latent, test_example["input"]
+                                )
                             predictions = torch.argmax(logits, dim=1).squeeze(0)
                             metrics = calculate_accuracy_metrics(
                                 predictions, test_example["output"]
@@ -1198,22 +1344,97 @@ def test_all_combinations(
                     else:
                         # Use first test example (original behavior)
                         target = test_examples[0]
-                        logits = model.decoder(rule_latent, target["input"])
+                        if is_patch_model:
+                            # Patch model - use direct forward pass
+                            support1_input = support_examples[0]["input"].squeeze(
+                                1
+                            )  # [1, 30, 30]
+                            support1_output = support_examples[0]["output"].squeeze(
+                                1
+                            )  # [1, 30, 30]
+                            support2_input = support_examples[1]["input"].squeeze(
+                                1
+                            )  # [1, 30, 30]
+                            support2_output = support_examples[1]["output"].squeeze(
+                                1
+                            )  # [1, 30, 30]
+                            test_input_clean = target["input"].squeeze(1)  # [1, 30, 30]
+
+                            logits = model(
+                                support1_input,
+                                support1_output,
+                                support2_input,
+                                support2_output,
+                                test_input_clean,
+                            )
+                        else:
+                            # ResNet model - use decoder with rule latents
+                            logits = model.decoder(rule_latent, target["input"])
                         predictions = torch.argmax(logits, dim=1).squeeze(0)
                         metrics = calculate_accuracy_metrics(
                             predictions, target["output"]
                         )
                 elif evaluation_mode == "holdout" and holdout_example is not None:
                     target = holdout_example
-                    logits = model.decoder(rule_latent, target["input"])
+                    if is_patch_model:
+                        # Patch model - use direct forward pass
+                        support1_input = support_examples[0]["input"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        support1_output = support_examples[0]["output"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        support2_input = support_examples[1]["input"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        support2_output = support_examples[1]["output"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        test_input_clean = target["input"].squeeze(1)  # [1, 30, 30]
+
+                        logits = model(
+                            support1_input,
+                            support1_output,
+                            support2_input,
+                            support2_output,
+                            test_input_clean,
+                        )
+                    else:
+                        # ResNet model - use decoder with rule latents
+                        logits = model.decoder(rule_latent, target["input"])
                     predictions = torch.argmax(logits, dim=1).squeeze(0)
                     metrics = calculate_accuracy_metrics(predictions, target["output"])
                 else:
                     # Fallback to first test example
                     target = test_examples[0]
-                logits = model.decoder(rule_latent, target["input"])
-                predictions = torch.argmax(logits, dim=1).squeeze(0)
-                metrics = calculate_accuracy_metrics(predictions, target["output"])
+                    if is_patch_model:
+                        # Patch model - use direct forward pass
+                        support1_input = support_examples[0]["input"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        support1_output = support_examples[0]["output"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        support2_input = support_examples[1]["input"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        support2_output = support_examples[1]["output"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        test_input_clean = target["input"].squeeze(1)  # [1, 30, 30]
+
+                        logits = model(
+                            support1_input,
+                            support1_output,
+                            support2_input,
+                            support2_output,
+                            test_input_clean,
+                        )
+                    else:
+                        # ResNet model - use decoder with rule latents
+                        logits = model.decoder(rule_latent, target["input"])
+                    predictions = torch.argmax(logits, dim=1).squeeze(0)
+                    metrics = calculate_accuracy_metrics(predictions, target["output"])
 
                 # Create sample data for visualization using the same approach as view_dataset.py
                 # Check if we have RGB support examples (ResNet) or just grayscale (Patch)
