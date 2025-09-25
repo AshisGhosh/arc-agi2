@@ -64,19 +64,6 @@ def get_collate_fn(model_type: str, use_flattening: bool = False):
         return unified_collate_fn
 
 
-def get_collate_fn_legacy(model_type: str):
-    """
-    Get the collate function for the model type.
-
-    Args:
-        model_type: "simple_arc" or "patch_attention" (both use unified_collate_fn)
-
-    Returns:
-        The unified collate function
-    """
-    return unified_collate_fn
-
-
 __all__ = [
     "preprocess_rgb_image",
     "preprocess_grid_image",

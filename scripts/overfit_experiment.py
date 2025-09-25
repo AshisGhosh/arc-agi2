@@ -371,10 +371,10 @@ class OverfitExperiment:
         )
 
         # create model and load checkpoint
-        model = create_model(self.config)
         checkpoint = torch.load(
             checkpoint_path, map_location=self.config.device, weights_only=False
         )
+        model = create_model(checkpoint["config"])
         model.load_state_dict(checkpoint["model_state_dict"])
         model.to(self.config.device)
         model.eval()
@@ -398,9 +398,12 @@ class OverfitExperiment:
                 # Move batch to device
                 device = next(model.parameters()).device
                 test_inputs = batch["test_inputs"].to(device)
-                test_outputs = batch["test_targets"].to(
-                    device
-                )  # Use test_targets from flattened collate
+
+                # Use correct key based on collate function format
+                if "test_targets" in batch:
+                    test_outputs = batch["test_targets"].to(device)  # Flattened format
+                else:
+                    test_outputs = batch["test_outputs"].to(device)  # Unified format
                 # Note: holdout inputs/outputs not available in flattened format
                 holdout_inputs = None
                 holdout_outputs = None
@@ -448,21 +451,33 @@ class OverfitExperiment:
                             support_example_outputs[i][1].unsqueeze(0).squeeze(1),
                         )
 
-                # Create support examples structure (same for both formats)
-                support_example_inputs_rgb = [None] * len(
-                    task_indices
-                )  # Not available in either format
-                support_example_outputs_rgb = [None] * len(
-                    task_indices
-                )  # Not available in either format
-                support_example_inputs = [
-                    [batch["support1_inputs"][i], batch["support2_inputs"][i]]
-                    for i in range(len(task_indices))
-                ]
-                support_example_outputs = [
-                    [batch["support1_outputs"][i], batch["support2_outputs"][i]]
-                    for i in range(len(task_indices))
-                ]
+                # Create support examples structure based on format
+                if is_flattened_format:
+                    # Flattened format: support examples are tensors
+                    support_example_inputs_rgb = [None] * len(
+                        task_indices
+                    )  # Not available
+                    support_example_outputs_rgb = [None] * len(
+                        task_indices
+                    )  # Not available
+                    support_example_inputs = [
+                        [batch["support1_inputs"][i], batch["support2_inputs"][i]]
+                        for i in range(len(task_indices))
+                    ]
+                    support_example_outputs = [
+                        [batch["support1_outputs"][i], batch["support2_outputs"][i]]
+                        for i in range(len(task_indices))
+                    ]
+                else:
+                    # Unified format: support examples are already lists
+                    support_example_inputs_rgb = batch.get(
+                        "support_example_inputs_rgb", [None] * len(task_indices)
+                    )
+                    support_example_outputs_rgb = batch.get(
+                        "support_example_outputs_rgb", [None] * len(task_indices)
+                    )
+                    support_example_inputs = batch["support_example_inputs"]
+                    support_example_outputs = batch["support_example_outputs"]
 
                 # Get all training examples for each task in the batch
                 batch_size = len(support_example_inputs)

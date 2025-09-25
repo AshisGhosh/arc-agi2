@@ -40,28 +40,6 @@ class BaseARCModel(nn.Module, ABC):
         """
         pass
 
-    @abstractmethod
-    def forward_rule_latent_training(
-        self,
-        rule_latent_inputs: torch.Tensor,
-        all_train_inputs: torch.Tensor,
-        num_train: torch.Tensor,
-    ) -> Dict[str, torch.Tensor]:
-        """
-        Forward pass for batched rule latent training.
-
-        Args:
-            rule_latent_inputs: [B, 2, 2, 3, 64, 64] - 2 examples per task
-            all_train_inputs: [B, max_train, 1, 30, 30] - all training inputs
-            num_train: [B] - number of training examples per task
-
-        Returns:
-            Dictionary containing:
-                - training_logits: [B, max_train, 10, 30, 30]
-                - rule_latents: [B, rule_dim] or None
-        """
-        pass
-
     def get_model_info(self) -> Dict[str, Any]:
         """Get model information for logging/debugging."""
         total_params = sum(p.numel() for p in self.parameters())

@@ -163,38 +163,6 @@ class PatchCrossAttentionModel(BaseARCModel):
 
         return final_logits
 
-    def forward_rule_latent_training(
-        self,
-        rule_latent_inputs: torch.Tensor,
-        all_train_inputs: torch.Tensor,
-        num_train: torch.Tensor,
-    ) -> Dict[str, torch.Tensor]:
-        """
-        Forward pass for batched rule latent training (compatibility with existing training loop).
-
-        This method is required by the base class but not used in patch-based training.
-        Returns dummy values for compatibility.
-
-        Args:
-            rule_latent_inputs: [B, 2, 2, 3, 64, 64] - ResNet format inputs
-            all_train_inputs: [B, max_train, 1, 30, 30] - Training inputs
-            num_train: [B] - Number of training examples per task
-
-        Returns:
-            Dictionary with dummy values for compatibility
-        """
-        # For patch-based model, we don't use rule latent training
-        # Return dummy values to maintain compatibility
-        B = rule_latent_inputs.size(0)
-        dummy_rule_latents = torch.zeros(
-            B, self.model_dim, device=rule_latent_inputs.device
-        )
-
-        return {
-            "rule_latents": dummy_rule_latents,
-            "training_logits": None,  # Not used in patch-based training
-        }
-
     def get_model_info(self) -> Dict[str, Any]:
         """Get model information for logging/debugging."""
         total_params = sum(p.numel() for p in self.parameters())
