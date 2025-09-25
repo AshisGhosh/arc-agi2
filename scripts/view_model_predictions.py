@@ -15,9 +15,9 @@ from typing import Dict, Any, List, Tuple
 from dataclasses import dataclass
 
 from algo.config import Config
-from algo.data import ARCDataset
+from algo.data import create_dataset
 from algo.data.task_subset import TaskSubset
-from algo.models.simple_arc import SimpleARCModel
+from algo.models import create_model
 from scripts.visualization_utils import (
     tensor_to_numpy,
     tensor_to_grayscale_numpy,
@@ -272,18 +272,32 @@ def extract_sample_from_batch(batch, sample_idx, evaluation_mode="test"):
             "output": batch["holdout_outputs"][sample_idx],
         }
 
-    # Extract training examples from rule_latent_inputs (2 examples for encoder)
-    for i in range(2):  # Always 2 examples for rule latent
-        sample["train_examples"].append(
-            {
-                "input": batch["rule_latent_inputs"][
-                    sample_idx, i, 0
-                ],  # [B, 2, 2, 3, 64, 64] -> [3, 64, 64]
-                "output": batch["rule_latent_inputs"][
-                    sample_idx, i, 1
-                ],  # [B, 2, 2, 3, 64, 64] -> [3, 64, 64]
-            }
-        )
+    # Extract training examples from support_example_inputs_rgb (2 examples for encoder)
+    # Check if we have RGB support examples (ResNet) or just grayscale (Patch)
+    if batch["support_example_inputs_rgb"][sample_idx] is not None:
+        # ResNet dataset - use RGB support examples
+        rgb_support_inputs = batch["support_example_inputs_rgb"][sample_idx]
+        rgb_support_outputs = batch["support_example_outputs_rgb"][sample_idx]
+
+        for i in range(2):  # Always 2 examples for support
+            sample["train_examples"].append(
+                {
+                    "input": rgb_support_inputs[i],  # [3, 64, 64]
+                    "output": rgb_support_outputs[i],  # [3, 64, 64]
+                }
+            )
+    else:
+        # Patch dataset - use grayscale support examples
+        grayscale_support_inputs = batch["support_example_inputs"][sample_idx]
+        grayscale_support_outputs = batch["support_example_outputs"][sample_idx]
+
+        for i in range(2):  # Always 2 examples for support
+            sample["train_examples"].append(
+                {
+                    "input": grayscale_support_inputs[i],  # [1, 30, 30]
+                    "output": grayscale_support_outputs[i],  # [1, 30, 30]
+                }
+            )
 
     return sample
 
@@ -296,11 +310,18 @@ def load_experiment_info(experiment_dir: Path) -> Dict[str, Any]:
     training_info_path = experiment_dir / "training_info.json"
     if training_info_path.exists():
         with open(training_info_path, "r") as f:
-            info["training"] = json.load(f)
+            training_data = json.load(f)
+            # The training_info.json file contains the full experiment data
+            # Extract the nested "training" key for compatibility
+            info["training"] = training_data.get("training", {})
+            # Extract the nested "tasks" key for compatibility
+            info["tasks"] = training_data.get("tasks", {})
+            # Also store the full data for other uses
+            info["full_training_info"] = training_data
 
-    # load task selection
+    # load task selection (fallback if not in training_info.json)
     task_selection_path = experiment_dir / "task_selection.json"
-    if task_selection_path.exists():
+    if task_selection_path.exists() and "tasks" not in info:
         with open(task_selection_path, "r") as f:
             info["tasks"] = json.load(f)
 
@@ -313,9 +334,7 @@ def load_experiment_info(experiment_dir: Path) -> Dict[str, Any]:
     return info
 
 
-def load_model_checkpoint(
-    checkpoint_path: str, config: Config = None
-) -> SimpleARCModel:
+def load_model_checkpoint(checkpoint_path: str, config: Config = None):
     """load model from checkpoint."""
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
 
@@ -325,7 +344,7 @@ def load_model_checkpoint(
     elif config is None:
         config = Config()
 
-    model = SimpleARCModel(config)
+    model = create_model(config)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.to(config.device)
     model.eval()
@@ -402,11 +421,11 @@ def generate_noise_tensor(
         return (1 - noise_ratio) * original_tensor + noise_ratio * noise
 
 
-def apply_noise_to_examples(rule_latent_examples, noise_config: NoiseConfig):
+def apply_noise_to_examples(support_examples, noise_config: NoiseConfig):
     """apply noise to individual training examples (A input, A output, B input, B output)."""
     # create a copy to avoid modifying the original
     noisy_examples = []
-    for i, example in enumerate(rule_latent_examples):
+    for i, example in enumerate(support_examples):
         noisy_example = {}
 
         # Determine which example this is (A=0, B=1)
@@ -614,7 +633,7 @@ def evaluate_model_on_tasks(
                 is_counterfactual = combo["is_counterfactual"]
 
                 # Get the preprocessed data from the combination
-                rule_latent_examples = combo["rule_latent_examples"]
+                support_examples = combo["support_examples"]
                 test_examples = combo["test_examples"]
                 num_test_examples = combo["num_test_examples"]
                 holdout_example = combo.get("holdout_example")
@@ -626,8 +645,8 @@ def evaluate_model_on_tasks(
                     or noise_config.noise_b_input
                     or noise_config.noise_b_output
                 ):
-                    rule_latent_examples = apply_noise_to_examples(
-                        rule_latent_examples, noise_config
+                    support_examples = apply_noise_to_examples(
+                        support_examples, noise_config
                     )
 
                 # Apply noise to test inputs if requested
@@ -640,27 +659,50 @@ def evaluate_model_on_tasks(
                         noise_config.noise_test_ratio,
                     )
 
-                # Extract the preprocessed tensors for rule latent creation
-                example1_input = rule_latent_examples[0][
-                    "input"
-                ]  # Already has batch dimension
-                example1_output = rule_latent_examples[0]["output"]
-                example2_input = rule_latent_examples[1]["input"]
-                example2_output = rule_latent_examples[1]["output"]
+                # Determine model type and handle accordingly
+                is_patch_model = hasattr(model, "patch_tokenizer")
 
-                # Create rule latent inputs tensor [1, 2, 2, 3, 64, 64]
-                rule_latent_inputs = torch.zeros([1, 2, 2, 3, 64, 64])
-                rule_latent_inputs[0, 0, 0] = example1_input.squeeze(0)  # [3, 64, 64]
-                rule_latent_inputs[0, 0, 1] = example1_output.squeeze(0)
-                rule_latent_inputs[0, 1, 0] = example2_input.squeeze(0)
-                rule_latent_inputs[0, 1, 1] = example2_output.squeeze(0)
+                if is_patch_model:
+                    # Patch model - no rule latents needed
+                    outputs = {"rule_latents": None}
+                else:
+                    # ResNet model - create rule latent inputs from RGB support examples
+                    if (
+                        "support_examples_rgb" in combo
+                        and combo["support_examples_rgb"] is not None
+                    ):
+                        # ResNet dataset - use RGB support examples
+                        rgb_support_examples = combo["support_examples_rgb"]
+                        example1_input = rgb_support_examples[0][
+                            "input"
+                        ]  # [1, 3, 64, 64]
+                        example1_output = rgb_support_examples[0][
+                            "output"
+                        ]  # [1, 3, 64, 64]
+                        example2_input = rgb_support_examples[1][
+                            "input"
+                        ]  # [1, 3, 64, 64]
+                        example2_output = rgb_support_examples[1][
+                            "output"
+                        ]  # [1, 3, 64, 64]
 
-                # Run model inference
-                outputs = model.forward_rule_latent_training(
-                    rule_latent_inputs,
-                    all_train_inputs,
-                    num_train,
-                )
+                        # Create rule latent inputs tensor [1, 2, 2, 3, 64, 64]
+                        rule_latent_inputs = torch.zeros([1, 2, 2, 3, 64, 64])
+                        rule_latent_inputs[0, 0, 0] = example1_input.squeeze(
+                            0
+                        )  # [3, 64, 64]
+                        rule_latent_inputs[0, 0, 1] = example1_output.squeeze(0)
+                        rule_latent_inputs[0, 1, 0] = example2_input.squeeze(0)
+                        rule_latent_inputs[0, 1, 1] = example2_output.squeeze(0)
+
+                        # Run model inference
+                        outputs = model.forward_rule_latent_training(
+                            rule_latent_inputs,
+                            all_train_inputs,
+                            num_train,
+                        )
+                    else:
+                        outputs = {"rule_latents": None}
 
                 # inject noise into rule latent if requested
                 if noise_config.inject_noise:
@@ -679,61 +721,114 @@ def evaluate_model_on_tasks(
                         # Evaluate on all test examples and create separate results for each
                         for test_idx in range(num_test_examples):
                             test_example = test_examples[test_idx]
-                            target_input = test_example["input"].unsqueeze(
-                                0
-                            )  # Add batch dimension
+                            # test_example["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
+                            target_input = test_example["input"].squeeze(
+                                1
+                            )  # [1, 30, 30]
                             target_output = test_example["output"].unsqueeze(0)
 
-                            target_logits = model.decoder(
-                                outputs["rule_latents"][0:1],
-                                target_input,
-                            )
+                            if is_patch_model:
+                                # Patch model - use direct forward pass
+                                # Get support examples for this task
+                                support1_input = support_examples[0]["input"].squeeze(
+                                    1
+                                )  # [1, 30, 30]
+                                support1_output = support_examples[0]["output"].squeeze(
+                                    1
+                                )  # [1, 30, 30]
+                                support2_input = support_examples[1]["input"].squeeze(
+                                    1
+                                )  # [1, 30, 30]
+                                support2_output = support_examples[1]["output"].squeeze(
+                                    1
+                                )  # [1, 30, 30]
+
+                                # target_input is already [1, 30, 30], which is what the model expects
+                                target_logits = model(
+                                    support1_input,
+                                    support1_output,
+                                    support2_input,
+                                    support2_output,
+                                    target_input,
+                                )
+                            else:
+                                # ResNet model - use decoder with rule latents
+                                target_logits = model.decoder(
+                                    outputs["rule_latents"][0:1],
+                                    target_input,
+                                )
                             predictions = torch.argmax(target_logits, dim=1).squeeze(0)
                             metrics = calculate_accuracy_metrics(
                                 predictions, target_output
                             )
 
                             # Create separate result for this test example
-                            test_sample_data = {
-                                "train_examples": [
-                                    {
-                                        "input": tensor_to_numpy(
-                                            denormalize_rgb(
-                                                rule_latent_examples[0]["input"]
-                                            )
-                                        ),
-                                        "output": tensor_to_numpy(
-                                            denormalize_rgb(
-                                                rule_latent_examples[0]["output"]
-                                            )
-                                        ),
-                                    },
-                                    {
-                                        "input": tensor_to_numpy(
-                                            denormalize_rgb(
-                                                rule_latent_examples[1]["input"]
-                                            )
-                                        ),
-                                        "output": tensor_to_numpy(
-                                            denormalize_rgb(
-                                                rule_latent_examples[1]["output"]
-                                            )
-                                        ),
-                                    },
-                                ],
-                                "test_examples": [
-                                    {
-                                        "input": tensor_to_grayscale_numpy(
-                                            test_ex["input"]
-                                        ),
-                                        "output": tensor_to_grayscale_numpy(
-                                            test_ex["output"]
-                                        ),
-                                    }
-                                    for test_ex in test_examples
-                                ],
-                                "num_test_examples": num_test_examples,
-                            }
+                            if is_patch_model:
+                                # Patch model - use grayscale support examples
+                                test_sample_data = {
+                                    "train_examples": [
+                                        {
+                                            "input": tensor_to_grayscale_numpy(
+                                                support_examples[0]["input"]
+                                            ),
+                                            "output": tensor_to_grayscale_numpy(
+                                                support_examples[0]["output"]
+                                            ),
+                                        },
+                                        {
+                                            "input": tensor_to_grayscale_numpy(
+                                                support_examples[1]["input"]
+                                            ),
+                                            "output": tensor_to_grayscale_numpy(
+                                                support_examples[1]["output"]
+                                            ),
+                                        },
+                                    ],
+                                }
+                            else:
+                                # ResNet model - use RGB support examples
+                                test_sample_data = {
+                                    "train_examples": [
+                                        {
+                                            "input": tensor_to_numpy(
+                                                denormalize_rgb(
+                                                    support_examples[0]["input"]
+                                                )
+                                            ),
+                                            "output": tensor_to_numpy(
+                                                denormalize_rgb(
+                                                    support_examples[0]["output"]
+                                                )
+                                            ),
+                                        },
+                                        {
+                                            "input": tensor_to_numpy(
+                                                denormalize_rgb(
+                                                    support_examples[1]["input"]
+                                                )
+                                            ),
+                                            "output": tensor_to_numpy(
+                                                denormalize_rgb(
+                                                    support_examples[1]["output"]
+                                                )
+                                            ),
+                                        },
+                                    ],
+                                }
+
+                            # Add test examples (same for both model types)
+                            test_sample_data["test_examples"] = [
+                                {
+                                    "input": tensor_to_grayscale_numpy(
+                                        test_ex["input"]
+                                    ),
+                                    "output": tensor_to_grayscale_numpy(
+                                        test_ex["output"]
+                                    ),
+                                }
+                                for test_ex in test_examples
+                            ]
+                            test_sample_data["num_test_examples"] = num_test_examples
 
                             # Add holdout data if available
                             if holdout_example is not None:
@@ -767,13 +862,39 @@ def evaluate_model_on_tasks(
                     # Use first test example only (original behavior)
                     test_example = test_examples[0] if test_examples else None
                     if test_example:
-                        target_input = test_example["input"].unsqueeze(0)
+                        # test_example["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
+                        target_input = test_example["input"].squeeze(1)  # [1, 30, 30]
                         target_output = test_example["output"].unsqueeze(0)
 
-                        target_logits = model.decoder(
-                            outputs["rule_latents"][0:1],
-                            target_input,
-                        )
+                        if is_patch_model:
+                            # Patch model - use direct forward pass
+                            support1_input = support_examples[0]["input"].squeeze(
+                                1
+                            )  # [1, 30, 30]
+                            support1_output = support_examples[0]["output"].squeeze(
+                                1
+                            )  # [1, 30, 30]
+                            support2_input = support_examples[1]["input"].squeeze(
+                                1
+                            )  # [1, 30, 30]
+                            support2_output = support_examples[1]["output"].squeeze(
+                                1
+                            )  # [1, 30, 30]
+
+                            # target_input is already [1, 30, 30], which is what the model expects
+                            target_logits = model(
+                                support1_input,
+                                support1_output,
+                                support2_input,
+                                support2_output,
+                                target_input,
+                            )
+                        else:
+                            # ResNet model - use decoder with rule latents
+                            target_logits = model.decoder(
+                                outputs["rule_latents"][0:1],
+                                target_input,
+                            )
                         predictions = torch.argmax(target_logits, dim=1).squeeze(0)
                         metrics = calculate_accuracy_metrics(predictions, target_output)
                     else:
@@ -782,57 +903,151 @@ def evaluate_model_on_tasks(
 
                 if evaluation_mode == "holdout" and holdout_example is not None:
                     # Evaluate on holdout example
-                    target_input = holdout_example["input"].unsqueeze(0)
+                    # holdout_example["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
+                    target_input = holdout_example["input"].squeeze(1)  # [1, 30, 30]
                     target_output = holdout_example["output"].unsqueeze(0)
 
-                    target_logits = model.decoder(
-                        outputs["rule_latents"][0:1],
-                        target_input,
-                    )
+                    if is_patch_model:
+                        # Patch model - use direct forward pass
+                        support1_input = support_examples[0]["input"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        support1_output = support_examples[0]["output"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        support2_input = support_examples[1]["input"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        support2_output = support_examples[1]["output"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+
+                        # target_input is already [1, 30, 30], which is what the model expects
+
+                        target_logits = model(
+                            support1_input,
+                            support1_output,
+                            support2_input,
+                            support2_output,
+                            target_input,
+                        )
+                    else:
+                        # ResNet model - use decoder with rule latents
+                        target_logits = model.decoder(
+                            outputs["rule_latents"][0:1],
+                            target_input,
+                        )
                     predictions = torch.argmax(target_logits, dim=1).squeeze(0)
                     metrics = calculate_accuracy_metrics(predictions, target_output)
                 else:
                     # Fallback to first test example
                     test_example = test_examples[0]
-                    target_input = test_example["input"].unsqueeze(0)
+                    # test_example["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
+                    target_input = test_example["input"].squeeze(1)  # [1, 30, 30]
                     target_output = test_example["output"].unsqueeze(0)
 
-                    target_logits = model.decoder(
-                        outputs["rule_latents"][0:1],
-                        target_input,
-                    )
+                    if is_patch_model:
+                        # Patch model - use direct forward pass
+                        support1_input = support_examples[0]["input"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        support1_output = support_examples[0]["output"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        support2_input = support_examples[1]["input"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        support2_output = support_examples[1]["output"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+
+                        # target_input is already [1, 30, 30], which is what the model expects
+
+                        target_logits = model(
+                            support1_input,
+                            support1_output,
+                            support2_input,
+                            support2_output,
+                            target_input,
+                        )
+                    else:
+                        # ResNet model - use decoder with rule latents
+                        target_logits = model.decoder(
+                            outputs["rule_latents"][0:1],
+                            target_input,
+                        )
                     predictions = torch.argmax(target_logits, dim=1).squeeze(0)
                     metrics = calculate_accuracy_metrics(predictions, target_output)
 
                 # Create sample data for visualization
-                sample_data = {
-                    "train_examples": [
-                        {
-                            "input": tensor_to_numpy(
-                                denormalize_rgb(rule_latent_examples[0]["input"])
-                            ),
-                            "output": tensor_to_numpy(
-                                denormalize_rgb(rule_latent_examples[0]["output"])
-                            ),
-                        },
-                        {
-                            "input": tensor_to_numpy(
-                                denormalize_rgb(rule_latent_examples[1]["input"])
-                            ),
-                            "output": tensor_to_numpy(
-                                denormalize_rgb(rule_latent_examples[1]["output"])
-                            ),
-                        },
-                    ],
-                    "test_examples": [
-                        {
-                            "input": tensor_to_grayscale_numpy(test_example["input"]),
-                            "output": tensor_to_grayscale_numpy(test_example["output"]),
-                        }
-                        for test_example in test_examples
-                    ],
-                    "num_test_examples": num_test_examples,
-                }
+                if is_patch_model:
+                    # Patch model - use grayscale support examples
+                    sample_data = {
+                        "train_examples": [
+                            {
+                                "input": tensor_to_grayscale_numpy(
+                                    support_examples[0]["input"]
+                                ),
+                                "output": tensor_to_grayscale_numpy(
+                                    support_examples[0]["output"]
+                                ),
+                            },
+                            {
+                                "input": tensor_to_grayscale_numpy(
+                                    support_examples[1]["input"]
+                                ),
+                                "output": tensor_to_grayscale_numpy(
+                                    support_examples[1]["output"]
+                                ),
+                            },
+                        ],
+                        "test_examples": [
+                            {
+                                "input": tensor_to_grayscale_numpy(
+                                    test_example["input"]
+                                ),
+                                "output": tensor_to_grayscale_numpy(
+                                    test_example["output"]
+                                ),
+                            }
+                            for test_example in test_examples
+                        ],
+                        "num_test_examples": num_test_examples,
+                    }
+                else:
+                    # ResNet model - use RGB support examples
+                    sample_data = {
+                        "train_examples": [
+                            {
+                                "input": tensor_to_numpy(
+                                    denormalize_rgb(support_examples[0]["input"])
+                                ),
+                                "output": tensor_to_numpy(
+                                    denormalize_rgb(support_examples[0]["output"])
+                                ),
+                            },
+                            {
+                                "input": tensor_to_numpy(
+                                    denormalize_rgb(support_examples[1]["input"])
+                                ),
+                                "output": tensor_to_numpy(
+                                    denormalize_rgb(support_examples[1]["output"])
+                                ),
+                            },
+                        ],
+                        "test_examples": [
+                            {
+                                "input": tensor_to_grayscale_numpy(
+                                    test_example["input"]
+                                ),
+                                "output": tensor_to_grayscale_numpy(
+                                    test_example["output"]
+                                ),
+                            }
+                            for test_example in test_examples
+                        ],
+                        "num_test_examples": num_test_examples,
+                    }
 
                 # Add holdout data if available
                 if holdout_example is not None:
@@ -985,7 +1200,7 @@ def test_all_combinations(
                 is_counterfactual = combo["is_counterfactual"]
 
                 # Get the preprocessed data from the combination
-                rule_latent_examples = combo["rule_latent_examples"]
+                support_examples = combo["support_examples"]
                 test_examples = combo["test_examples"]
                 num_test_examples = combo["num_test_examples"]
                 holdout_example = combo.get("holdout_example")
@@ -997,8 +1212,8 @@ def test_all_combinations(
                     or noise_config.noise_b_input
                     or noise_config.noise_b_output
                 ):
-                    rule_latent_examples = apply_noise_to_examples(
-                        rule_latent_examples, noise_config
+                    support_examples = apply_noise_to_examples(
+                        support_examples, noise_config
                     )
 
                 # Apply noise to test inputs if requested
@@ -1011,17 +1226,41 @@ def test_all_combinations(
                         noise_config.noise_test_ratio,
                     )
 
-                # Extract the preprocessed tensors
-                example1_input = rule_latent_examples[0][
-                    "input"
-                ]  # Already has batch dimension
-                example1_output = rule_latent_examples[0]["output"]
-                example2_input = rule_latent_examples[1]["input"]
-                example2_output = rule_latent_examples[1]["output"]
+                # Determine model type and handle accordingly
+                is_patch_model = hasattr(model, "patch_tokenizer")
 
-                rule_latent = model.encoder(
-                    example1_input, example1_output, example2_input, example2_output
-                )
+                if is_patch_model:
+                    # Patch model - no rule latents needed
+                    rule_latent = None
+                else:
+                    # ResNet model - create rule latent from RGB support examples
+                    if (
+                        "support_examples_rgb" in combo
+                        and combo["support_examples_rgb"] is not None
+                    ):
+                        # ResNet dataset - use RGB support examples for encoder
+                        rgb_support_examples = combo["support_examples_rgb"]
+                        example1_input = rgb_support_examples[0][
+                            "input"
+                        ]  # [1, 3, 64, 64]
+                        example1_output = rgb_support_examples[0][
+                            "output"
+                        ]  # [1, 3, 64, 64]
+                        example2_input = rgb_support_examples[1][
+                            "input"
+                        ]  # [1, 3, 64, 64]
+                        example2_output = rgb_support_examples[1][
+                            "output"
+                        ]  # [1, 3, 64, 64]
+
+                        rule_latent = model.encoder(
+                            example1_input,
+                            example1_output,
+                            example2_input,
+                            example2_output,
+                        )
+                    else:
+                        rule_latent = None
 
                 # inject noise into rule latent if requested
                 if noise_config.inject_noise:
@@ -1038,40 +1277,101 @@ def test_all_combinations(
                     if test_all_test_pairs and len(test_examples) > 1:
                         # Evaluate on all test examples and create separate results for each
                         for test_idx, test_example in enumerate(test_examples):
-                            logits = model.decoder(rule_latent, test_example["input"])
+                            if is_patch_model:
+                                # Patch model - use direct forward pass
+                                support1_input = support_examples[0]["input"].squeeze(
+                                    1
+                                )  # [1, 30, 30]
+                                support1_output = support_examples[0]["output"].squeeze(
+                                    1
+                                )  # [1, 30, 30]
+                                support2_input = support_examples[1]["input"].squeeze(
+                                    1
+                                )  # [1, 30, 30]
+                                support2_output = support_examples[1]["output"].squeeze(
+                                    1
+                                )  # [1, 30, 30]
+
+                                # Ensure test input is properly formatted for patch model
+                                # test_example["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
+                                test_input_clean = test_example["input"].squeeze(
+                                    1
+                                )  # [1, 30, 30]
+
+                                logits = model(
+                                    support1_input,
+                                    support1_output,
+                                    support2_input,
+                                    support2_output,
+                                    test_input_clean,
+                                )
+                            else:
+                                # ResNet model - use decoder with rule latents
+                                logits = model.decoder(
+                                    rule_latent, test_example["input"]
+                                )
                             predictions = torch.argmax(logits, dim=1).squeeze(0)
                             metrics = calculate_accuracy_metrics(
                                 predictions, test_example["output"]
                             )
 
                             # Create separate result for this test example
+                            # Check if we have RGB support examples (ResNet) or just grayscale (Patch)
+                            if (
+                                "support_examples_rgb" in combo
+                                and combo["support_examples_rgb"] is not None
+                            ):
+                                # ResNet dataset - use RGB support examples for visualization
+                                rgb_support_examples = combo["support_examples_rgb"]
+                                train_examples = [
+                                    {
+                                        "input": tensor_to_numpy(
+                                            denormalize_rgb(
+                                                rgb_support_examples[0]["input"]
+                                            )
+                                        ),
+                                        "output": tensor_to_numpy(
+                                            denormalize_rgb(
+                                                rgb_support_examples[0]["output"]
+                                            )
+                                        ),
+                                    },
+                                    {
+                                        "input": tensor_to_numpy(
+                                            denormalize_rgb(
+                                                rgb_support_examples[1]["input"]
+                                            )
+                                        ),
+                                        "output": tensor_to_numpy(
+                                            denormalize_rgb(
+                                                rgb_support_examples[1]["output"]
+                                            )
+                                        ),
+                                    },
+                                ]
+                            else:
+                                # Patch dataset - use grayscale support examples for visualization
+                                train_examples = [
+                                    {
+                                        "input": tensor_to_grayscale_numpy(
+                                            support_examples[0]["input"]
+                                        ),
+                                        "output": tensor_to_grayscale_numpy(
+                                            support_examples[0]["output"]
+                                        ),
+                                    },
+                                    {
+                                        "input": tensor_to_grayscale_numpy(
+                                            support_examples[1]["input"]
+                                        ),
+                                        "output": tensor_to_grayscale_numpy(
+                                            support_examples[1]["output"]
+                                        ),
+                                    },
+                                ]
+
                             test_sample_data = {
-                                "train_examples": [
-                                    {
-                                        "input": tensor_to_numpy(
-                                            denormalize_rgb(
-                                                rule_latent_examples[0]["input"]
-                                            )
-                                        ),
-                                        "output": tensor_to_numpy(
-                                            denormalize_rgb(
-                                                rule_latent_examples[0]["output"]
-                                            )
-                                        ),
-                                    },
-                                    {
-                                        "input": tensor_to_numpy(
-                                            denormalize_rgb(
-                                                rule_latent_examples[1]["input"]
-                                            )
-                                        ),
-                                        "output": tensor_to_numpy(
-                                            denormalize_rgb(
-                                                rule_latent_examples[1]["output"]
-                                            )
-                                        ),
-                                    },
-                                ],
+                                "train_examples": train_examples,
                                 "test_examples": [
                                     {
                                         "input": tensor_to_grayscale_numpy(
@@ -1117,44 +1417,159 @@ def test_all_combinations(
                     else:
                         # Use first test example (original behavior)
                         target = test_examples[0]
-                        logits = model.decoder(rule_latent, target["input"])
+                        if is_patch_model:
+                            # Patch model - use direct forward pass
+                            support1_input = support_examples[0]["input"].squeeze(
+                                1
+                            )  # [1, 30, 30]
+                            support1_output = support_examples[0]["output"].squeeze(
+                                1
+                            )  # [1, 30, 30]
+                            support2_input = support_examples[1]["input"].squeeze(
+                                1
+                            )  # [1, 30, 30]
+                            support2_output = support_examples[1]["output"].squeeze(
+                                1
+                            )  # [1, 30, 30]
+
+                            # Ensure test input is properly formatted for patch model
+                            # target["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
+                            test_input_clean = target["input"].squeeze(1)  # [1, 30, 30]
+
+                            logits = model(
+                                support1_input,
+                                support1_output,
+                                support2_input,
+                                support2_output,
+                                test_input_clean,
+                            )
+                        else:
+                            # ResNet model - use decoder with rule latents
+                            logits = model.decoder(rule_latent, target["input"])
                         predictions = torch.argmax(logits, dim=1).squeeze(0)
                         metrics = calculate_accuracy_metrics(
                             predictions, target["output"]
                         )
                 elif evaluation_mode == "holdout" and holdout_example is not None:
                     target = holdout_example
-                    logits = model.decoder(rule_latent, target["input"])
+                    if is_patch_model:
+                        # Patch model - use direct forward pass
+                        support1_input = support_examples[0]["input"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        support1_output = support_examples[0]["output"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        support2_input = support_examples[1]["input"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        support2_output = support_examples[1]["output"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+
+                        # Ensure test input is properly formatted for patch model
+                        # target["input"] is [1, 1, 30, 30], we need [1, 30, 30]
+                        # target["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
+                        test_input_clean = target["input"].squeeze(1)  # [1, 30, 30]
+
+                        logits = model(
+                            support1_input,
+                            support1_output,
+                            support2_input,
+                            support2_output,
+                            test_input_clean,
+                        )
+                    else:
+                        # ResNet model - use decoder with rule latents
+                        logits = model.decoder(rule_latent, target["input"])
                     predictions = torch.argmax(logits, dim=1).squeeze(0)
                     metrics = calculate_accuracy_metrics(predictions, target["output"])
                 else:
                     # Fallback to first test example
                     target = test_examples[0]
-                logits = model.decoder(rule_latent, target["input"])
-                predictions = torch.argmax(logits, dim=1).squeeze(0)
-                metrics = calculate_accuracy_metrics(predictions, target["output"])
+                    if is_patch_model:
+                        # Patch model - use direct forward pass
+                        support1_input = support_examples[0]["input"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        support1_output = support_examples[0]["output"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        support2_input = support_examples[1]["input"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        support2_output = support_examples[1]["output"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+
+                        # Ensure test input is properly formatted for patch model
+                        # target["input"] is [1, 1, 30, 30], we need [1, 30, 30]
+                        # target["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
+                        test_input_clean = target["input"].squeeze(1)  # [1, 30, 30]
+
+                        logits = model(
+                            support1_input,
+                            support1_output,
+                            support2_input,
+                            support2_output,
+                            test_input_clean,
+                        )
+                    else:
+                        # ResNet model - use decoder with rule latents
+                        logits = model.decoder(rule_latent, target["input"])
+                    predictions = torch.argmax(logits, dim=1).squeeze(0)
+                    metrics = calculate_accuracy_metrics(predictions, target["output"])
 
                 # Create sample data for visualization using the same approach as view_dataset.py
-                # Create visualization data
-                sample_data = {
-                    "train_examples": [
+                # Check if we have RGB support examples (ResNet) or just grayscale (Patch)
+                if (
+                    "support_examples_rgb" in combo
+                    and combo["support_examples_rgb"] is not None
+                ):
+                    # ResNet dataset - use RGB support examples for visualization
+                    rgb_support_examples = combo["support_examples_rgb"]
+                    train_examples = [
                         {
                             "input": tensor_to_numpy(
-                                denormalize_rgb(rule_latent_examples[0]["input"])
+                                denormalize_rgb(rgb_support_examples[0]["input"])
                             ),  # [1, 3, 64, 64] -> [64, 64, 3]
                             "output": tensor_to_numpy(
-                                denormalize_rgb(rule_latent_examples[0]["output"])
+                                denormalize_rgb(rgb_support_examples[0]["output"])
                             ),
                         },
                         {
                             "input": tensor_to_numpy(
-                                denormalize_rgb(rule_latent_examples[1]["input"])
+                                denormalize_rgb(rgb_support_examples[1]["input"])
                             ),
                             "output": tensor_to_numpy(
-                                denormalize_rgb(rule_latent_examples[1]["output"])
+                                denormalize_rgb(rgb_support_examples[1]["output"])
                             ),
                         },
-                    ],
+                    ]
+                else:
+                    # Patch dataset - use grayscale support examples for visualization
+                    train_examples = [
+                        {
+                            "input": tensor_to_grayscale_numpy(
+                                support_examples[0]["input"]
+                            ),
+                            "output": tensor_to_grayscale_numpy(
+                                support_examples[0]["output"]
+                            ),
+                        },
+                        {
+                            "input": tensor_to_grayscale_numpy(
+                                support_examples[1]["input"]
+                            ),
+                            "output": tensor_to_grayscale_numpy(
+                                support_examples[1]["output"]
+                            ),
+                        },
+                    ]
+
+                # Create visualization data
+                sample_data = {
+                    "train_examples": train_examples,
                     "test_examples": [
                         {
                             "input": tensor_to_grayscale_numpy(test_example["input"]),
@@ -1236,6 +1651,50 @@ def main():
     )
 
     exp_info = load_experiment_info(selected_exp_path)
+
+    # Display model type information
+    # Check both config and model sections for model type
+    config_info = exp_info.get("full_training_info", {}).get("config", {})
+    model_info = exp_info.get("full_training_info", {}).get("model", {})
+
+    # Try to get model type from model section first, then config
+    model_type = model_info.get("model_type") or config_info.get(
+        "model_type", "simple_arc"
+    )
+
+    # Normalize model type names
+    model_type_normalized = {
+        "patch_cross_attention": "patch_attention",
+        "patch_attention": "patch_attention",
+        "simple_arc": "simple_arc",
+    }.get(model_type, model_type)
+
+    model_type_display = {
+        "simple_arc": "SimpleARC (ResNet + MLP)",
+        "patch_attention": "PatchCrossAttention",
+    }.get(model_type_normalized, model_type)
+
+    st.sidebar.subheader("model info")
+    st.sidebar.write(f"**model type:** {model_type_display}")
+
+    # Show additional model-specific info
+    if model_type_normalized == "patch_attention":
+        st.sidebar.write("**architecture:** patch-based cross-attention")
+        st.sidebar.write(f"**patch size:** {config_info.get('patch_size', 3)}")
+        st.sidebar.write(f"**model dim:** {config_info.get('model_dim', 128)}")
+        if "total_parameters" in model_info:
+            st.sidebar.write(f"**parameters:** {model_info['total_parameters']:,}")
+        # Show support-as-test info for patch models
+        use_support_as_test = config_info.get("use_support_as_test", False)
+        st.sidebar.write(
+            f"**support as test:** {'✅ enabled' if use_support_as_test else '❌ disabled'}"
+        )
+    else:
+        st.sidebar.write("**architecture:** resnet encoder + mlp decoder")
+        st.sidebar.write(f"**rule dim:** {config_info.get('rule_dim', 32)}")
+        if "total_parameters" in model_info:
+            st.sidebar.write(f"**parameters:** {model_info['total_parameters']:,}")
+
     st.sidebar.subheader("experiment info")
     if "training" in exp_info:
         st.sidebar.write(
@@ -1287,17 +1746,18 @@ def main():
             st.sidebar.warning("⚠️ no config in checkpoint, using default config")
 
         # Create model with the loaded config
-        model = SimpleARCModel(config)
+        model = create_model(config)
         model.load_state_dict(checkpoint["model_state_dict"])
         model.eval()
         st.sidebar.success("✅ model loaded successfully")
+
     except Exception as e:
         st.error(f"❌ failed to load model: {e}")
         st.stop()
 
     config.use_color_relabeling = False
     config.enable_counterfactuals = False
-    dataset = ARCDataset(
+    dataset = create_dataset(
         config.arc_agi1_dir, config, holdout=True, use_first_combination_only=False
     )
     if task_set == "overfit tasks only":
@@ -1339,19 +1799,23 @@ def main():
         help="evaluate on all test examples for each task/combination",
     )
 
-    st.sidebar.subheader("rule latent analysis")
-    inject_noise = st.sidebar.checkbox(
-        "inject noise into rule latent",
-        value=False,
-        help="replace rule latent with noise to test if it's actually useful",
-    )
+    # Only show rule latent analysis for ResNet models
+    if model_type_normalized != "patch_attention":
+        st.sidebar.subheader("rule latent analysis")
+        inject_noise = st.sidebar.checkbox(
+            "inject noise into rule latent",
+            value=False,
+            help="replace rule latent with noise to test if it's actually useful",
+        )
+    else:
+        inject_noise = False
 
     noise_type = "gaussian"
     noise_std = 1.0
     noise_range = 1.0
     noise_ratio = 1.0
 
-    if inject_noise:
+    if inject_noise and model_type_normalized != "patch_attention":
         noise_type = st.sidebar.selectbox(
             "noise type",
             ["gaussian", "uniform", "zeros", "ones"],
@@ -1387,27 +1851,71 @@ def main():
             help="fraction of rule latent to replace with noise (1.0 = full replacement)",
         )
 
-    st.sidebar.subheader("support example noise")
+    # Only show support example noise for ResNet models
+    if model_type_normalized != "patch_attention":
+        st.sidebar.subheader("support example noise")
 
-    # Support A input noise
-    noise_a_input = st.sidebar.checkbox(
-        "noise support A input",
-        value=False,
-        help="inject noise into support example A input to test model robustness",
-    )
+        # Support A input noise
+        noise_a_input = st.sidebar.checkbox(
+            "noise support A input",
+            value=False,
+            help="inject noise into support example A input to test model robustness",
+        )
 
+        # Support A output noise
+        noise_a_output = st.sidebar.checkbox(
+            "noise support A output",
+            value=False,
+            help="inject noise into support example A output to test model robustness",
+        )
+
+        # Support B input noise
+        noise_b_input = st.sidebar.checkbox(
+            "noise support B input",
+            value=False,
+            help="inject noise into support example B input to test model robustness",
+        )
+
+        # Support B output noise
+        noise_b_output = st.sidebar.checkbox(
+            "noise support B output",
+            value=False,
+            help="inject noise into support example B output to test model robustness",
+        )
+    else:
+        # Set all support noise options to False for patch models
+        noise_a_input = False
+        noise_a_output = False
+        noise_b_input = False
+        noise_b_output = False
+
+    # Initialize all support noise parameters
     noise_a_input_type = "gaussian"
     noise_a_input_std = 1.0
     noise_a_input_range = 1.0
     noise_a_input_ratio = 1.0
+    noise_a_output_type = "gaussian"
+    noise_a_output_std = 1.0
+    noise_a_output_range = 1.0
+    noise_a_output_ratio = 1.0
+    noise_b_input_type = "gaussian"
+    noise_b_input_std = 1.0
+    noise_b_input_range = 1.0
+    noise_b_input_ratio = 1.0
+    noise_b_output_type = "gaussian"
+    noise_b_output_std = 1.0
+    noise_b_output_range = 1.0
+    noise_b_output_ratio = 1.0
 
-    if noise_a_input:
-        noise_a_input_type = st.sidebar.selectbox(
-            "A input noise type",
-            ["gaussian", "uniform", "zeros", "ones"],
-            index=0,
-            help="type of noise to inject into support A input",
-        )
+    # Only show support noise parameter controls for ResNet models
+    if model_type_normalized != "patch_attention":
+        if noise_a_input:
+            noise_a_input_type = st.sidebar.selectbox(
+                "A input noise type",
+                ["gaussian", "uniform", "zeros", "ones"],
+                index=0,
+                help="type of noise to inject into support A input",
+            )
 
         if noise_a_input_type == "gaussian":
             noise_a_input_std = st.sidebar.slider(
@@ -1435,150 +1943,6 @@ def main():
             value=1.0,
             step=0.1,
             help="fraction of support A input to replace with noise (1.0 = full replacement)",
-        )
-
-    # Support A output noise
-    noise_a_output = st.sidebar.checkbox(
-        "noise support A output",
-        value=False,
-        help="inject noise into support example A output to test model robustness",
-    )
-
-    noise_a_output_type = "gaussian"
-    noise_a_output_std = 1.0
-    noise_a_output_range = 1.0
-    noise_a_output_ratio = 1.0
-
-    if noise_a_output:
-        noise_a_output_type = st.sidebar.selectbox(
-            "A output noise type",
-            ["gaussian", "uniform", "zeros", "ones"],
-            index=0,
-            help="type of noise to inject into support A output",
-        )
-
-        if noise_a_output_type == "gaussian":
-            noise_a_output_std = st.sidebar.slider(
-                "A output noise std",
-                min_value=0.1,
-                max_value=2.0,
-                value=1.0,
-                step=0.1,
-                help="standard deviation for gaussian noise on support A output",
-            )
-        elif noise_a_output_type == "uniform":
-            noise_a_output_range = st.sidebar.slider(
-                "A output noise range",
-                min_value=0.1,
-                max_value=2.0,
-                value=1.0,
-                step=0.1,
-                help="range for uniform noise on support A output [-range, +range]",
-            )
-
-        noise_a_output_ratio = st.sidebar.slider(
-            "A output noise ratio",
-            min_value=0.0,
-            max_value=1.0,
-            value=1.0,
-            step=0.1,
-            help="fraction of support A output to replace with noise (1.0 = full replacement)",
-        )
-
-    # Support B input noise
-    noise_b_input = st.sidebar.checkbox(
-        "noise support B input",
-        value=False,
-        help="inject noise into support example B input to test model robustness",
-    )
-
-    noise_b_input_type = "gaussian"
-    noise_b_input_std = 1.0
-    noise_b_input_range = 1.0
-    noise_b_input_ratio = 1.0
-
-    if noise_b_input:
-        noise_b_input_type = st.sidebar.selectbox(
-            "B input noise type",
-            ["gaussian", "uniform", "zeros", "ones"],
-            index=0,
-            help="type of noise to inject into support B input",
-        )
-
-        if noise_b_input_type == "gaussian":
-            noise_b_input_std = st.sidebar.slider(
-                "B input noise std",
-                min_value=0.1,
-                max_value=2.0,
-                value=1.0,
-                step=0.1,
-                help="standard deviation for gaussian noise on support B input",
-            )
-        elif noise_b_input_type == "uniform":
-            noise_b_input_range = st.sidebar.slider(
-                "B input noise range",
-                min_value=0.1,
-                max_value=2.0,
-                value=1.0,
-                step=0.1,
-                help="range for uniform noise on support B input [-range, +range]",
-            )
-
-        noise_b_input_ratio = st.sidebar.slider(
-            "B input noise ratio",
-            min_value=0.0,
-            max_value=1.0,
-            value=1.0,
-            step=0.1,
-            help="fraction of support B input to replace with noise (1.0 = full replacement)",
-        )
-
-    # Support B output noise
-    noise_b_output = st.sidebar.checkbox(
-        "noise support B output",
-        value=False,
-        help="inject noise into support example B output to test model robustness",
-    )
-
-    noise_b_output_type = "gaussian"
-    noise_b_output_std = 1.0
-    noise_b_output_range = 1.0
-    noise_b_output_ratio = 1.0
-
-    if noise_b_output:
-        noise_b_output_type = st.sidebar.selectbox(
-            "B output noise type",
-            ["gaussian", "uniform", "zeros", "ones"],
-            index=0,
-            help="type of noise to inject into support B output",
-        )
-
-        if noise_b_output_type == "gaussian":
-            noise_b_output_std = st.sidebar.slider(
-                "B output noise std",
-                min_value=0.1,
-                max_value=2.0,
-                value=1.0,
-                step=0.1,
-                help="standard deviation for gaussian noise on support B output",
-            )
-        elif noise_b_output_type == "uniform":
-            noise_b_output_range = st.sidebar.slider(
-                "B output noise range",
-                min_value=0.1,
-                max_value=2.0,
-                value=1.0,
-                step=0.1,
-                help="range for uniform noise on support B output [-range, +range]",
-            )
-
-        noise_b_output_ratio = st.sidebar.slider(
-            "B output noise ratio",
-            min_value=0.0,
-            max_value=1.0,
-            value=1.0,
-            step=0.1,
-            help="fraction of support B output to replace with noise (1.0 = full replacement)",
         )
 
     st.sidebar.subheader("test input noise")

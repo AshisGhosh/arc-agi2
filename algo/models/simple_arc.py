@@ -1,10 +1,10 @@
 import torch
-import torch.nn as nn
+from .base import BaseARCModel
 from .encoder import ResNetEncoder
 from .decoder import MLPDecoder
 
 
-class SimpleARCModel(nn.Module):
+class SimpleARCModel(BaseARCModel):
     """
     Simple ARC model combining ResNet encoder and MLP decoder.
 
@@ -13,8 +13,7 @@ class SimpleARCModel(nn.Module):
     """
 
     def __init__(self, config):
-        super().__init__()
-        self.config = config
+        super().__init__(config)
 
         # Initialize components
         self.encoder = ResNetEncoder(config)

@@ -17,10 +17,10 @@ import time
 from datetime import datetime
 
 from algo.config import Config
-from algo.models import SimpleARCModel
-from algo.data import ARCDataset, custom_collate_fn
+from algo.models import create_model
+from algo.data import create_dataset, get_collate_fn
 from algo.data.task_subset import TaskSubset
-from algo.training import ARCTrainer
+from algo.training import create_trainer
 from scripts.evaluate import (
     calculate_perfect_accuracy,
     calculate_pixel_accuracy,
@@ -65,7 +65,7 @@ class OverfitExperiment:
             list of selected task indices
         """
         # load full dataset to get valid task indices (only tasks with multiple test pairs)
-        full_dataset = ARCDataset(
+        full_dataset = create_dataset(
             self.config.arc_agi1_dir,
             self.config,
             holdout=True,
@@ -116,8 +116,95 @@ class OverfitExperiment:
 
         return selected_indices
 
-    def create_task_subset(self, task_indices: List[int]) -> TaskSubset:
+    def _save_initial_training_info(self, task_indices: List[int], model) -> None:
+        """Save initial training info with config and model details."""
+        model_info = model.get_model_info()
+
+        training_info = {
+            "experiment_name": self.experiment_name,
+            "start_time": datetime.now().isoformat(),
+            "config": {
+                "batch_size": self.config.batch_size,
+                "learning_rate": self.config.learning_rate,
+                "weight_decay": self.config.weight_decay,
+                "num_epochs": self.config.num_epochs,
+                "max_grad_norm": self.config.max_grad_norm,
+                "dropout": self.config.dropout,
+                "rule_dim": self.config.rule_dim,
+                "input_size": list(self.config.input_size),
+                "process_size": list(self.config.process_size),
+                "early_stopping_patience": self.config.early_stopping_patience,
+                "use_color_relabeling": self.config.use_color_relabeling,
+                "augmentation_variants": self.config.augmentation_variants,
+                "preserve_background": self.config.preserve_background,
+                "enable_counterfactuals": self.config.enable_counterfactuals,
+                "counterfactual_transform": self.config.counterfactual_transform,
+                "rule_latent_regularization_weight": self.config.rule_latent_regularization_weight,
+                "use_support_as_test": self.config.use_support_as_test,
+                "device": str(self.config.device),
+                "random_seed": self.config.random_seed,
+                "deterministic": self.config.deterministic,
+            },
+            "model": {
+                "model_type": model_info["model_type"],
+                "total_parameters": model_info["total_parameters"],
+                "trainable_parameters": model_info["trainable_parameters"],
+                "frozen_parameters": model_info["frozen_parameters"],
+            },
+            "tasks": {
+                "n_tasks": len(task_indices),
+                "task_indices": task_indices,
+            },
+            "training": {
+                "best_epoch": None,
+                "best_loss": None,
+                "total_epochs": None,
+                "training_time_seconds": None,
+                "early_stopping_patience": self.config.early_stopping_patience,
+                "status": "started",
+            },
+        }
+
+        with open(self.experiment_dir / "training_info.json", "w") as f:
+            json.dump(training_info, f, indent=2)
+
+    def _update_training_info_with_results(
+        self,
+        best_epoch: int,
+        best_loss: float,
+        total_epochs: int,
+        training_time: float,
+        early_stopping_patience: int,
+    ) -> None:
+        """Update training info with final results."""
+        training_info_path = self.experiment_dir / "training_info.json"
+
+        if training_info_path.exists():
+            with open(training_info_path, "r") as f:
+                training_info = json.load(f)
+        else:
+            # fallback if file doesn't exist
+            training_info = {}
+
+        # update training results
+        training_info["training"].update(
+            {
+                "best_epoch": best_epoch,
+                "best_loss": best_loss,
+                "total_epochs": total_epochs,
+                "training_time_seconds": training_time,
+                "early_stopping_patience": early_stopping_patience,
+                "status": "completed",
+                "end_time": datetime.now().isoformat(),
+            }
+        )
+
+        with open(training_info_path, "w") as f:
+            json.dump(training_info, f, indent=2)
+
+    def create_task_subset(self, task_indices: List[int]):
         """create dataset subset with only selected tasks."""
+        # Use unified TaskSubset for both model types
         return TaskSubset(
             task_indices=task_indices,
             config=self.config,
@@ -125,6 +212,7 @@ class OverfitExperiment:
             holdout=True,
             use_first_combination_only=False,  # Use ALL combinations for training
             require_multiple_test_pairs=False,
+            model_type=self.config.model_type,
         )
 
     def train_on_tasks(
@@ -150,6 +238,8 @@ class OverfitExperiment:
         task_dataset = self.create_task_subset(task_indices)
 
         # create data loader (no validation split for overfitting)
+        # Get appropriate collate function for model type
+        collate_fn = get_collate_fn(self.config.model_type, use_flattening=True)
         train_loader = DataLoader(
             task_dataset,
             batch_size=self.config.batch_size,
@@ -157,14 +247,14 @@ class OverfitExperiment:
             num_workers=2,
             pin_memory=True,
             persistent_workers=True,  # keep workers alive between epochs
-            collate_fn=custom_collate_fn,
+            collate_fn=collate_fn,
         )
 
         # create model
-        model = SimpleARCModel(self.config)
+        model = create_model(self.config)
 
         # create trainer with overfitting config
-        trainer = ARCTrainer(model, self.config, task_dataset)
+        trainer = create_trainer(model, self.config, task_dataset)
 
         # override config for overfitting
         trainer.config.num_epochs = epochs
@@ -173,6 +263,9 @@ class OverfitExperiment:
         print(f"training on {len(task_dataset)} samples")
         print(f"batch size: {self.config.batch_size}")
         print(f"learning rate: {self.config.learning_rate}")
+
+        # save initial training info with config
+        self._save_initial_training_info(task_indices, model)
 
         # custom overfitting training loop
         start_time = time.time()
@@ -184,8 +277,8 @@ class OverfitExperiment:
             # update trainer's current epoch for proper logging
             trainer.current_epoch = epoch
 
-            # train one epoch using rule latent training method
-            train_metrics = trainer.train_epoch_rule_latent(train_loader)
+            # train one epoch using the standard interface
+            train_metrics = trainer.train_epoch(train_loader)
             avg_loss = train_metrics["total_loss"]
 
             # update scheduler
@@ -240,21 +333,10 @@ class OverfitExperiment:
         print(f"  best loss: {best_loss:.6f}")
         print(f"  training time: {training_time:.1f}s")
 
-        # save training info
-        training_info = {
-            "best_epoch": best_epoch,
-            "best_loss": best_loss,
-            "total_epochs": epoch + 1,
-            "training_time_seconds": training_time,
-            "early_stopping_patience": early_stopping_patience,
-            "tasks": {
-                "n_tasks": len(task_indices),
-                "task_indices": task_indices,
-            },
-        }
-
-        with open(self.experiment_dir / "training_info.json", "w") as f:
-            json.dump(training_info, f, indent=2)
+        # update training info with final results
+        self._update_training_info_with_results(
+            best_epoch, best_loss, epoch + 1, training_time, early_stopping_patience
+        )
 
         return str(self.experiment_dir / "best_model.pt")
 
@@ -277,6 +359,7 @@ class OverfitExperiment:
         task_dataset = self.create_task_subset(task_indices)
 
         # create data loader
+        collate_fn = get_collate_fn(self.config.model_type, use_flattening=True)
         eval_loader = DataLoader(
             task_dataset,
             batch_size=self.config.batch_size,
@@ -284,14 +367,14 @@ class OverfitExperiment:
             num_workers=2,
             pin_memory=True,
             persistent_workers=True,  # keep workers alive between epochs
-            collate_fn=custom_collate_fn,
+            collate_fn=collate_fn,
         )
 
         # create model and load checkpoint
-        model = SimpleARCModel(self.config)
         checkpoint = torch.load(
             checkpoint_path, map_location=self.config.device, weights_only=False
         )
+        model = create_model(checkpoint["config"])
         model.load_state_dict(checkpoint["model_state_dict"])
         model.to(self.config.device)
         model.eval()
@@ -314,18 +397,90 @@ class OverfitExperiment:
             for batch_idx, batch in enumerate(eval_loader):
                 # Move batch to device
                 device = next(model.parameters()).device
-                rule_latent_inputs = batch["rule_latent_inputs"].to(device)
                 test_inputs = batch["test_inputs"].to(device)
-                test_outputs = batch["test_outputs"].to(device)
-                holdout_inputs = batch["holdout_inputs"].to(device)
-                holdout_outputs = batch["holdout_outputs"].to(device)
-                has_holdout = batch["has_holdout"].to(device)
+
+                # Use correct key based on collate function format
+                if "test_targets" in batch:
+                    test_outputs = batch["test_targets"].to(device)  # Flattened format
+                else:
+                    test_outputs = batch["test_outputs"].to(device)  # Unified format
+                # Note: holdout inputs/outputs not available in flattened format
+                holdout_inputs = None
+                holdout_outputs = None
+                has_holdout = torch.zeros(
+                    test_inputs.size(0), dtype=torch.bool, device=device
+                )
 
                 # Get task indices for this batch
                 task_indices = batch["task_indices"]
 
+                # Determine collate function format once
+                is_flattened_format = "test_targets" in batch
+
+                # Helper functions for handling different formats
+                def get_test_example(test_inputs, test_outputs, i, test_idx):
+                    """Get test example in correct format based on collate function."""
+                    if is_flattened_format:
+                        # Flattened format: each sample is already flattened
+                        return test_inputs[i].unsqueeze(0), test_outputs[i].unsqueeze(0)
+                    else:
+                        # Unified format: get specific test example from batch
+                        return (
+                            test_inputs[i, test_idx : test_idx + 1],
+                            test_outputs[i, test_idx : test_idx + 1],
+                        )
+
+                def get_support_examples(
+                    support_example_inputs, support_example_outputs, i
+                ):
+                    """Get support examples in correct format based on collate function."""
+                    if is_flattened_format:
+                        # Flattened format: support examples are already [30, 30], just add batch dimension
+                        return (
+                            support_example_inputs[i][0].unsqueeze(0),
+                            support_example_outputs[i][0].unsqueeze(0),
+                            support_example_inputs[i][1].unsqueeze(0),
+                            support_example_outputs[i][1].unsqueeze(0),
+                        )
+                    else:
+                        # Unified format: need to unsqueeze and squeeze
+                        return (
+                            support_example_inputs[i][0].unsqueeze(0).squeeze(1),
+                            support_example_outputs[i][0].unsqueeze(0).squeeze(1),
+                            support_example_inputs[i][1].unsqueeze(0).squeeze(1),
+                            support_example_outputs[i][1].unsqueeze(0).squeeze(1),
+                        )
+
+                # Create support examples structure based on format
+                if is_flattened_format:
+                    # Flattened format: support examples are tensors
+                    support_example_inputs_rgb = [None] * len(
+                        task_indices
+                    )  # Not available
+                    support_example_outputs_rgb = [None] * len(
+                        task_indices
+                    )  # Not available
+                    support_example_inputs = [
+                        [batch["support1_inputs"][i], batch["support2_inputs"][i]]
+                        for i in range(len(task_indices))
+                    ]
+                    support_example_outputs = [
+                        [batch["support1_outputs"][i], batch["support2_outputs"][i]]
+                        for i in range(len(task_indices))
+                    ]
+                else:
+                    # Unified format: support examples are already lists
+                    support_example_inputs_rgb = batch.get(
+                        "support_example_inputs_rgb", [None] * len(task_indices)
+                    )
+                    support_example_outputs_rgb = batch.get(
+                        "support_example_outputs_rgb", [None] * len(task_indices)
+                    )
+                    support_example_inputs = batch["support_example_inputs"]
+                    support_example_outputs = batch["support_example_outputs"]
+
                 # Get all training examples for each task in the batch
-                batch_size = rule_latent_inputs.size(0)
+                batch_size = len(support_example_inputs)
                 max_train = 0
                 all_train_inputs_list = []
                 num_train_list = []
@@ -345,41 +500,109 @@ class OverfitExperiment:
                     all_train_inputs_list.append(train_inputs)
                     num_train_list.append(len(train_inputs))
 
-                # Pad all training inputs to consistent shape
-                all_train_inputs = torch.zeros([batch_size, max_train, 1, 30, 30]).to(
-                    device
-                )
+                # Determine model type and handle accordingly
+                is_patch_model = hasattr(model, "patch_tokenizer")
 
-                for i, train_inputs in enumerate(all_train_inputs_list):
-                    for j, train_input in enumerate(train_inputs):
-                        all_train_inputs[i, j] = train_input
+                if is_patch_model:
+                    # Patch model - no rule latents needed
+                    outputs = {"rule_latents": None}
+                else:
+                    # ResNet model - create rule latent inputs from RGB support examples
+                    if support_example_inputs_rgb[0] is not None:
+                        rule_latent_inputs = torch.zeros(
+                            [batch_size, 2, 2, 3, 64, 64]
+                        ).to(device)
+                        for i in range(batch_size):
+                            # Use RGB support examples for ResNet
+                            rule_latent_inputs[i, 0, 0] = support_example_inputs_rgb[i][
+                                0
+                            ]  # [3, 64, 64]
+                            rule_latent_inputs[i, 0, 1] = support_example_outputs_rgb[
+                                i
+                            ][0]  # [3, 64, 64]
+                            rule_latent_inputs[i, 1, 0] = support_example_inputs_rgb[i][
+                                1
+                            ]  # [3, 64, 64]
+                            rule_latent_inputs[i, 1, 1] = support_example_outputs_rgb[
+                                i
+                            ][1]  # [3, 64, 64]
 
-                num_train = torch.tensor(num_train_list, dtype=torch.long).to(device)
+                        # Pad all training inputs to consistent shape
+                        all_train_inputs = torch.zeros(
+                            [batch_size, max_train, 1, 30, 30]
+                        ).to(device)
+                        for i, train_inputs in enumerate(all_train_inputs_list):
+                            for j, train_input in enumerate(train_inputs):
+                                all_train_inputs[i, j] = train_input
 
-                # Forward pass with batched rule latent training
-                outputs = model.forward_rule_latent_training(
-                    rule_latent_inputs, all_train_inputs, num_train
-                )
+                        num_train = torch.tensor(num_train_list, dtype=torch.long).to(
+                            device
+                        )
+
+                        # Forward pass with batched rule latent training
+                        outputs = model.forward_rule_latent_training(
+                            rule_latent_inputs, all_train_inputs, num_train
+                        )
+                    else:
+                        outputs = {"rule_latents": None}
 
                 # Process each task in the batch
-                for i in range(rule_latent_inputs.size(0)):
+                for i in range(batch_size):
                     # Get number of test examples for this task
                     num_test = batch["num_test_examples"][i]
 
                     # Evaluate on all test examples for this task
                     for test_idx in range(num_test):
-                        # Get specific test example
-                        test_input = test_inputs[
-                            i, test_idx : test_idx + 1
-                        ]  # [1, 30, 30]
-                        test_output = test_outputs[
-                            i, test_idx : test_idx + 1
-                        ]  # [1, 30, 30]
+                        # Get test example in correct format
+                        test_input, test_output = get_test_example(
+                            test_inputs, test_outputs, i, test_idx
+                        )
 
                         # Evaluate on this test example
-                        test_logits = model.decoder(
-                            outputs["rule_latents"][i : i + 1], test_input
-                        )
+                        if is_patch_model:
+                            # Patch model - use direct forward pass
+                            # Get support examples in correct format
+                            (
+                                support1_input,
+                                support1_output,
+                                support2_input,
+                                support2_output,
+                            ) = get_support_examples(
+                                support_example_inputs, support_example_outputs, i
+                            )
+                            # Ensure test_input has the correct shape [1, 30, 30]
+                            if is_flattened_format:
+                                # Flattened format: test_input is already [1, 30, 30]
+                                test_input_clean = test_input
+                            else:
+                                # Unified format: handle potential shape issues
+                                if test_input.dim() == 2:
+                                    # test_input is [1, 30], need to add the missing dimension
+                                    test_input_clean = test_input.unsqueeze(-1).expand(
+                                        -1, -1, 30
+                                    )
+                                elif test_input.dim() == 3:
+                                    # test_input is already [1, 30, 30]
+                                    test_input_clean = test_input
+                                else:
+                                    raise ValueError(
+                                        f"Unexpected test_input shape: {test_input.shape}"
+                                    )
+
+                            test_logits = model(
+                                support1_input,
+                                support1_output,
+                                support2_input,
+                                support2_output,
+                                test_input_clean,
+                            )
+                        else:
+                            # ResNet model - use decoder with rule latents
+                            test_logits = model.decoder(
+                                outputs["rule_latents"][i : i + 1], test_input
+                            )
+
+                        # test_output is already in correct format from get_test_example
                         test_target = test_output
 
                         # calculate metrics using existing functions
@@ -426,10 +649,37 @@ class OverfitExperiment:
 
                     # evaluate on holdout target (if available)
                     if has_holdout[i]:
-                        holdout_logits = model.decoder(
-                            outputs["rule_latents"][i : i + 1],
-                            holdout_inputs[i : i + 1],
-                        )
+                        if is_patch_model:
+                            # Patch model - use direct forward pass for holdout
+                            support1_input = (
+                                support_example_inputs[i][0].unsqueeze(0).squeeze(1)
+                            )  # [1, 30, 30]
+                            support1_output = (
+                                support_example_outputs[i][0].unsqueeze(0).squeeze(1)
+                            )  # [1, 30, 30]
+                            support2_input = (
+                                support_example_inputs[i][1].unsqueeze(0).squeeze(1)
+                            )  # [1, 30, 30]
+                            support2_output = (
+                                support_example_outputs[i][1].unsqueeze(0).squeeze(1)
+                            )  # [1, 30, 30]
+                            holdout_input_clean = holdout_inputs[i : i + 1].squeeze(
+                                1
+                            )  # [1, 30, 30]
+
+                            holdout_logits = model(
+                                support1_input,
+                                support1_output,
+                                support2_input,
+                                support2_output,
+                                holdout_input_clean,
+                            )
+                        else:
+                            # ResNet model - use decoder with rule latents
+                            holdout_logits = model.decoder(
+                                outputs["rule_latents"][i : i + 1],
+                                holdout_inputs[i : i + 1],
+                            )
                         holdout_target = holdout_outputs[i : i + 1]
 
                         # calculate holdout metrics
@@ -646,7 +896,7 @@ def main():
     """main experiment function."""
     parser = argparse.ArgumentParser(description="n-task overfitting experiment")
     parser.add_argument(
-        "--n_tasks", "-n", type=int, default=50, help="number of tasks to overfit on"
+        "--n_tasks", "-n", type=int, default=10, help="number of tasks to overfit on"
     )
     parser.add_argument(
         "--task-indices", type=int, nargs="+", help="specific task indices to use"

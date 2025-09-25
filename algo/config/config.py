@@ -23,6 +23,9 @@ class Config:
     max_grad_norm: float = 1.0
     dropout: float = 0.1
 
+    # Patch model specific training options
+    use_support_as_test: bool = True  # Use support examples as additional test inputs
+
     # Data paths
     data_dir: str = "data/raw"
     processed_dir: str = "data/processed"
@@ -45,7 +48,7 @@ class Config:
     early_stopping_patience: int = 50
 
     # Device
-    device: str = "cuda" if os.environ.get("CUDA_VISIBLE_DEVICES") else "cpu"
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Deterministic training
     random_seed: int = 42
@@ -57,7 +60,7 @@ class Config:
     preserve_background: bool = True  # Keep background color (0) unchanged
 
     # Counterfactual augmentation
-    enable_counterfactuals: bool = False
+    enable_counterfactuals: bool = True
     counterfactual_transform: str = (
         "rotate_90"  # "rotate_90", "rotate_180", "rotate_270", "reflect_h", "reflect_v"
     )
@@ -66,6 +69,16 @@ class Config:
     rule_latent_regularization_weight: float = (
         0.1  # Weight for rule latent similarity regularization
     )
+
+    # Model configuration
+    # model_type: str = "simple_arc"  # "simple_arc" or "patch_attention"
+    model_type: str = "patch_attention"  # "simple_arc" or "patch_attention"
+
+    # Patch attention model specific configs
+    patch_size: int = 3
+    model_dim: int = 128
+    num_heads: int = 4
+    num_layers: int = 3
 
     # Color palette (ARC official 10 colors)
     color_palette: List[List[float]] = None
