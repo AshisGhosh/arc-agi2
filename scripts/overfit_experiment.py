@@ -411,14 +411,50 @@ class OverfitExperiment:
                 # Get task indices for this batch
                 task_indices = batch["task_indices"]
 
-                # For flattened format, we have individual support pairs
-                # Create dummy support examples structure for compatibility
+                # Determine collate function format once
+                is_flattened_format = "test_targets" in batch
+
+                # Helper functions for handling different formats
+                def get_test_example(test_inputs, test_outputs, i, test_idx):
+                    """Get test example in correct format based on collate function."""
+                    if is_flattened_format:
+                        # Flattened format: each sample is already flattened
+                        return test_inputs[i].unsqueeze(0), test_outputs[i].unsqueeze(0)
+                    else:
+                        # Unified format: get specific test example from batch
+                        return (
+                            test_inputs[i, test_idx : test_idx + 1],
+                            test_outputs[i, test_idx : test_idx + 1],
+                        )
+
+                def get_support_examples(
+                    support_example_inputs, support_example_outputs, i
+                ):
+                    """Get support examples in correct format based on collate function."""
+                    if is_flattened_format:
+                        # Flattened format: support examples are already [30, 30], just add batch dimension
+                        return (
+                            support_example_inputs[i][0].unsqueeze(0),
+                            support_example_outputs[i][0].unsqueeze(0),
+                            support_example_inputs[i][1].unsqueeze(0),
+                            support_example_outputs[i][1].unsqueeze(0),
+                        )
+                    else:
+                        # Unified format: need to unsqueeze and squeeze
+                        return (
+                            support_example_inputs[i][0].unsqueeze(0).squeeze(1),
+                            support_example_outputs[i][0].unsqueeze(0).squeeze(1),
+                            support_example_inputs[i][1].unsqueeze(0).squeeze(1),
+                            support_example_outputs[i][1].unsqueeze(0).squeeze(1),
+                        )
+
+                # Create support examples structure (same for both formats)
                 support_example_inputs_rgb = [None] * len(
                     task_indices
-                )  # Not available in flattened format
+                )  # Not available in either format
                 support_example_outputs_rgb = [None] * len(
                     task_indices
-                )  # Not available in flattened format
+                )  # Not available in either format
                 support_example_inputs = [
                     [batch["support1_inputs"][i], batch["support2_inputs"][i]]
                     for i in range(len(task_indices))
@@ -502,43 +538,41 @@ class OverfitExperiment:
 
                     # Evaluate on all test examples for this task
                     for test_idx in range(num_test):
-                        # Get specific test example
-                        test_input = test_inputs[
-                            i, test_idx : test_idx + 1
-                        ]  # [1, 30, 30]
-                        test_output = test_outputs[
-                            i, test_idx : test_idx + 1
-                        ]  # [1, 30, 30]
+                        # Get test example in correct format
+                        test_input, test_output = get_test_example(
+                            test_inputs, test_outputs, i, test_idx
+                        )
 
                         # Evaluate on this test example
                         if is_patch_model:
                             # Patch model - use direct forward pass
-                            # Get support examples for this task
-                            support1_input = (
-                                support_example_inputs[i][0].unsqueeze(0).squeeze(1)
-                            )  # [1, 30, 30]
-                            support1_output = (
-                                support_example_outputs[i][0].unsqueeze(0).squeeze(1)
-                            )  # [1, 30, 30]
-                            support2_input = (
-                                support_example_inputs[i][1].unsqueeze(0).squeeze(1)
-                            )  # [1, 30, 30]
-                            support2_output = (
-                                support_example_outputs[i][1].unsqueeze(0).squeeze(1)
-                            )  # [1, 30, 30]
+                            # Get support examples in correct format
+                            (
+                                support1_input,
+                                support1_output,
+                                support2_input,
+                                support2_output,
+                            ) = get_support_examples(
+                                support_example_inputs, support_example_outputs, i
+                            )
                             # Ensure test_input has the correct shape [1, 30, 30]
-                            if test_input.dim() == 2:
-                                # test_input is [1, 30], need to add the missing dimension
-                                test_input_clean = test_input.unsqueeze(-1).expand(
-                                    -1, -1, 30
-                                )  # [1, 30, 30]
-                            elif test_input.dim() == 3:
-                                # test_input is already [1, 30, 30]
+                            if is_flattened_format:
+                                # Flattened format: test_input is already [1, 30, 30]
                                 test_input_clean = test_input
                             else:
-                                raise ValueError(
-                                    f"Unexpected test_input shape: {test_input.shape}"
-                                )
+                                # Unified format: handle potential shape issues
+                                if test_input.dim() == 2:
+                                    # test_input is [1, 30], need to add the missing dimension
+                                    test_input_clean = test_input.unsqueeze(-1).expand(
+                                        -1, -1, 30
+                                    )
+                                elif test_input.dim() == 3:
+                                    # test_input is already [1, 30, 30]
+                                    test_input_clean = test_input
+                                else:
+                                    raise ValueError(
+                                        f"Unexpected test_input shape: {test_input.shape}"
+                                    )
 
                             test_logits = model(
                                 support1_input,
@@ -552,6 +586,8 @@ class OverfitExperiment:
                             test_logits = model.decoder(
                                 outputs["rule_latents"][i : i + 1], test_input
                             )
+
+                        # test_output is already in correct format from get_test_example
                         test_target = test_output
 
                         # calculate metrics using existing functions
