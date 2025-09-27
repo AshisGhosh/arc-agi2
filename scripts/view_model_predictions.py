@@ -661,9 +661,10 @@ def evaluate_model_on_tasks(
 
                 # Determine model type and handle accordingly
                 is_patch_model = hasattr(model, "patch_tokenizer")
+                is_transformer_model = hasattr(model, "pair_encoder")
 
-                if is_patch_model:
-                    # Patch model - no rule latents needed
+                if is_patch_model or is_transformer_model:
+                    # Patch model or Transformer model - no rule latents needed
                     outputs = {"rule_latents": None}
                 else:
                     # ResNet model - create rule latent inputs from RGB support examples
@@ -727,8 +728,8 @@ def evaluate_model_on_tasks(
                             )  # [1, 30, 30]
                             target_output = test_example["output"].unsqueeze(0)
 
-                            if is_patch_model:
-                                # Patch model - use direct forward pass
+                            if is_patch_model or is_transformer_model:
+                                # Patch model or Transformer model - use direct forward pass
                                 # Get support examples for this task
                                 support1_input = support_examples[0]["input"].squeeze(
                                     1
@@ -866,8 +867,8 @@ def evaluate_model_on_tasks(
                         target_input = test_example["input"].squeeze(1)  # [1, 30, 30]
                         target_output = test_example["output"].unsqueeze(0)
 
-                        if is_patch_model:
-                            # Patch model - use direct forward pass
+                        if is_patch_model or is_transformer_model:
+                            # Patch model or Transformer model - use direct forward pass
                             support1_input = support_examples[0]["input"].squeeze(
                                 1
                             )  # [1, 30, 30]
@@ -907,8 +908,8 @@ def evaluate_model_on_tasks(
                     target_input = holdout_example["input"].squeeze(1)  # [1, 30, 30]
                     target_output = holdout_example["output"].unsqueeze(0)
 
-                    if is_patch_model:
-                        # Patch model - use direct forward pass
+                    if is_patch_model or is_transformer_model:
+                        # Patch model or Transformer model - use direct forward pass
                         support1_input = support_examples[0]["input"].squeeze(
                             1
                         )  # [1, 30, 30]
@@ -946,8 +947,8 @@ def evaluate_model_on_tasks(
                     target_input = test_example["input"].squeeze(1)  # [1, 30, 30]
                     target_output = test_example["output"].unsqueeze(0)
 
-                    if is_patch_model:
-                        # Patch model - use direct forward pass
+                    if is_patch_model or is_transformer_model:
+                        # Patch model or Transformer model - use direct forward pass
                         support1_input = support_examples[0]["input"].squeeze(
                             1
                         )  # [1, 30, 30]
@@ -980,8 +981,8 @@ def evaluate_model_on_tasks(
                     metrics = calculate_accuracy_metrics(predictions, target_output)
 
                 # Create sample data for visualization
-                if is_patch_model:
-                    # Patch model - use grayscale support examples
+                if is_patch_model or is_transformer_model:
+                    # Patch model or Transformer model - use grayscale support examples
                     sample_data = {
                         "train_examples": [
                             {
@@ -1228,9 +1229,10 @@ def test_all_combinations(
 
                 # Determine model type and handle accordingly
                 is_patch_model = hasattr(model, "patch_tokenizer")
+                is_transformer_model = hasattr(model, "pair_encoder")
 
-                if is_patch_model:
-                    # Patch model - no rule latents needed
+                if is_patch_model or is_transformer_model:
+                    # Patch model or Transformer model - no rule latents needed
                     rule_latent = None
                 else:
                     # ResNet model - create rule latent from RGB support examples
@@ -1277,8 +1279,8 @@ def test_all_combinations(
                     if test_all_test_pairs and len(test_examples) > 1:
                         # Evaluate on all test examples and create separate results for each
                         for test_idx, test_example in enumerate(test_examples):
-                            if is_patch_model:
-                                # Patch model - use direct forward pass
+                            if is_patch_model or is_transformer_model:
+                                # Patch model or Transformer model - use direct forward pass
                                 support1_input = support_examples[0]["input"].squeeze(
                                     1
                                 )  # [1, 30, 30]
@@ -1417,8 +1419,8 @@ def test_all_combinations(
                     else:
                         # Use first test example (original behavior)
                         target = test_examples[0]
-                        if is_patch_model:
-                            # Patch model - use direct forward pass
+                        if is_patch_model or is_transformer_model:
+                            # Patch model or Transformer model - use direct forward pass
                             support1_input = support_examples[0]["input"].squeeze(
                                 1
                             )  # [1, 30, 30]
@@ -1452,8 +1454,8 @@ def test_all_combinations(
                         )
                 elif evaluation_mode == "holdout" and holdout_example is not None:
                     target = holdout_example
-                    if is_patch_model:
-                        # Patch model - use direct forward pass
+                    if is_patch_model or is_transformer_model:
+                        # Patch model or Transformer model - use direct forward pass
                         support1_input = support_examples[0]["input"].squeeze(
                             1
                         )  # [1, 30, 30]
@@ -1487,8 +1489,8 @@ def test_all_combinations(
                 else:
                     # Fallback to first test example
                     target = test_examples[0]
-                    if is_patch_model:
-                        # Patch model - use direct forward pass
+                    if is_patch_model or is_transformer_model:
+                        # Patch model or Transformer model - use direct forward pass
                         support1_input = support_examples[0]["input"].squeeze(
                             1
                         )  # [1, 30, 30]
@@ -1667,11 +1669,13 @@ def main():
         "patch_cross_attention": "patch_attention",
         "patch_attention": "patch_attention",
         "simple_arc": "simple_arc",
+        "transformer_arc": "transformer_arc",
     }.get(model_type, model_type)
 
     model_type_display = {
         "simple_arc": "SimpleARC (ResNet + MLP)",
         "patch_attention": "PatchCrossAttention",
+        "transformer_arc": "TransformerARC (Transformer + Cross-Attention)",
     }.get(model_type_normalized, model_type)
 
     st.sidebar.subheader("model info")
@@ -1689,6 +1693,20 @@ def main():
         st.sidebar.write(
             f"**support as test:** {'✅ enabled' if use_support_as_test else '❌ disabled'}"
         )
+    elif model_type_normalized == "transformer_arc":
+        st.sidebar.write(
+            "**architecture:** transformer encoder + cross-attention decoder"
+        )
+        st.sidebar.write(f"**patch size:** {config_info.get('patch_size', 3)}")
+        st.sidebar.write(f"**model dim:** {config_info.get('model_dim', 128)}")
+        st.sidebar.write(
+            f"**num rule tokens:** {config_info.get('num_rule_tokens', 4)}"
+        )
+        st.sidebar.write(
+            f"**num encoder layers:** {config_info.get('num_encoder_layers', 2)}"
+        )
+        if "total_parameters" in model_info:
+            st.sidebar.write(f"**parameters:** {model_info['total_parameters']:,}")
     else:
         st.sidebar.write("**architecture:** resnet encoder + mlp decoder")
         st.sidebar.write(f"**rule dim:** {config_info.get('rule_dim', 32)}")
@@ -1800,7 +1818,7 @@ def main():
     )
 
     # Only show rule latent analysis for ResNet models
-    if model_type_normalized != "patch_attention":
+    if model_type_normalized not in ["patch_attention", "transformer_arc"]:
         st.sidebar.subheader("rule latent analysis")
         inject_noise = st.sidebar.checkbox(
             "inject noise into rule latent",
@@ -1815,7 +1833,10 @@ def main():
     noise_range = 1.0
     noise_ratio = 1.0
 
-    if inject_noise and model_type_normalized != "patch_attention":
+    if inject_noise and model_type_normalized not in [
+        "patch_attention",
+        "transformer_arc",
+    ]:
         noise_type = st.sidebar.selectbox(
             "noise type",
             ["gaussian", "uniform", "zeros", "ones"],
@@ -1852,7 +1873,7 @@ def main():
         )
 
     # Only show support example noise for ResNet models
-    if model_type_normalized != "patch_attention":
+    if model_type_normalized not in ["patch_attention", "transformer_arc"]:
         st.sidebar.subheader("support example noise")
 
         # Support A input noise
@@ -1908,7 +1929,7 @@ def main():
     noise_b_output_ratio = 1.0
 
     # Only show support noise parameter controls for ResNet models
-    if model_type_normalized != "patch_attention":
+    if model_type_normalized not in ["patch_attention", "transformer_arc"]:
         if noise_a_input:
             noise_a_input_type = st.sidebar.selectbox(
                 "A input noise type",

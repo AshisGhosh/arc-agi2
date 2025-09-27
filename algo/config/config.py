@@ -8,33 +8,94 @@ import numpy as np
 
 @dataclass
 class Config:
-    """Configuration for SimpleARC model training."""
+    """Configuration for ARC model training."""
 
-    # Model architecture
-    rule_dim: int = 32
+    # =============================================================================
+    # MODEL SELECTION
+    # =============================================================================
+    model_type: str = (
+        "transformer_arc"  # "simple_arc", "patch_attention", or "transformer_arc"
+    )
+
+    # =============================================================================
+    # COMMON MODEL PARAMETERS
+    # =============================================================================
     input_size: Tuple[int, int] = (30, 30)
     process_size: Tuple[int, int] = (64, 64)
+    dropout: float = 0.1
 
-    # Training parameters
+    # =============================================================================
+    # SIMPLE ARC (ResNet + MLP) MODEL PARAMETERS
+    # =============================================================================
+    # ResNet encoder parameters
+    rule_dim: int = 32  # Dimension of rule latent space
+
+    # Rule latent regularization
+    rule_latent_regularization_weight: float = 0.1
+
+    # =============================================================================
+    # PATCH ATTENTION MODEL PARAMETERS
+    # =============================================================================
+    # Patch processing
+    patch_size: int = 3  # Size of patches (3x3)
+    model_dim: int = 128  # Model dimension (d_model)
+    num_heads: int = 4  # Number of attention heads
+    num_layers: int = 3  # Number of transformer layers
+
+    # Patch model specific training options
+    use_support_as_test: bool = True  # Use support examples as additional test inputs
+
+    # =============================================================================
+    # TRANSFORMER ARC MODEL PARAMETERS
+    # =============================================================================
+    # Model architecture (reusing some patch attention params)
+    d_model: int = 128  # Model dimension (same as model_dim for compatibility)
+    num_rule_tokens: int = 8  # Number of rule tokens from PMA
+    num_encoder_layers: int = 3  # Number of transformer encoder layers
+
+    # Auxiliary loss weights
+    support_reconstruction_weight: float = 0.1  # Weight for support reconstruction loss
+    cls_regularization_weight: float = 0.01  # Weight for CLS regularization loss
+    contrastive_temperature: float = 0.07  # Temperature for contrastive learning
+
+    # =============================================================================
+    # TRAINING PARAMETERS
+    # =============================================================================
     batch_size: int = 32
     learning_rate: float = 1e-4
     weight_decay: float = 1e-5
     num_epochs: int = 2000
     max_grad_norm: float = 1.0
-    dropout: float = 0.1
 
-    # Patch model specific training options
-    use_support_as_test: bool = True  # Use support examples as additional test inputs
-
+    # =============================================================================
+    # DATA CONFIGURATION
+    # =============================================================================
     # Data paths
     data_dir: str = "data/raw"
     processed_dir: str = "data/processed"
     arc_agi1_dir: str = "ARC-AGI/data/training"
     arc_agi2_dir: str = "ARC-AGI-2/data/training"
 
-    # Training dataset selection (choose which preprocessed dataset to use)
+    # Training dataset selection
     training_dataset: str = "arc_agi1"  # "arc_agi1" or "arc_agi2"
 
+    # =============================================================================
+    # AUGMENTATION PARAMETERS
+    # =============================================================================
+    # Color augmentation
+    use_color_relabeling: bool = True
+    augmentation_variants: int = 1  # Number of augmented versions per original example
+    preserve_background: bool = True  # Keep background color (0) unchanged
+
+    # Counterfactual augmentation
+    enable_counterfactuals: bool = True
+    counterfactual_transform: str = (
+        "rotate_90"  # "rotate_90", "rotate_180", "rotate_270", "reflect_h", "reflect_v"
+    )
+
+    # =============================================================================
+    # TRAINING INFRASTRUCTURE
+    # =============================================================================
     # Model paths
     model_dir: str = "models"
     checkpoint_dir: str = "checkpoints"
@@ -54,32 +115,6 @@ class Config:
     random_seed: int = 42
     deterministic: bool = True
 
-    # Color augmentation
-    use_color_relabeling: bool = True
-    augmentation_variants: int = 1  # Number of augmented versions per original example
-    preserve_background: bool = True  # Keep background color (0) unchanged
-
-    # Counterfactual augmentation
-    enable_counterfactuals: bool = True
-    counterfactual_transform: str = (
-        "rotate_90"  # "rotate_90", "rotate_180", "rotate_270", "reflect_h", "reflect_v"
-    )
-
-    # Rule latent regularization
-    rule_latent_regularization_weight: float = (
-        0.1  # Weight for rule latent similarity regularization
-    )
-
-    # Model configuration
-    # model_type: str = "simple_arc"  # "simple_arc" or "patch_attention"
-    model_type: str = "patch_attention"  # "simple_arc" or "patch_attention"
-
-    # Patch attention model specific configs
-    patch_size: int = 3
-    model_dim: int = 128
-    num_heads: int = 4
-    num_layers: int = 3
-
     # Color palette (ARC official 10 colors)
     color_palette: List[List[float]] = None
 
@@ -98,6 +133,57 @@ class Config:
                 [0.498, 0.859, 1.0],  # 8: Teal (#7FDBFF)
                 [0.529, 0.047, 0.145],  # 9: Brown (#870C25)
             ]
+
+    def get_model_specific_params(self) -> dict:
+        """Get model-specific parameters based on model_type."""
+        if self.model_type == "simple_arc":
+            return {
+                "rule_dim": self.rule_dim,
+                "rule_latent_regularization_weight": self.rule_latent_regularization_weight,
+            }
+        elif self.model_type == "patch_attention":
+            return {
+                "patch_size": self.patch_size,
+                "model_dim": self.model_dim,
+                "num_heads": self.num_heads,
+                "num_layers": self.num_layers,
+                "use_support_as_test": self.use_support_as_test,
+            }
+        elif self.model_type == "transformer_arc":
+            return {
+                "patch_size": self.patch_size,
+                "d_model": self.d_model,
+                "num_rule_tokens": self.num_rule_tokens,
+                "num_encoder_layers": self.num_encoder_layers,
+                "support_reconstruction_weight": self.support_reconstruction_weight,
+                "cls_regularization_weight": self.cls_regularization_weight,
+                "contrastive_temperature": self.contrastive_temperature,
+            }
+        else:
+            raise ValueError(f"Unknown model_type: {self.model_type}")
+
+    def validate_config(self):
+        """Validate configuration parameters."""
+        valid_model_types = ["simple_arc", "patch_attention", "transformer_arc"]
+        if self.model_type not in valid_model_types:
+            raise ValueError(
+                f"model_type must be one of {valid_model_types}, got {self.model_type}"
+            )
+
+        # Validate transformer-specific parameters
+        if self.model_type == "transformer_arc":
+            if self.d_model <= 0:
+                raise ValueError("d_model must be positive")
+            if self.num_rule_tokens <= 0:
+                raise ValueError("num_rule_tokens must be positive")
+            if self.num_encoder_layers <= 0:
+                raise ValueError("num_encoder_layers must be positive")
+            if self.support_reconstruction_weight < 0:
+                raise ValueError("support_reconstruction_weight must be non-negative")
+            if self.cls_regularization_weight < 0:
+                raise ValueError("cls_regularization_weight must be non-negative")
+            if self.contrastive_temperature <= 0:
+                raise ValueError("contrastive_temperature must be positive")
 
     def set_deterministic_training(self):
         """Set up deterministic training for reproducible results."""

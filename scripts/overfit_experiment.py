@@ -502,9 +502,10 @@ class OverfitExperiment:
 
                 # Determine model type and handle accordingly
                 is_patch_model = hasattr(model, "patch_tokenizer")
+                is_transformer_model = hasattr(model, "pair_encoder")
 
-                if is_patch_model:
-                    # Patch model - no rule latents needed
+                if is_patch_model or is_transformer_model:
+                    # Patch model or Transformer model - no rule latents needed
                     outputs = {"rule_latents": None}
                 else:
                     # ResNet model - create rule latent inputs from RGB support examples
@@ -559,8 +560,8 @@ class OverfitExperiment:
                         )
 
                         # Evaluate on this test example
-                        if is_patch_model:
-                            # Patch model - use direct forward pass
+                        if is_patch_model or is_transformer_model:
+                            # Patch model or Transformer model - use direct forward pass
                             # Get support examples in correct format
                             (
                                 support1_input,
@@ -649,8 +650,8 @@ class OverfitExperiment:
 
                     # evaluate on holdout target (if available)
                     if has_holdout[i]:
-                        if is_patch_model:
-                            # Patch model - use direct forward pass for holdout
+                        if is_patch_model or is_transformer_model:
+                            # Patch model or Transformer model - use direct forward pass for holdout
                             support1_input = (
                                 support_example_inputs[i][0].unsqueeze(0).squeeze(1)
                             )  # [1, 30, 30]
