@@ -439,7 +439,7 @@ def forward_transformer_with_noise(
         support_outputs = torch.stack(
             [support1_output, support2_output], dim=1
         )  # [1, 2, 30, 30]
-        rule_tokens = model.get_rule_tokens_batched(
+        rule_tokens = model.get_rule_tokens(
             support_inputs, support_outputs
         )  # [1, num_rule_tokens, d_model]
 
@@ -1870,7 +1870,9 @@ def main():
             "**architecture:** transformer encoder + cross-attention decoder"
         )
         st.sidebar.write(f"**patch size:** {config_info.get('patch_size', 3)}")
-        st.sidebar.write(f"**model dim:** {config_info.get('model_dim', 128)}")
+        # For transformer models, use d_model from config or model_dim from model_info
+        model_dim = config_info.get("d_model", model_info.get("model_dim", 128))
+        st.sidebar.write(f"**model dim:** {model_dim}")
         st.sidebar.write(
             f"**num rule tokens:** {config_info.get('num_rule_tokens', 4)}"
         )

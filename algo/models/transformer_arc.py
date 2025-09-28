@@ -534,7 +534,41 @@ class TransformerARCModel(BaseARCModel):
 
         return output
 
-    def get_pair_summaries_batched(
+    def forward_with_support_batch(
+        self,
+        support_inputs: torch.Tensor,
+        support_outputs: torch.Tensor,
+        test_inputs: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Forward pass with batched support inputs for efficient training.
+
+        Args:
+            support_inputs: [B, 2, 30, 30] - batch of support input pairs
+            support_outputs: [B, 2, 30, 30] - batch of support output pairs
+            test_inputs: [B, 30, 30] - batch of test inputs
+
+        Returns:
+            outputs: [B, 10, 30, 30] - batch of predictions
+        """
+        # Ensure all inputs are on the same device as model parameters
+        device = next(self.parameters()).device
+        support_inputs = support_inputs.to(device)
+        support_outputs = support_outputs.to(device)
+        test_inputs = test_inputs.to(device)
+
+        # Get rule tokens for all pairs
+        rule_tokens = self.get_rule_tokens(support_inputs, support_outputs)
+
+        # Process all test inputs with cross-attention
+        processed_patches = self.cross_attention_decoder(test_inputs, rule_tokens)
+
+        # Convert to pixel-level predictions
+        outputs = self.output_head(processed_patches)
+
+        return outputs
+
+    def get_pair_summaries(
         self,
         support_inputs: torch.Tensor,
         support_outputs: torch.Tensor,
@@ -568,7 +602,7 @@ class TransformerARCModel(BaseARCModel):
 
         return pair_summaries
 
-    def get_rule_tokens_batched(
+    def get_rule_tokens(
         self,
         support_inputs: torch.Tensor,
         support_outputs: torch.Tensor,
@@ -589,48 +623,12 @@ class TransformerARCModel(BaseARCModel):
         support_outputs = support_outputs.to(device)
 
         # Get pair summaries
-        pair_summaries = self.get_pair_summaries_batched(
-            support_inputs, support_outputs
-        )
+        pair_summaries = self.get_pair_summaries(support_inputs, support_outputs)
 
         # Create rule tokens
         rule_tokens = self.pma(pair_summaries)
 
         return rule_tokens
-
-    def forward_batched(
-        self,
-        support_inputs: torch.Tensor,
-        support_outputs: torch.Tensor,
-        test_inputs: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Batched forward pass for efficient training.
-
-        Args:
-            support_inputs: [B, 2, 30, 30] - batch of support input pairs
-            support_outputs: [B, 2, 30, 30] - batch of support output pairs
-            test_inputs: [B, 30, 30] - batch of test inputs
-
-        Returns:
-            outputs: [B, 10, 30, 30] - batch of predictions
-        """
-        # Ensure all inputs are on the same device as model parameters
-        device = next(self.parameters()).device
-        support_inputs = support_inputs.to(device)
-        support_outputs = support_outputs.to(device)
-        test_inputs = test_inputs.to(device)
-
-        # Get rule tokens for all pairs
-        rule_tokens = self.get_rule_tokens_batched(support_inputs, support_outputs)
-
-        # Process all test inputs with cross-attention
-        processed_patches = self.cross_attention_decoder(test_inputs, rule_tokens)
-
-        # Convert to pixel-level predictions
-        outputs = self.output_head(processed_patches)
-
-        return outputs
 
     def get_model_info(self) -> Dict[str, Any]:
         """Get model information for logging/debugging."""

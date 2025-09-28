@@ -137,7 +137,7 @@ class TransformerTrainer(BaseTrainer):
             )  # [N, 2, 30, 30]
 
             # Main forward pass - batched
-            main_logits = self.model.forward_batched(
+            main_logits = self.model.forward_with_support_batch(
                 batched_support_inputs, batched_support_outputs, batched_test_inputs
             )  # [N, 10, 30, 30]
 
@@ -238,9 +238,7 @@ class TransformerTrainer(BaseTrainer):
         B = support_inputs.shape[0]
 
         # Get rule tokens for all pairs
-        rule_tokens = self.model.get_rule_tokens_batched(
-            support_inputs, support_outputs
-        )
+        rule_tokens = self.model.get_rule_tokens(support_inputs, support_outputs)
 
         # Reshape for batched processing
         all_support_inputs = support_inputs.view(B * 2, 30, 30)  # [2B, 30, 30]
@@ -280,9 +278,7 @@ class TransformerTrainer(BaseTrainer):
             cls_loss: scalar tensor
         """
         # Get pair summaries
-        pair_summaries = self.model.get_pair_summaries_batched(
-            support_inputs, support_outputs
-        )
+        pair_summaries = self.model.get_pair_summaries(support_inputs, support_outputs)
 
         # Split into R_1 and R_2
         R_1 = pair_summaries[:, 0, :]  # [B, d_model]
@@ -395,7 +391,7 @@ class TransformerTrainer(BaseTrainer):
                 batched_support_outputs = torch.stack(all_support_outputs_expanded)
 
                 # Main forward pass - batched
-                main_logits = self.model.forward_batched(
+                main_logits = self.model.forward_with_support_batch(
                     batched_support_inputs, batched_support_outputs, batched_test_inputs
                 )
 
