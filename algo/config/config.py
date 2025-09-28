@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from typing import Tuple, List
 import os
 import torch
@@ -50,7 +50,7 @@ class Config:
     # =============================================================================
     # Model architecture (reusing some patch attention params)
     d_model: int = 128  # Model dimension (same as model_dim for compatibility)
-    num_rule_tokens: int = 8  # Number of rule tokens from PMA
+    num_rule_tokens: int = 2  # Number of rule tokens from PMA
     num_encoder_layers: int = 3  # Number of transformer encoder layers
 
     # Auxiliary loss weights
@@ -184,6 +184,19 @@ class Config:
                 raise ValueError("cls_regularization_weight must be non-negative")
             if self.contrastive_temperature <= 0:
                 raise ValueError("contrastive_temperature must be positive")
+
+    def to_dict(self) -> dict:
+        """convert config to dictionary for json serialization."""
+        config_dict = asdict(self)
+        
+        # convert tuples to lists for json serialization
+        config_dict["input_size"] = list(config_dict["input_size"])
+        config_dict["process_size"] = list(config_dict["process_size"])
+        
+        # convert device to string
+        config_dict["device"] = str(config_dict["device"])
+        
+        return config_dict
 
     def set_deterministic_training(self):
         """Set up deterministic training for reproducible results."""
