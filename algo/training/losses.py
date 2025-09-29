@@ -17,6 +17,9 @@ def calculate_classification_loss(
     Returns:
         Tuple of (total_loss, loss_components)
     """
+    # Ensure target is on the same device as logits
+    target = target.to(logits.device)
+
     # Flatten spatial dimensions for cross-entropy
     logits_flat = logits.reshape(logits.size(0), 10, -1)  # [B, 10, 900]
     target_flat = target.reshape(target.size(0), -1)  # [B, 900]

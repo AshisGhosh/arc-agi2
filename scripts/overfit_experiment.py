@@ -123,28 +123,7 @@ class OverfitExperiment:
         training_info = {
             "experiment_name": self.experiment_name,
             "start_time": datetime.now().isoformat(),
-            "config": {
-                "batch_size": self.config.batch_size,
-                "learning_rate": self.config.learning_rate,
-                "weight_decay": self.config.weight_decay,
-                "num_epochs": self.config.num_epochs,
-                "max_grad_norm": self.config.max_grad_norm,
-                "dropout": self.config.dropout,
-                "rule_dim": self.config.rule_dim,
-                "input_size": list(self.config.input_size),
-                "process_size": list(self.config.process_size),
-                "early_stopping_patience": self.config.early_stopping_patience,
-                "use_color_relabeling": self.config.use_color_relabeling,
-                "augmentation_variants": self.config.augmentation_variants,
-                "preserve_background": self.config.preserve_background,
-                "enable_counterfactuals": self.config.enable_counterfactuals,
-                "counterfactual_transform": self.config.counterfactual_transform,
-                "rule_latent_regularization_weight": self.config.rule_latent_regularization_weight,
-                "use_support_as_test": self.config.use_support_as_test,
-                "device": str(self.config.device),
-                "random_seed": self.config.random_seed,
-                "deterministic": self.config.deterministic,
-            },
+            "config": self.config.to_dict(),
             "model": {
                 "model_type": model_info["model_type"],
                 "total_parameters": model_info["total_parameters"],
@@ -502,9 +481,10 @@ class OverfitExperiment:
 
                 # Determine model type and handle accordingly
                 is_patch_model = hasattr(model, "patch_tokenizer")
+                is_transformer_model = hasattr(model, "pair_encoder")
 
-                if is_patch_model:
-                    # Patch model - no rule latents needed
+                if is_patch_model or is_transformer_model:
+                    # Patch model or Transformer model - no rule latents needed
                     outputs = {"rule_latents": None}
                 else:
                     # ResNet model - create rule latent inputs from RGB support examples
@@ -559,8 +539,8 @@ class OverfitExperiment:
                         )
 
                         # Evaluate on this test example
-                        if is_patch_model:
-                            # Patch model - use direct forward pass
+                        if is_patch_model or is_transformer_model:
+                            # Patch model or Transformer model - use direct forward pass
                             # Get support examples in correct format
                             (
                                 support1_input,
@@ -649,8 +629,8 @@ class OverfitExperiment:
 
                     # evaluate on holdout target (if available)
                     if has_holdout[i]:
-                        if is_patch_model:
-                            # Patch model - use direct forward pass for holdout
+                        if is_patch_model or is_transformer_model:
+                            # Patch model or Transformer model - use direct forward pass for holdout
                             support1_input = (
                                 support_example_inputs[i][0].unsqueeze(0).squeeze(1)
                             )  # [1, 30, 30]

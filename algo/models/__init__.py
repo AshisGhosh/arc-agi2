@@ -3,6 +3,7 @@ from .encoder import ResNetEncoder
 from .decoder import MLPDecoder
 from .simple_arc import SimpleARCModel
 from .patch_attention import PatchCrossAttentionModel
+from .transformer_arc import TransformerARCModel
 
 
 def create_model(config) -> BaseARCModel:
@@ -13,9 +14,11 @@ def create_model(config) -> BaseARCModel:
         return SimpleARCModel(config)
     elif model_type == "patch_attention":
         return PatchCrossAttentionModel(config)
+    elif model_type == "transformer_arc":
+        return TransformerARCModel(config)
     else:
         raise ValueError(
-            f"Unknown model type: {model_type}. Available: ['simple_arc', 'patch_attention']"
+            f"Unknown model type: {model_type}. Available: ['simple_arc', 'patch_attention', 'transformer_arc']"
         )
 
 
@@ -25,5 +28,6 @@ __all__ = [
     "MLPDecoder",
     "SimpleARCModel",
     "PatchCrossAttentionModel",
+    "TransformerARCModel",
     "create_model",
 ]

@@ -91,7 +91,7 @@ class NoiseConfig:
         """Get list of active noise components."""
         components = []
         if self.inject_noise:
-            components.append("rule_latent")
+            components.append("rule_tokens")
         if self.noise_a_input:
             components.append("A_input")
         if self.noise_a_output:
@@ -122,7 +122,7 @@ class NoiseConfig:
                 self.noise_test_inputs,
             ]
         ):
-            # Only rule latent noise is active
+            # Only rule token noise is active
             if self.noise_type == "gaussian":
                 return f" (noise: {self.noise_type}, std={self.noise_std:.1f}, ratio={self.noise_ratio:.1f}, components: {components_str})"
             elif self.noise_type == "uniform":
@@ -395,6 +395,81 @@ def generate_noise_latent(
         return (1 - noise_ratio) * original_latent + noise_ratio * noise
 
 
+def generate_noise_rule_tokens(
+    original_rule_tokens, noise_type, noise_std=None, noise_range=None, noise_ratio=1.0
+):
+    """generate noise to replace part or all of the rule tokens."""
+    if noise_ratio == 0.0:
+        return original_rule_tokens
+
+    # generate noise based on type
+    if noise_type == "gaussian":
+        noise = torch.randn_like(original_rule_tokens) * noise_std
+    elif noise_type == "uniform":
+        noise = torch.rand_like(original_rule_tokens) * 2 * noise_range - noise_range
+    elif noise_type == "zeros":
+        noise = torch.zeros_like(original_rule_tokens)
+    elif noise_type == "ones":
+        noise = torch.ones_like(original_rule_tokens)
+    else:
+        raise ValueError(f"unknown noise type: {noise_type}")
+
+    # mix original and noise based on ratio
+    if noise_ratio == 1.0:
+        return noise
+    else:
+        return (1 - noise_ratio) * original_rule_tokens + noise_ratio * noise
+
+
+def forward_transformer_with_noise(
+    model,
+    support1_input,
+    support1_output,
+    support2_input,
+    support2_output,
+    target_input,
+    noise_config,
+):
+    """Forward pass for transformer model with optional rule token noise injection."""
+    if noise_config.inject_noise:
+        # Get rule tokens from the model
+        support_inputs = torch.stack(
+            [support1_input, support2_input], dim=1
+        )  # [1, 2, 30, 30]
+        support_outputs = torch.stack(
+            [support1_output, support2_output], dim=1
+        )  # [1, 2, 30, 30]
+        rule_tokens = model.get_rule_tokens(
+            support_inputs, support_outputs
+        )  # [1, num_rule_tokens, d_model]
+
+        # Apply noise to rule tokens
+        noisy_rule_tokens = generate_noise_rule_tokens(
+            rule_tokens,
+            noise_config.noise_type,
+            noise_config.noise_std,
+            noise_config.noise_range,
+            noise_config.noise_ratio,
+        )
+
+        # Use noisy rule tokens in cross-attention decoder
+        processed_patches = model.cross_attention_decoder(
+            target_input, noisy_rule_tokens
+        )
+        target_logits = model.output_head(processed_patches)
+    else:
+        # Normal forward pass
+        target_logits = model(
+            support1_input,
+            support1_output,
+            support2_input,
+            support2_output,
+            target_input,
+        )
+
+    return target_logits
+
+
 def generate_noise_tensor(
     original_tensor, noise_type, noise_std=None, noise_range=None, noise_ratio=1.0
 ):
@@ -661,9 +736,10 @@ def evaluate_model_on_tasks(
 
                 # Determine model type and handle accordingly
                 is_patch_model = hasattr(model, "patch_tokenizer")
+                is_transformer_model = hasattr(model, "pair_encoder")
 
-                if is_patch_model:
-                    # Patch model - no rule latents needed
+                if is_patch_model or is_transformer_model:
+                    # Patch model or Transformer model - no rule latents needed
                     outputs = {"rule_latents": None}
                 else:
                     # ResNet model - create rule latent inputs from RGB support examples
@@ -704,17 +780,23 @@ def evaluate_model_on_tasks(
                     else:
                         outputs = {"rule_latents": None}
 
-                # inject noise into rule latent if requested
+                # inject noise into rule latent/tokens if requested
                 if noise_config.inject_noise:
-                    original_latent = outputs["rule_latents"][0:1]
-                    noisy_latent = generate_noise_latent(
-                        original_latent,
-                        noise_config.noise_type,
-                        noise_config.noise_std,
-                        noise_config.noise_range,
-                        noise_config.noise_ratio,
-                    )
-                    outputs["rule_latents"][0:1] = noisy_latent
+                    if is_transformer_model:
+                        # For transformer models, we need to get rule tokens and inject noise
+                        # This will be handled in the forward pass below
+                        pass
+                    else:
+                        # For ResNet models, inject noise into rule latents
+                        original_latent = outputs["rule_latents"][0:1]
+                        noisy_latent = generate_noise_latent(
+                            original_latent,
+                            noise_config.noise_type,
+                            noise_config.noise_std,
+                            noise_config.noise_range,
+                            noise_config.noise_ratio,
+                        )
+                        outputs["rule_latents"][0:1] = noisy_latent
 
                 if evaluation_mode == "test":
                     if test_all_test_pairs and len(test_examples) > 1:
@@ -727,8 +809,8 @@ def evaluate_model_on_tasks(
                             )  # [1, 30, 30]
                             target_output = test_example["output"].unsqueeze(0)
 
-                            if is_patch_model:
-                                # Patch model - use direct forward pass
+                            if is_patch_model or is_transformer_model:
+                                # Patch model or Transformer model - use direct forward pass
                                 # Get support examples for this task
                                 support1_input = support_examples[0]["input"].squeeze(
                                     1
@@ -744,13 +826,24 @@ def evaluate_model_on_tasks(
                                 )  # [1, 30, 30]
 
                                 # target_input is already [1, 30, 30], which is what the model expects
-                                target_logits = model(
-                                    support1_input,
-                                    support1_output,
-                                    support2_input,
-                                    support2_output,
-                                    target_input,
-                                )
+                                if is_transformer_model:
+                                    target_logits = forward_transformer_with_noise(
+                                        model,
+                                        support1_input,
+                                        support1_output,
+                                        support2_input,
+                                        support2_output,
+                                        target_input,
+                                        noise_config,
+                                    )
+                                else:
+                                    target_logits = model(
+                                        support1_input,
+                                        support1_output,
+                                        support2_input,
+                                        support2_output,
+                                        target_input,
+                                    )
                             else:
                                 # ResNet model - use decoder with rule latents
                                 target_logits = model.decoder(
@@ -866,8 +959,8 @@ def evaluate_model_on_tasks(
                         target_input = test_example["input"].squeeze(1)  # [1, 30, 30]
                         target_output = test_example["output"].unsqueeze(0)
 
-                        if is_patch_model:
-                            # Patch model - use direct forward pass
+                        if is_patch_model or is_transformer_model:
+                            # Patch model or Transformer model - use direct forward pass
                             support1_input = support_examples[0]["input"].squeeze(
                                 1
                             )  # [1, 30, 30]
@@ -882,13 +975,24 @@ def evaluate_model_on_tasks(
                             )  # [1, 30, 30]
 
                             # target_input is already [1, 30, 30], which is what the model expects
-                            target_logits = model(
-                                support1_input,
-                                support1_output,
-                                support2_input,
-                                support2_output,
-                                target_input,
-                            )
+                            if is_transformer_model:
+                                target_logits = forward_transformer_with_noise(
+                                    model,
+                                    support1_input,
+                                    support1_output,
+                                    support2_input,
+                                    support2_output,
+                                    target_input,
+                                    noise_config,
+                                )
+                            else:
+                                target_logits = model(
+                                    support1_input,
+                                    support1_output,
+                                    support2_input,
+                                    support2_output,
+                                    target_input,
+                                )
                         else:
                             # ResNet model - use decoder with rule latents
                             target_logits = model.decoder(
@@ -907,8 +1011,8 @@ def evaluate_model_on_tasks(
                     target_input = holdout_example["input"].squeeze(1)  # [1, 30, 30]
                     target_output = holdout_example["output"].unsqueeze(0)
 
-                    if is_patch_model:
-                        # Patch model - use direct forward pass
+                    if is_patch_model or is_transformer_model:
+                        # Patch model or Transformer model - use direct forward pass
                         support1_input = support_examples[0]["input"].squeeze(
                             1
                         )  # [1, 30, 30]
@@ -923,14 +1027,24 @@ def evaluate_model_on_tasks(
                         )  # [1, 30, 30]
 
                         # target_input is already [1, 30, 30], which is what the model expects
-
-                        target_logits = model(
-                            support1_input,
-                            support1_output,
-                            support2_input,
-                            support2_output,
-                            target_input,
-                        )
+                        if is_transformer_model:
+                            target_logits = forward_transformer_with_noise(
+                                model,
+                                support1_input,
+                                support1_output,
+                                support2_input,
+                                support2_output,
+                                target_input,
+                                noise_config,
+                            )
+                        else:
+                            target_logits = model(
+                                support1_input,
+                                support1_output,
+                                support2_input,
+                                support2_output,
+                                target_input,
+                            )
                     else:
                         # ResNet model - use decoder with rule latents
                         target_logits = model.decoder(
@@ -946,8 +1060,8 @@ def evaluate_model_on_tasks(
                     target_input = test_example["input"].squeeze(1)  # [1, 30, 30]
                     target_output = test_example["output"].unsqueeze(0)
 
-                    if is_patch_model:
-                        # Patch model - use direct forward pass
+                    if is_patch_model or is_transformer_model:
+                        # Patch model or Transformer model - use direct forward pass
                         support1_input = support_examples[0]["input"].squeeze(
                             1
                         )  # [1, 30, 30]
@@ -962,14 +1076,24 @@ def evaluate_model_on_tasks(
                         )  # [1, 30, 30]
 
                         # target_input is already [1, 30, 30], which is what the model expects
-
-                        target_logits = model(
-                            support1_input,
-                            support1_output,
-                            support2_input,
-                            support2_output,
-                            target_input,
-                        )
+                        if is_transformer_model:
+                            target_logits = forward_transformer_with_noise(
+                                model,
+                                support1_input,
+                                support1_output,
+                                support2_input,
+                                support2_output,
+                                target_input,
+                                noise_config,
+                            )
+                        else:
+                            target_logits = model(
+                                support1_input,
+                                support1_output,
+                                support2_input,
+                                support2_output,
+                                target_input,
+                            )
                     else:
                         # ResNet model - use decoder with rule latents
                         target_logits = model.decoder(
@@ -980,8 +1104,8 @@ def evaluate_model_on_tasks(
                     metrics = calculate_accuracy_metrics(predictions, target_output)
 
                 # Create sample data for visualization
-                if is_patch_model:
-                    # Patch model - use grayscale support examples
+                if is_patch_model or is_transformer_model:
+                    # Patch model or Transformer model - use grayscale support examples
                     sample_data = {
                         "train_examples": [
                             {
@@ -1228,9 +1352,10 @@ def test_all_combinations(
 
                 # Determine model type and handle accordingly
                 is_patch_model = hasattr(model, "patch_tokenizer")
+                is_transformer_model = hasattr(model, "pair_encoder")
 
-                if is_patch_model:
-                    # Patch model - no rule latents needed
+                if is_patch_model or is_transformer_model:
+                    # Patch model or Transformer model - no rule latents needed
                     rule_latent = None
                 else:
                     # ResNet model - create rule latent from RGB support examples
@@ -1262,23 +1387,28 @@ def test_all_combinations(
                     else:
                         rule_latent = None
 
-                # inject noise into rule latent if requested
+                # inject noise into rule latent/tokens if requested
                 if noise_config.inject_noise:
-                    rule_latent = generate_noise_latent(
-                        rule_latent,
-                        noise_config.noise_type,
-                        noise_config.noise_std,
-                        noise_config.noise_range,
-                        noise_config.noise_ratio,
-                    )
+                    if is_transformer_model:
+                        # For transformer models, rule token noise will be handled in the forward pass
+                        pass
+                    else:
+                        # For ResNet models, inject noise into rule latents
+                        rule_latent = generate_noise_latent(
+                            rule_latent,
+                            noise_config.noise_type,
+                            noise_config.noise_std,
+                            noise_config.noise_range,
+                            noise_config.noise_ratio,
+                        )
 
                 # evaluate on target(s)
                 if evaluation_mode == "test":
                     if test_all_test_pairs and len(test_examples) > 1:
                         # Evaluate on all test examples and create separate results for each
                         for test_idx, test_example in enumerate(test_examples):
-                            if is_patch_model:
-                                # Patch model - use direct forward pass
+                            if is_patch_model or is_transformer_model:
+                                # Patch model or Transformer model - use direct forward pass
                                 support1_input = support_examples[0]["input"].squeeze(
                                     1
                                 )  # [1, 30, 30]
@@ -1298,13 +1428,24 @@ def test_all_combinations(
                                     1
                                 )  # [1, 30, 30]
 
-                                logits = model(
-                                    support1_input,
-                                    support1_output,
-                                    support2_input,
-                                    support2_output,
-                                    test_input_clean,
-                                )
+                                if is_transformer_model:
+                                    logits = forward_transformer_with_noise(
+                                        model,
+                                        support1_input,
+                                        support1_output,
+                                        support2_input,
+                                        support2_output,
+                                        test_input_clean,
+                                        noise_config,
+                                    )
+                                else:
+                                    logits = model(
+                                        support1_input,
+                                        support1_output,
+                                        support2_input,
+                                        support2_output,
+                                        test_input_clean,
+                                    )
                             else:
                                 # ResNet model - use decoder with rule latents
                                 logits = model.decoder(
@@ -1417,8 +1558,8 @@ def test_all_combinations(
                     else:
                         # Use first test example (original behavior)
                         target = test_examples[0]
-                        if is_patch_model:
-                            # Patch model - use direct forward pass
+                        if is_patch_model or is_transformer_model:
+                            # Patch model or Transformer model - use direct forward pass
                             support1_input = support_examples[0]["input"].squeeze(
                                 1
                             )  # [1, 30, 30]
@@ -1436,13 +1577,24 @@ def test_all_combinations(
                             # target["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
                             test_input_clean = target["input"].squeeze(1)  # [1, 30, 30]
 
-                            logits = model(
-                                support1_input,
-                                support1_output,
-                                support2_input,
-                                support2_output,
-                                test_input_clean,
-                            )
+                            if is_transformer_model:
+                                logits = forward_transformer_with_noise(
+                                    model,
+                                    support1_input,
+                                    support1_output,
+                                    support2_input,
+                                    support2_output,
+                                    test_input_clean,
+                                    noise_config,
+                                )
+                            else:
+                                logits = model(
+                                    support1_input,
+                                    support1_output,
+                                    support2_input,
+                                    support2_output,
+                                    test_input_clean,
+                                )
                         else:
                             # ResNet model - use decoder with rule latents
                             logits = model.decoder(rule_latent, target["input"])
@@ -1452,8 +1604,8 @@ def test_all_combinations(
                         )
                 elif evaluation_mode == "holdout" and holdout_example is not None:
                     target = holdout_example
-                    if is_patch_model:
-                        # Patch model - use direct forward pass
+                    if is_patch_model or is_transformer_model:
+                        # Patch model or Transformer model - use direct forward pass
                         support1_input = support_examples[0]["input"].squeeze(
                             1
                         )  # [1, 30, 30]
@@ -1472,13 +1624,24 @@ def test_all_combinations(
                         # target["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
                         test_input_clean = target["input"].squeeze(1)  # [1, 30, 30]
 
-                        logits = model(
-                            support1_input,
-                            support1_output,
-                            support2_input,
-                            support2_output,
-                            test_input_clean,
-                        )
+                        if is_transformer_model:
+                            logits = forward_transformer_with_noise(
+                                model,
+                                support1_input,
+                                support1_output,
+                                support2_input,
+                                support2_output,
+                                test_input_clean,
+                                noise_config,
+                            )
+                        else:
+                            logits = model(
+                                support1_input,
+                                support1_output,
+                                support2_input,
+                                support2_output,
+                                test_input_clean,
+                            )
                     else:
                         # ResNet model - use decoder with rule latents
                         logits = model.decoder(rule_latent, target["input"])
@@ -1487,8 +1650,8 @@ def test_all_combinations(
                 else:
                     # Fallback to first test example
                     target = test_examples[0]
-                    if is_patch_model:
-                        # Patch model - use direct forward pass
+                    if is_patch_model or is_transformer_model:
+                        # Patch model or Transformer model - use direct forward pass
                         support1_input = support_examples[0]["input"].squeeze(
                             1
                         )  # [1, 30, 30]
@@ -1507,13 +1670,24 @@ def test_all_combinations(
                         # target["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
                         test_input_clean = target["input"].squeeze(1)  # [1, 30, 30]
 
-                        logits = model(
-                            support1_input,
-                            support1_output,
-                            support2_input,
-                            support2_output,
-                            test_input_clean,
-                        )
+                        if is_transformer_model:
+                            logits = forward_transformer_with_noise(
+                                model,
+                                support1_input,
+                                support1_output,
+                                support2_input,
+                                support2_output,
+                                test_input_clean,
+                                noise_config,
+                            )
+                        else:
+                            logits = model(
+                                support1_input,
+                                support1_output,
+                                support2_input,
+                                support2_output,
+                                test_input_clean,
+                            )
                     else:
                         # ResNet model - use decoder with rule latents
                         logits = model.decoder(rule_latent, target["input"])
@@ -1667,11 +1841,13 @@ def main():
         "patch_cross_attention": "patch_attention",
         "patch_attention": "patch_attention",
         "simple_arc": "simple_arc",
+        "transformer_arc": "transformer_arc",
     }.get(model_type, model_type)
 
     model_type_display = {
         "simple_arc": "SimpleARC (ResNet + MLP)",
         "patch_attention": "PatchCrossAttention",
+        "transformer_arc": "TransformerARC (Transformer + Cross-Attention)",
     }.get(model_type_normalized, model_type)
 
     st.sidebar.subheader("model info")
@@ -1689,6 +1865,31 @@ def main():
         st.sidebar.write(
             f"**support as test:** {'✅ enabled' if use_support_as_test else '❌ disabled'}"
         )
+    elif model_type_normalized == "transformer_arc":
+        st.sidebar.write(
+            "**architecture:** transformer encoder + cross-attention decoder"
+        )
+        st.sidebar.write(f"**patch size:** {config_info.get('patch_size', 3)}")
+        # For transformer models, use d_model from config or model_dim from model_info
+        model_dim = config_info.get("d_model", model_info.get("model_dim", 128))
+        st.sidebar.write(f"**model dim:** {model_dim}")
+        st.sidebar.write(
+            f"**num rule tokens:** {config_info.get('num_rule_tokens', 4)}"
+        )
+        st.sidebar.write(
+            f"**num encoder layers:** {config_info.get('num_encoder_layers', 2)}"
+        )
+        # Show rule bottleneck info if enabled
+        use_bottleneck = config_info.get("use_rule_bottleneck", False)
+        if use_bottleneck:
+            bottleneck_dim = config_info.get("rule_bottleneck_dim", 32)
+            st.sidebar.write(
+                f"**rule bottleneck:** {model_dim} → {bottleneck_dim} → {model_dim}"
+            )
+        else:
+            st.sidebar.write("**rule bottleneck:** disabled")
+        if "total_parameters" in model_info:
+            st.sidebar.write(f"**parameters:** {model_info['total_parameters']:,}")
     else:
         st.sidebar.write("**architecture:** resnet encoder + mlp decoder")
         st.sidebar.write(f"**rule dim:** {config_info.get('rule_dim', 32)}")
@@ -1743,6 +1944,9 @@ def main():
             st.sidebar.info("✅ loaded config from checkpoint")
         else:
             config = Config()
+            # Only override with model_info if config is missing
+            config.use_rule_bottleneck = model_info.get("use_rule_bottleneck", False)
+            config.rule_bottleneck_dim = model_info.get("rule_bottleneck_dim", 16)
             st.sidebar.warning("⚠️ no config in checkpoint, using default config")
 
         # Create model with the loaded config
@@ -1799,13 +2003,20 @@ def main():
         help="evaluate on all test examples for each task/combination",
     )
 
-    # Only show rule latent analysis for ResNet models
-    if model_type_normalized != "patch_attention":
+    # Show rule latent/token analysis for ResNet and transformer models
+    if model_type_normalized == "simple_arc":
         st.sidebar.subheader("rule latent analysis")
         inject_noise = st.sidebar.checkbox(
             "inject noise into rule latent",
             value=False,
             help="replace rule latent with noise to test if it's actually useful",
+        )
+    elif model_type_normalized == "transformer_arc":
+        st.sidebar.subheader("rule token analysis")
+        inject_noise = st.sidebar.checkbox(
+            "inject noise into rule tokens",
+            value=False,
+            help="replace rule tokens with noise to test if they're actually useful",
         )
     else:
         inject_noise = False
@@ -1815,7 +2026,7 @@ def main():
     noise_range = 1.0
     noise_ratio = 1.0
 
-    if inject_noise and model_type_normalized != "patch_attention":
+    if inject_noise and model_type_normalized in ["simple_arc", "transformer_arc"]:
         noise_type = st.sidebar.selectbox(
             "noise type",
             ["gaussian", "uniform", "zeros", "ones"],
@@ -1851,8 +2062,8 @@ def main():
             help="fraction of rule latent to replace with noise (1.0 = full replacement)",
         )
 
-    # Only show support example noise for ResNet models
-    if model_type_normalized != "patch_attention":
+    # Show support example noise for ResNet and transformer models
+    if model_type_normalized in ["simple_arc", "transformer_arc"]:
         st.sidebar.subheader("support example noise")
 
         # Support A input noise
@@ -1907,8 +2118,8 @@ def main():
     noise_b_output_range = 1.0
     noise_b_output_ratio = 1.0
 
-    # Only show support noise parameter controls for ResNet models
-    if model_type_normalized != "patch_attention":
+    # Show support noise parameter controls for ResNet and transformer models
+    if model_type_normalized in ["simple_arc", "transformer_arc"]:
         if noise_a_input:
             noise_a_input_type = st.sidebar.selectbox(
                 "A input noise type",
@@ -1917,33 +2128,141 @@ def main():
                 help="type of noise to inject into support A input",
             )
 
-        if noise_a_input_type == "gaussian":
-            noise_a_input_std = st.sidebar.slider(
-                "A input noise std",
-                min_value=0.1,
-                max_value=2.0,
+            if noise_a_input_type == "gaussian":
+                noise_a_input_std = st.sidebar.slider(
+                    "A input noise std",
+                    min_value=0.1,
+                    max_value=2.0,
+                    value=1.0,
+                    step=0.1,
+                    help="standard deviation for gaussian noise on support A input",
+                )
+            elif noise_a_input_type == "uniform":
+                noise_a_input_range = st.sidebar.slider(
+                    "A input noise range",
+                    min_value=0.1,
+                    max_value=2.0,
+                    value=1.0,
+                    step=0.1,
+                    help="range for uniform noise on support A input [-range, +range]",
+                )
+
+            noise_a_input_ratio = st.sidebar.slider(
+                "A input noise ratio",
+                min_value=0.0,
+                max_value=1.0,
                 value=1.0,
                 step=0.1,
-                help="standard deviation for gaussian noise on support A input",
-            )
-        elif noise_a_input_type == "uniform":
-            noise_a_input_range = st.sidebar.slider(
-                "A input noise range",
-                min_value=0.1,
-                max_value=2.0,
-                value=1.0,
-                step=0.1,
-                help="range for uniform noise on support A input [-range, +range]",
+                help="fraction of support A input to replace with noise (1.0 = full replacement)",
             )
 
-        noise_a_input_ratio = st.sidebar.slider(
-            "A input noise ratio",
-            min_value=0.0,
-            max_value=1.0,
-            value=1.0,
-            step=0.1,
-            help="fraction of support A input to replace with noise (1.0 = full replacement)",
-        )
+        if noise_a_output:
+            noise_a_output_type = st.sidebar.selectbox(
+                "A output noise type",
+                ["gaussian", "uniform", "zeros", "ones"],
+                index=0,
+                help="type of noise to inject into support A output",
+            )
+
+            if noise_a_output_type == "gaussian":
+                noise_a_output_std = st.sidebar.slider(
+                    "A output noise std",
+                    min_value=0.1,
+                    max_value=2.0,
+                    value=1.0,
+                    step=0.1,
+                    help="standard deviation for gaussian noise on support A output",
+                )
+            elif noise_a_output_type == "uniform":
+                noise_a_output_range = st.sidebar.slider(
+                    "A output noise range",
+                    min_value=0.1,
+                    max_value=2.0,
+                    value=1.0,
+                    step=0.1,
+                    help="range for uniform noise on support A output [-range, +range]",
+                )
+
+            noise_a_output_ratio = st.sidebar.slider(
+                "A output noise ratio",
+                min_value=0.0,
+                max_value=1.0,
+                value=1.0,
+                step=0.1,
+                help="fraction of support A output to replace with noise (1.0 = full replacement)",
+            )
+
+        if noise_b_input:
+            noise_b_input_type = st.sidebar.selectbox(
+                "B input noise type",
+                ["gaussian", "uniform", "zeros", "ones"],
+                index=0,
+                help="type of noise to inject into support B input",
+            )
+
+            if noise_b_input_type == "gaussian":
+                noise_b_input_std = st.sidebar.slider(
+                    "B input noise std",
+                    min_value=0.1,
+                    max_value=2.0,
+                    value=1.0,
+                    step=0.1,
+                    help="standard deviation for gaussian noise on support B input",
+                )
+            elif noise_b_input_type == "uniform":
+                noise_b_input_range = st.sidebar.slider(
+                    "B input noise range",
+                    min_value=0.1,
+                    max_value=2.0,
+                    value=1.0,
+                    step=0.1,
+                    help="range for uniform noise on support B input [-range, +range]",
+                )
+
+            noise_b_input_ratio = st.sidebar.slider(
+                "B input noise ratio",
+                min_value=0.0,
+                max_value=1.0,
+                value=1.0,
+                step=0.1,
+                help="fraction of support B input to replace with noise (1.0 = full replacement)",
+            )
+
+        if noise_b_output:
+            noise_b_output_type = st.sidebar.selectbox(
+                "B output noise type",
+                ["gaussian", "uniform", "zeros", "ones"],
+                index=0,
+                help="type of noise to inject into support B output",
+            )
+
+            if noise_b_output_type == "gaussian":
+                noise_b_output_std = st.sidebar.slider(
+                    "B output noise std",
+                    min_value=0.1,
+                    max_value=2.0,
+                    value=1.0,
+                    step=0.1,
+                    help="standard deviation for gaussian noise on support B output",
+                )
+            elif noise_b_output_type == "uniform":
+                noise_b_output_range = st.sidebar.slider(
+                    "B output noise range",
+                    min_value=0.1,
+                    max_value=2.0,
+                    value=1.0,
+                    step=0.1,
+                    help="range for uniform noise on support B output [-range, +range]",
+                )
+
+            noise_b_output_ratio = st.sidebar.slider(
+                "B output noise ratio",
+                min_value=0.0,
+                max_value=1.0,
+                value=1.0,
+                step=0.1,
+                help="fraction of support B output to replace with noise (1.0 = full replacement)",
+            )
 
     st.sidebar.subheader("test input noise")
     noise_test_inputs = st.sidebar.checkbox(
