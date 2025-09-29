@@ -53,6 +53,10 @@ class Config:
     num_rule_tokens: int = 2  # Number of rule tokens from PMA
     num_encoder_layers: int = 3  # Number of transformer encoder layers
 
+    # Rule bottleneck (optional compression)
+    use_rule_bottleneck: bool = True  # Enable rule token bottleneck compression
+    rule_bottleneck_dim: int = 8  # Compressed dimension for rule tokens
+
     # Auxiliary loss weights
     support_reconstruction_weight: float = 0.1  # Weight for support reconstruction loss
     cls_regularization_weight: float = 0.01  # Weight for CLS regularization loss
@@ -188,14 +192,14 @@ class Config:
     def to_dict(self) -> dict:
         """convert config to dictionary for json serialization."""
         config_dict = asdict(self)
-        
+
         # convert tuples to lists for json serialization
         config_dict["input_size"] = list(config_dict["input_size"])
         config_dict["process_size"] = list(config_dict["process_size"])
-        
+
         # convert device to string
         config_dict["device"] = str(config_dict["device"])
-        
+
         return config_dict
 
     def set_deterministic_training(self):

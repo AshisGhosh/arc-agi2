@@ -392,6 +392,49 @@ class CrossAttentionDecoder(nn.Module):
         return x
 
 
+class RuleBottleneck(nn.Module):
+    """Optional bottleneck for compressing and expanding rule tokens."""
+
+    def __init__(self, d_model: int, bottleneck_dim: int, dropout: float = 0.1):
+        super().__init__()
+        self.d_model = d_model
+        self.bottleneck_dim = bottleneck_dim
+
+        # Down-projection: d_model -> bottleneck_dim
+        self.down_proj = nn.Sequential(
+            nn.Linear(d_model, bottleneck_dim),
+            nn.LayerNorm(bottleneck_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+
+        # Up-projection: bottleneck_dim -> d_model
+        self.up_proj = nn.Sequential(
+            nn.Linear(bottleneck_dim, d_model),
+            nn.LayerNorm(d_model),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, rule_tokens: torch.Tensor) -> torch.Tensor:
+        """
+        Apply bottleneck compression and expansion to rule tokens.
+
+        Args:
+            rule_tokens: [B, num_rule_tokens, d_model] - rule tokens
+
+        Returns:
+            compressed_rule_tokens: [B, num_rule_tokens, d_model] - bottlenecked rule tokens
+        """
+        # Compress down
+        compressed = self.down_proj(rule_tokens)  # [B, num_rule_tokens, bottleneck_dim]
+
+        # Expand back up
+        expanded = self.up_proj(compressed)  # [B, num_rule_tokens, d_model]
+
+        return expanded
+
+
 class PatchOutputHead(nn.Module):
     """Output head to convert processed patches back to pixel predictions."""
 
@@ -461,6 +504,10 @@ class TransformerARCModel(BaseARCModel):
         self.num_heads = getattr(config, "num_heads", 8)
         self.dropout = getattr(config, "dropout", 0.1)
 
+        # Rule bottleneck parameters
+        self.use_rule_bottleneck = getattr(config, "use_rule_bottleneck", False)
+        self.rule_bottleneck_dim = getattr(config, "rule_bottleneck_dim", 32)
+
         # Components
         self.pair_encoder = PairEncoder(
             d_model=self.d_model,
@@ -475,6 +522,16 @@ class TransformerARCModel(BaseARCModel):
             num_heads=self.num_heads,
             dropout=self.dropout,
         )
+
+        # Optional rule bottleneck
+        if self.use_rule_bottleneck:
+            self.rule_bottleneck = RuleBottleneck(
+                d_model=self.d_model,
+                bottleneck_dim=self.rule_bottleneck_dim,
+                dropout=self.dropout,
+            )
+        else:
+            self.rule_bottleneck = None
 
         self.cross_attention_decoder = CrossAttentionDecoder(
             d_model=self.d_model,
@@ -524,6 +581,12 @@ class TransformerARCModel(BaseARCModel):
         pair_summaries = torch.stack([R_1, R_2], dim=1)  # [B, 2, d_model]
         rule_tokens = self.pma(pair_summaries)  # [B, num_rule_tokens, d_model]
 
+        # Step 2.5: Apply rule bottleneck if enabled
+        if self.rule_bottleneck is not None:
+            rule_tokens = self.rule_bottleneck(
+                rule_tokens
+            )  # [B, num_rule_tokens, d_model]
+
         # Step 3: Process test input with cross-attention
         processed_patches = self.cross_attention_decoder(
             target_input, rule_tokens
@@ -560,6 +623,12 @@ class TransformerARCModel(BaseARCModel):
         # Get rule tokens for all pairs
         rule_tokens = self.get_rule_tokens(support_inputs, support_outputs)
 
+        # Apply rule bottleneck if enabled
+        if self.rule_bottleneck is not None:
+            rule_tokens = self.rule_bottleneck(
+                rule_tokens
+            )  # [B, num_rule_tokens, d_model]
+
         # Process all test inputs with cross-attention
         processed_patches = self.cross_attention_decoder(test_inputs, rule_tokens)
 
@@ -583,11 +652,6 @@ class TransformerARCModel(BaseARCModel):
         Returns:
             pair_summaries: [B, 2, d_model] - pair summaries for all pairs
         """
-        # Ensure all inputs are on the same device as model parameters
-        device = next(self.parameters()).device
-        support_inputs = support_inputs.to(device)
-        support_outputs = support_outputs.to(device)
-
         B = support_inputs.shape[0]
 
         # Reshape to process all pairs at once
@@ -617,11 +681,6 @@ class TransformerARCModel(BaseARCModel):
         Returns:
             rule_tokens: [B, num_rule_tokens, d_model]
         """
-        # Ensure all inputs are on the same device as model parameters
-        device = next(self.parameters()).device
-        support_inputs = support_inputs.to(device)
-        support_outputs = support_outputs.to(device)
-
         # Get pair summaries
         pair_summaries = self.get_pair_summaries(support_inputs, support_outputs)
 
@@ -644,4 +703,8 @@ class TransformerARCModel(BaseARCModel):
             "model_dim": self.d_model,
             "num_rule_tokens": self.num_rule_tokens,
             "num_encoder_layers": self.num_encoder_layers,
+            "use_rule_bottleneck": self.use_rule_bottleneck,
+            "rule_bottleneck_dim": self.rule_bottleneck_dim
+            if self.use_rule_bottleneck
+            else None,
         }

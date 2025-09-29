@@ -1879,6 +1879,15 @@ def main():
         st.sidebar.write(
             f"**num encoder layers:** {config_info.get('num_encoder_layers', 2)}"
         )
+        # Show rule bottleneck info if enabled
+        use_bottleneck = config_info.get("use_rule_bottleneck", False)
+        if use_bottleneck:
+            bottleneck_dim = config_info.get("rule_bottleneck_dim", 32)
+            st.sidebar.write(
+                f"**rule bottleneck:** {model_dim} → {bottleneck_dim} → {model_dim}"
+            )
+        else:
+            st.sidebar.write("**rule bottleneck:** disabled")
         if "total_parameters" in model_info:
             st.sidebar.write(f"**parameters:** {model_info['total_parameters']:,}")
     else:
@@ -1935,6 +1944,9 @@ def main():
             st.sidebar.info("✅ loaded config from checkpoint")
         else:
             config = Config()
+            # Only override with model_info if config is missing
+            config.use_rule_bottleneck = model_info.get("use_rule_bottleneck", False)
+            config.rule_bottleneck_dim = model_info.get("rule_bottleneck_dim", 16)
             st.sidebar.warning("⚠️ no config in checkpoint, using default config")
 
         # Create model with the loaded config
