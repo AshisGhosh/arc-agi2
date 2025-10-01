@@ -109,7 +109,10 @@ class BaseARCDataset(Dataset, ABC):
         return multiple_test_indices
 
     def _preprocess_rgb(
-        self, example: Dict[str, Any], apply_counterfactual: bool = False
+        self,
+        example: Dict[str, Any],
+        apply_counterfactual: bool = False,
+        counterfactual_type: str = "Y",
     ) -> Dict[str, torch.Tensor]:
         """Preprocess a single example to RGB format (input/output pair)."""
         input_tensor = preprocess_rgb_image(example["input"], self.config)
@@ -117,9 +120,14 @@ class BaseARCDataset(Dataset, ABC):
 
         # Apply counterfactual transformation after preprocessing if requested
         if apply_counterfactual:
-            output_tensor = apply_counterfactual_transform(
-                output_tensor, self.config.counterfactual_transform
-            )
+            if counterfactual_type == "Y":
+                output_tensor = apply_counterfactual_transform(
+                    output_tensor, self.config.counterfactual_transform
+                )
+            elif counterfactual_type == "X":
+                input_tensor = apply_counterfactual_transform(
+                    input_tensor, self.config.counterfactual_transform
+                )
 
         return {
             "input": input_tensor.unsqueeze(0),  # Add batch dimension [1, C, H, W]
@@ -127,7 +135,10 @@ class BaseARCDataset(Dataset, ABC):
         }
 
     def _preprocess_grid(
-        self, example: Dict[str, Any], apply_counterfactual: bool = False
+        self,
+        example: Dict[str, Any],
+        apply_counterfactual: bool = False,
+        counterfactual_type: str = "Y",
     ) -> Dict[str, torch.Tensor]:
         """Preprocess a single example to grid format (input/output pair)."""
         input_tensor = preprocess_grid_image(example["input"], self.config)
@@ -135,9 +146,14 @@ class BaseARCDataset(Dataset, ABC):
 
         # Apply counterfactual transformation after preprocessing if requested
         if apply_counterfactual:
-            output_tensor = apply_counterfactual_transform(
-                output_tensor, self.config.counterfactual_transform
-            )
+            if counterfactual_type == "Y":
+                output_tensor = apply_counterfactual_transform(
+                    output_tensor, self.config.counterfactual_transform
+                )
+            elif counterfactual_type == "X":
+                input_tensor = apply_counterfactual_transform(
+                    input_tensor, self.config.counterfactual_transform
+                )
 
         return {
             "input": input_tensor.unsqueeze(0),  # Add batch dimension [1, C, H, W]
@@ -174,11 +190,24 @@ class BaseARCDataset(Dataset, ABC):
                 training_examples.append(self._preprocess_grid(example))
 
         # Add counterfactual examples if available
-        if self.config.enable_counterfactuals and "counterfactual_train" in task:
-            for example in task["counterfactual_train"]:
-                training_examples.append(
-                    self._preprocess_grid(example, apply_counterfactual=True)
-                )
+        if self.config.enable_counterfactuals:
+            # Add Y counterfactuals (output transformation)
+            if self.config.counterfactual_Y and "counterfactual_train" in task:
+                for example in task["counterfactual_train"]:
+                    training_examples.append(
+                        self._preprocess_grid(
+                            example, apply_counterfactual=True, counterfactual_type="Y"
+                        )
+                    )
+
+            # Add X counterfactuals (input transformation)
+            if self.config.counterfactual_X and "counterfactual_X_train" in task:
+                for example in task["counterfactual_X_train"]:
+                    training_examples.append(
+                        self._preprocess_grid(
+                            example, apply_counterfactual=True, counterfactual_type="X"
+                        )
+                    )
 
         return training_examples
 

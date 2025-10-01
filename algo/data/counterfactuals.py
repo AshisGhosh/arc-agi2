@@ -21,43 +21,57 @@ def setup_counterfactuals(tasks: List[Dict[str, Any]], config) -> None:
     """
     for task in tasks:
         if config.enable_counterfactuals:
-            _create_counterfactual_examples(task)
+            if config.counterfactual_Y:
+                _create_counterfactual_examples(task, "Y")
+            if config.counterfactual_X:
+                _create_counterfactual_examples(task, "X")
 
 
-def _create_counterfactual_examples(task: Dict[str, Any]) -> None:
+def _create_counterfactual_examples(
+    task: Dict[str, Any], counterfactual_type: str
+) -> None:
     """
     Pre-generate counterfactual versions of all examples in a task.
     They are transformed after preprocessing to preserve the post padding shape.
+
+    Args:
+        task: Task dictionary
+        counterfactual_type: "X" for input counterfactuals, "Y" for output counterfactuals
     """
     # Create counterfactual training examples
     counterfactual_train = []
     for example in task["train"]:
         cf_example = copy.deepcopy(example)
-        cf_example["input"] = example["input"]  # Keep input the same
-        # Don't transform output here - we'll do it after preprocessing
+        # Don't transform here - we'll do it after preprocessing
         counterfactual_train.append(cf_example)
 
     # Create counterfactual test examples
     counterfactual_test = []
     for example in task["test"]:
         cf_example = copy.deepcopy(example)
-        cf_example["input"] = example["input"]  # Keep input the same
-        # Don't transform output here - we'll do it after preprocessing
+        # Don't transform here - we'll do it after preprocessing
         counterfactual_test.append(cf_example)
 
-    # Store counterfactual examples in task
-    task["counterfactual_train"] = counterfactual_train
-    task["counterfactual_test"] = counterfactual_test
+    # Store counterfactual examples in task with type-specific keys
+    if counterfactual_type == "Y":
+        task["counterfactual_train"] = counterfactual_train
+        task["counterfactual_test"] = counterfactual_test
+    elif counterfactual_type == "X":
+        task["counterfactual_X_train"] = counterfactual_train
+        task["counterfactual_X_test"] = counterfactual_test
 
     # If color relabeling is enabled, also create counterfactual augmented examples
     if "augmented_train" in task:
         counterfactual_augmented = []
         for example in task["augmented_train"]:
             cf_example = copy.deepcopy(example)
-            cf_example["input"] = example["input"]  # Keep input the same
-            # Don't transform output here - we'll do it after preprocessing
+            # Don't transform here - we'll do it after preprocessing
             counterfactual_augmented.append(cf_example)
-        task["counterfactual_augmented_train"] = counterfactual_augmented
+
+        if counterfactual_type == "Y":
+            task["counterfactual_augmented_train"] = counterfactual_augmented
+        elif counterfactual_type == "X":
+            task["counterfactual_X_augmented_train"] = counterfactual_augmented
 
 
 def apply_counterfactual_transform(image, transform_type: str):

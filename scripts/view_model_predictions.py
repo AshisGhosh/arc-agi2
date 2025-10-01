@@ -610,6 +610,8 @@ def evaluate_model_on_tasks(
     preserve_background=True,
     augmentation_seed=42,
     enable_counterfactuals=False,
+    counterfactual_Y=True,
+    counterfactual_X=True,
     counterfactual_transform="rotate_90",
     selected_task_indices=None,
     test_all_test_pairs=False,
@@ -647,6 +649,8 @@ def evaluate_model_on_tasks(
 
         if enable_counterfactuals:
             augmented_config.enable_counterfactuals = True
+            augmented_config.counterfactual_Y = counterfactual_Y
+            augmented_config.counterfactual_X = counterfactual_X
             augmented_config.counterfactual_transform = counterfactual_transform
 
         # Create augmented dataset with both augmentations
@@ -705,7 +709,9 @@ def evaluate_model_on_tasks(
                 # Extract combination data
                 combo_idx = combo["combination_idx"]
                 i, j = combo["pair_indices"]
-                is_counterfactual = combo["is_counterfactual"]
+                # Use the counterfactual_type directly from the combination data
+                counterfactual_type = combo.get("counterfactual_type", "original")
+                is_counterfactual = counterfactual_type != "original"
 
                 # Get the preprocessed data from the combination
                 support_examples = combo["support_examples"]
@@ -939,6 +945,7 @@ def evaluate_model_on_tasks(
                                     "combination_idx": combo_idx,
                                     "pair_indices": (i, j),
                                     "is_counterfactual": is_counterfactual,
+                                    "counterfactual_type": counterfactual_type,
                                     "test_example_idx": test_idx,
                                     "perfect_accuracy": metrics["perfect_accuracy"],
                                     "pixel_accuracy": metrics["pixel_accuracy"],
@@ -1185,6 +1192,7 @@ def evaluate_model_on_tasks(
                         "combination_idx": combo_idx,
                         "pair_indices": (i, j),
                         "is_counterfactual": is_counterfactual,
+                        "counterfactual_type": counterfactual_type,
                         "perfect_accuracy": metrics["perfect_accuracy"],
                         "pixel_accuracy": metrics["pixel_accuracy"],
                         "near_miss_accuracy": metrics["near_miss_accuracy"],
@@ -1204,6 +1212,9 @@ def evaluate_model_on_tasks(
                     "combination_idx": combo_result["combination_idx"],
                     "pair_indices": combo_result["pair_indices"],
                     "is_counterfactual": combo_result["is_counterfactual"],
+                    "counterfactual_type": combo_result.get(
+                        "counterfactual_type", "original"
+                    ),
                     "perfect_accuracy": combo_result["perfect_accuracy"],
                     "pixel_accuracy": combo_result["pixel_accuracy"],
                     "near_miss_accuracy": combo_result["near_miss_accuracy"],
@@ -1234,6 +1245,8 @@ def test_all_combinations(
     preserve_background=True,
     augmentation_seed=42,
     enable_counterfactuals=False,
+    counterfactual_Y=True,
+    counterfactual_X=True,
     counterfactual_transform="rotate_90",
     selected_task_indices=None,
     test_all_test_pairs=False,
@@ -1275,6 +1288,8 @@ def test_all_combinations(
 
         if enable_counterfactuals:
             augmented_config.enable_counterfactuals = True
+            augmented_config.counterfactual_Y = counterfactual_Y
+            augmented_config.counterfactual_X = counterfactual_X
             augmented_config.counterfactual_transform = counterfactual_transform
 
         # Create augmented dataset with both augmentations
@@ -1321,7 +1336,9 @@ def test_all_combinations(
                 # Extract combination data
                 combo_idx = combo["combination_idx"]
                 i, j = combo["pair_indices"]
-                is_counterfactual = combo["is_counterfactual"]
+                # Use the counterfactual_type directly from the combination data
+                counterfactual_type = combo.get("counterfactual_type", "original")
+                is_counterfactual = counterfactual_type != "original"
 
                 # Get the preprocessed data from the combination
                 support_examples = combo["support_examples"]
@@ -1543,6 +1560,7 @@ def test_all_combinations(
                                     "combination_idx": combo_idx,
                                     "pair_indices": (i, j),
                                     "is_counterfactual": is_counterfactual,
+                                    "counterfactual_type": counterfactual_type,
                                     "test_example_idx": test_idx,
                                     "perfect_accuracy": metrics["perfect_accuracy"],
                                     "pixel_accuracy": metrics["pixel_accuracy"],
@@ -1765,7 +1783,8 @@ def test_all_combinations(
                     {
                         "combination_idx": combo_idx,
                         "pair_indices": (i, j),
-                        "is_counterfactual": is_counterfactual,  # Add counterfactual flag
+                        "is_counterfactual": is_counterfactual,
+                        "counterfactual_type": counterfactual_type,  # Add counterfactual flag
                         "perfect_accuracy": metrics["perfect_accuracy"],
                         "pixel_accuracy": metrics["pixel_accuracy"],
                         "near_miss_accuracy": metrics["near_miss_accuracy"],
@@ -1785,6 +1804,9 @@ def test_all_combinations(
                         "combination_idx": combo_result["combination_idx"],
                         "pair_indices": combo_result["pair_indices"],
                         "is_counterfactual": combo_result["is_counterfactual"],
+                        "counterfactual_type": combo_result.get(
+                            "counterfactual_type", "original"
+                        ),
                         "test_example_idx": combo_result.get(
                             "test_example_idx"
                         ),  # Add test example index
@@ -2355,13 +2377,25 @@ def main():
         help="include counterfactual (rotated) examples in evaluation",
     )
 
+    counterfactual_Y = True
+    counterfactual_X = True
     counterfactual_transform = "rotate_90"
     if enable_counterfactuals:
+        counterfactual_Y = st.sidebar.checkbox(
+            "counterfactual Y (output)",
+            value=True,
+            help="apply transformation to output (Y) - original behavior",
+        )
+        counterfactual_X = st.sidebar.checkbox(
+            "counterfactual X (input)",
+            value=True,
+            help="apply transformation to input (X) - new feature",
+        )
         counterfactual_transform = st.sidebar.selectbox(
             "counterfactual transform",
             ["rotate_90", "rotate_180", "rotate_270", "reflect_h", "reflect_v"],
             index=0,
-            help="type of transformation to apply to outputs",
+            help="type of transformation to apply",
         )
 
     # Update dataset based on options if needed
@@ -2472,6 +2506,8 @@ def main():
                 preserve_background,
                 augmentation_seed,
                 enable_counterfactuals,
+                counterfactual_Y,
+                counterfactual_X,
                 counterfactual_transform,
                 selected_task_indices=task_indices,
                 test_all_test_pairs=test_all_test_pairs,
@@ -2534,6 +2570,8 @@ def main():
                 preserve_background,
                 augmentation_seed,
                 enable_counterfactuals,
+                counterfactual_Y,
+                counterfactual_X,
                 counterfactual_transform,
                 selected_task_indices=task_indices,
                 test_all_test_pairs=test_all_test_pairs,
@@ -2579,6 +2617,8 @@ def main():
         st.session_state.preserve_background = preserve_background
         st.session_state.augmentation_seed = augmentation_seed
         st.session_state.enable_counterfactuals = enable_counterfactuals
+        st.session_state.counterfactual_Y = counterfactual_Y
+        st.session_state.counterfactual_X = counterfactual_X
         st.session_state.counterfactual_transform = counterfactual_transform
 
         progress_bar.empty()
@@ -2669,7 +2709,21 @@ def main():
             counterfactual_transform = st.session_state.get(
                 "counterfactual_transform", "rotate_90"
             )
-            counterfactual_info = f" (counterfactuals: {counterfactual_transform})"
+            counterfactual_Y = st.session_state.get("counterfactual_Y", True)
+            counterfactual_X = st.session_state.get("counterfactual_X", True)
+
+            counterfactual_types = []
+            if counterfactual_Y:
+                counterfactual_types.append("Y")
+            if counterfactual_X:
+                counterfactual_types.append("X")
+
+            if counterfactual_types:
+                counterfactual_info = f" (counterfactuals: {counterfactual_transform}, types: {', '.join(counterfactual_types)})"
+            else:
+                counterfactual_info = (
+                    f" (counterfactuals: {counterfactual_transform}, types: none)"
+                )
 
         # Add test pairs info if applicable
         test_pairs_info = ""
@@ -2685,7 +2739,8 @@ def main():
         for result in results:
             task_id_display = result["task_id"]
             if result.get("is_counterfactual", False):
-                task_id_display += " (counterfactual)"
+                counterfactual_type = result.get("counterfactual_type", "original")
+                task_id_display += f" (counterfactual {counterfactual_type})"
 
             # Add combination info if available
             combination_info = ""
@@ -2881,7 +2936,21 @@ def main():
             counterfactual_transform = st.session_state.get(
                 "counterfactual_transform", "rotate_90"
             )
-            counterfactual_info = f" (counterfactuals: {counterfactual_transform})"
+            counterfactual_Y = st.session_state.get("counterfactual_Y", True)
+            counterfactual_X = st.session_state.get("counterfactual_X", True)
+
+            counterfactual_types = []
+            if counterfactual_Y:
+                counterfactual_types.append("Y")
+            if counterfactual_X:
+                counterfactual_types.append("X")
+
+            if counterfactual_types:
+                counterfactual_info = f" (counterfactuals: {counterfactual_transform}, types: {', '.join(counterfactual_types)})"
+            else:
+                counterfactual_info = (
+                    f" (counterfactuals: {counterfactual_transform}, types: none)"
+                )
 
         # Add test pairs info if applicable
         test_pairs_info = ""
@@ -2902,7 +2971,8 @@ def main():
                 f"({result['pair_indices'][0]}, {result['pair_indices'][1]})"
             )
             if result.get("is_counterfactual", False):
-                combination_str += " (counterfactual)"
+                counterfactual_type = result.get("counterfactual_type", "original")
+                combination_str += f" (counterfactual {counterfactual_type})"
 
             # Add test example info if available
             if "test_example_idx" in result:
