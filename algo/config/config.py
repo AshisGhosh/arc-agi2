@@ -93,6 +93,8 @@ class Config:
 
     # Counterfactual augmentation
     enable_counterfactuals: bool = True
+    counterfactual_Y: bool = True  # Apply transformation to output (Y)
+    counterfactual_X: bool = True  # Apply transformation to input (X)
     counterfactual_transform: str = (
         "rotate_90"  # "rotate_90", "rotate_180", "rotate_270", "reflect_h", "reflect_v"
     )
