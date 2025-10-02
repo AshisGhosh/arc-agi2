@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from typing import Dict
+from typing import Dict, List
 from tqdm import tqdm
 
 from ..config import Config
@@ -17,6 +17,7 @@ class TransformerTrainer(BaseTrainer):
     - Main loss: pixel-level cross-entropy on test output
     - Support reconstruction: decode support inputs with rule tokens
     - CLS regularization: contrastive loss on pair summaries
+    - Rule token consistency: encourage similar rule tokens across augmentation groups
     """
 
     def __init__(self, model, config: Config, dataset=None):
@@ -28,6 +29,9 @@ class TransformerTrainer(BaseTrainer):
         )
         self.cls_regularization_weight = getattr(
             config, "cls_regularization_weight", 0.01
+        )
+        self.rule_token_consistency_weight = getattr(
+            config, "rule_token_consistency_weight", 0.01
         )
         self.contrastive_temperature = getattr(config, "contrastive_temperature", 0.07)
 
@@ -48,6 +52,7 @@ class TransformerTrainer(BaseTrainer):
             "main_loss": 0.0,
             "support_reconstruction_loss": 0.0,
             "cls_regularization_loss": 0.0,
+            "rule_token_consistency_loss": 0.0,
             "accuracy": 0.0,
         }
 
@@ -139,11 +144,17 @@ class TransformerTrainer(BaseTrainer):
                 support_inputs, support_outputs
             )
 
+            # Rule token consistency loss - batched
+            consistency_loss = self._calculate_rule_token_consistency_loss_batched(
+                support_inputs, support_outputs, batch["augmentation_groups"]
+            )
+
             # Total loss
             total_batch_loss = (
                 main_loss
                 + self.support_reconstruction_weight * support_loss
                 + self.cls_regularization_weight * cls_loss
+                + self.rule_token_consistency_weight * consistency_loss
             )
 
             # Backward pass
@@ -162,6 +173,7 @@ class TransformerTrainer(BaseTrainer):
             loss_components["main_loss"] += main_loss.item()
             loss_components["support_reconstruction_loss"] += support_loss.item()
             loss_components["cls_regularization_loss"] += cls_loss.item()
+            loss_components["rule_token_consistency_loss"] += consistency_loss.item()
             loss_components["accuracy"] += accuracy.item()
 
             # Update progress bar
@@ -171,6 +183,7 @@ class TransformerTrainer(BaseTrainer):
                     "main": f"{main_loss.item():.4f}",
                     "support": f"{support_loss.item():.4f}",
                     "cls": f"{cls_loss.item():.4f}",
+                    "consistency": f"{consistency_loss.item():.4f}",
                     "acc": f"{accuracy.item():.4f}",
                 }
             )
@@ -183,6 +196,7 @@ class TransformerTrainer(BaseTrainer):
                     f"Main: {main_loss.item():.4f}, "
                     f"Support: {support_loss.item():.4f}, "
                     f"CLS: {cls_loss.item():.4f}, "
+                    f"Consistency: {consistency_loss.item():.4f}, "
                     f"Acc: {accuracy.item():.4f}"
                 )
 
@@ -277,6 +291,85 @@ class TransformerTrainer(BaseTrainer):
 
         return contrastive_loss + 0.01 * l2_loss
 
+    def _calculate_rule_token_consistency_loss_batched(
+        self,
+        support_inputs: torch.Tensor,
+        support_outputs: torch.Tensor,
+        augmentation_groups: List[int],
+    ) -> torch.Tensor:
+        """
+        Calculate batched rule token consistency loss across augmentation groups.
+
+        Args:
+            support_inputs: [B, 2, 30, 30] - batch of support input pairs
+            support_outputs: [B, 2, 30, 30] - batch of support output pairs
+            augmentation_groups: [B] - augmentation group for each sample
+
+        Returns:
+            consistency_loss: scalar tensor
+        """
+        B = support_inputs.shape[0]
+
+        # Get rule tokens for all pairs
+        rule_tokens = self.model.get_rule_tokens(support_inputs, support_outputs)
+
+        # If bottleneck is enabled, get compressed tokens
+        if (
+            hasattr(self.model, "rule_bottleneck")
+            and self.model.rule_bottleneck is not None
+        ):
+            # Get the rule tokens before bottleneck expansion
+            pair_summaries = self.model.get_pair_summaries(
+                support_inputs, support_outputs
+            )
+            rule_tokens_before_bottleneck = self.model.pma(pair_summaries)
+            # Apply only the down-projection to get compressed tokens
+            rule_tokens_compressed = self.model.rule_bottleneck.down_proj(
+                rule_tokens_before_bottleneck
+            )
+            rule_tokens = rule_tokens_compressed
+
+        # Group rule tokens by augmentation group
+        groups = {}
+        for i in range(B):
+            aug_group = augmentation_groups[i]  # Already an integer from the list
+            if aug_group not in groups:
+                groups[aug_group] = []
+            groups[aug_group].append(rule_tokens[i])
+
+        # Calculate within-group consistency loss
+        total_loss = 0.0
+        group_count = 0
+
+        for group_tokens in groups.values():
+            if len(group_tokens) > 1:  # Need at least 2 samples for regularization
+                group_tensor = torch.stack(
+                    group_tokens
+                )  # [N, num_rule_tokens, d_model]
+
+                # Flatten rule tokens for comparison
+                group_flat = group_tensor.view(
+                    group_tensor.size(0), -1
+                )  # [N, num_rule_tokens * d_model]
+
+                # Calculate pairwise L2 distances (want low distances for consistency)
+                distances = torch.cdist(group_flat, group_flat, p=2)
+
+                # Only consider upper triangular part (avoid double counting and self-comparison)
+                mask = torch.triu(torch.ones_like(distances), diagonal=1).bool()
+                group_loss = distances[mask].mean()
+
+                total_loss += group_loss
+                group_count += 1
+
+        # Normalize by number of groups with multiple samples
+        if group_count > 0:
+            consistency_loss = total_loss / group_count
+        else:
+            consistency_loss = torch.tensor(0.0, device=rule_tokens.device)
+
+        return consistency_loss
+
     def validate(self, val_loader: DataLoader) -> Dict[str, float]:
         """
         Validate model with batched processing.
@@ -294,6 +387,7 @@ class TransformerTrainer(BaseTrainer):
             "main_loss": 0.0,
             "support_reconstruction_loss": 0.0,
             "cls_regularization_loss": 0.0,
+            "rule_token_consistency_loss": 0.0,
             "accuracy": 0.0,
         }
 
@@ -370,11 +464,17 @@ class TransformerTrainer(BaseTrainer):
                     support_inputs, support_outputs
                 )
 
+                # Rule token consistency loss - batched
+                consistency_loss = self._calculate_rule_token_consistency_loss_batched(
+                    support_inputs, support_outputs, batch["augmentation_groups"]
+                )
+
                 # Total loss
                 total_batch_loss = (
                     main_loss
                     + self.support_reconstruction_weight * support_loss
                     + self.cls_regularization_weight * cls_loss
+                    + self.rule_token_consistency_weight * consistency_loss
                 )
 
                 # Update metrics
@@ -385,6 +485,9 @@ class TransformerTrainer(BaseTrainer):
                 loss_components["main_loss"] += main_loss.item()
                 loss_components["support_reconstruction_loss"] += support_loss.item()
                 loss_components["cls_regularization_loss"] += cls_loss.item()
+                loss_components["rule_token_consistency_loss"] += (
+                    consistency_loss.item()
+                )
                 loss_components["accuracy"] += accuracy.item()
 
         # Average metrics
