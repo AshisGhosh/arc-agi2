@@ -45,6 +45,10 @@ def unified_collate_fn(batch):
     support_example_inputs_rgb = []  # [B] list of [2] RGB support input tensors (for ResNet)
     support_example_outputs_rgb = []  # [B] list of [2] RGB support output tensors (for ResNet)
 
+    # Collect target examples for cycling
+    target_example_inputs = []  # [B] list of target input tensors
+    target_example_outputs = []  # [B] list of target output tensors
+
     # Fill with real data
     for i, sample in enumerate(batch):
         # Get support examples (always grayscale grid format [1, 30, 30])
@@ -77,6 +81,16 @@ def unified_collate_fn(batch):
             support_example_inputs_rgb.append(None)
             support_example_outputs_rgb.append(None)
 
+        # Get target example for cycling (grayscale grid format [1, 1, 30, 30])
+        target_input = (
+            sample["target_example"]["input"].squeeze(0).squeeze(0)
+        )  # [30, 30]
+        target_output = (
+            sample["target_example"]["output"].squeeze(0).squeeze(0)
+        )  # [30, 30]
+        target_example_inputs.append(target_input)
+        target_example_outputs.append(target_output)
+
         # Test examples (variable length with masking)
         sample_test_examples = sample["test_examples"]
         sample_num_test = sample["num_test_examples"]
@@ -107,6 +121,9 @@ def unified_collate_fn(batch):
         # RGB support examples (for ResNet) - None if grayscale data
         "support_example_inputs_rgb": support_example_inputs_rgb,  # [B] list of [2] RGB support input tensors or None
         "support_example_outputs_rgb": support_example_outputs_rgb,  # [B] list of [2] RGB support output tensors or None
+        # Target examples for cycling
+        "target_example_inputs": target_example_inputs,  # [B] list of target input tensors
+        "target_example_outputs": target_example_outputs,  # [B] list of target output tensors
         # Test examples
         "test_inputs": test_inputs,  # [B, max_test_examples, 30, 30]
         "test_outputs": test_outputs,  # [B, max_test_examples, 30, 30]
@@ -145,6 +162,10 @@ def flatten_patch_collate_fn(batch):
         support2_input = sample["support_examples"][1]["input"].squeeze()  # [30, 30]
         support2_output = sample["support_examples"][1]["output"].squeeze()  # [30, 30]
 
+        # Extract target example for cycling
+        target_input = sample["target_example"]["input"].squeeze()  # [30, 30]
+        target_output = sample["target_example"]["output"].squeeze()  # [30, 30]
+
         # Create one sample per test example
         for test_example in sample["test_examples"]:
             flattened_samples.append(
@@ -153,12 +174,14 @@ def flatten_patch_collate_fn(batch):
                     "support1_output": support1_output,
                     "support2_input": support2_input,
                     "support2_output": support2_output,
+                    "target_input": target_input,
+                    "target_output": target_output,
                     "test_input": test_example["input"].squeeze(),  # [30, 30]
                     "test_target": test_example["output"].squeeze(),  # [30, 30]
                     "task_idx": sample["task_idx"],
                     "task_id": sample["task_id"],
                     "combination_idx": sample["combination_idx"],
-                    "pair_indices": sample["pair_indices"],
+                    "cycling_indices": sample["cycling_indices"],
                     "is_counterfactual": sample["is_counterfactual"],
                     "augmentation_group": sample["augmentation_group"],
                 }
@@ -177,6 +200,12 @@ def flatten_patch_collate_fn(batch):
     support2_outputs = torch.stack(
         [s["support2_output"] for s in flattened_samples]
     )  # [B, 30, 30]
+    target_inputs = torch.stack(
+        [s["target_input"] for s in flattened_samples]
+    )  # [B, 30, 30]
+    target_outputs = torch.stack(
+        [s["target_output"] for s in flattened_samples]
+    )  # [B, 30, 30]
     test_inputs = torch.stack(
         [s["test_input"] for s in flattened_samples]
     )  # [B, 30, 30]
@@ -188,7 +217,7 @@ def flatten_patch_collate_fn(batch):
     task_indices = [s["task_idx"] for s in flattened_samples]
     task_ids = [s["task_id"] for s in flattened_samples]
     combination_indices = [s["combination_idx"] for s in flattened_samples]
-    pair_indices = [s["pair_indices"] for s in flattened_samples]
+    cycling_indices = [s["cycling_indices"] for s in flattened_samples]
     is_counterfactuals = [s["is_counterfactual"] for s in flattened_samples]
     augmentation_groups = [s["augmentation_group"] for s in flattened_samples]
 
@@ -198,6 +227,8 @@ def flatten_patch_collate_fn(batch):
         "support1_outputs": support1_outputs,  # [B, 30, 30]
         "support2_inputs": support2_inputs,  # [B, 30, 30]
         "support2_outputs": support2_outputs,  # [B, 30, 30]
+        "target_inputs": target_inputs,  # [B, 30, 30]
+        "target_outputs": target_outputs,  # [B, 30, 30]
         "test_inputs": test_inputs,  # [B, 30, 30]
         "test_targets": test_targets,  # [B, 30, 30]
         # Compatibility keys for evaluation
@@ -208,7 +239,7 @@ def flatten_patch_collate_fn(batch):
         "task_indices": task_indices,  # [B] list
         "task_ids": task_ids,  # [B] list
         "combination_indices": combination_indices,  # [B] list
-        "pair_indices": pair_indices,  # [B] list
+        "cycling_indices": cycling_indices,  # [B] list
         "is_counterfactuals": is_counterfactuals,  # [B] list
         "augmentation_groups": augmentation_groups,  # [B] list
     }

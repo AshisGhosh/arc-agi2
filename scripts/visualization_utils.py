@@ -141,12 +141,22 @@ def visualize_task_combination(
     is_counterfactual = task_data.get("combination_info", {}).get(
         "is_counterfactual", False
     )
+
+    # Check if this is cycling format (has target_example)
+    is_cycling = "target_example" in task_data
+
     # create figure - use 3x4 grid for more compact layout
     fig, axes = plt.subplots(3, 4, figsize=(16, 12))
-    fig.suptitle(
-        f"arc task {task_idx} - combination {combination_idx}{' (counterfactual)' if is_counterfactual else ''}",
-        fontsize=16,
-    )
+
+    # Update title to show cycling format
+    title = f"arc task {task_idx} - combination {combination_idx}"
+    if is_cycling:
+        cycling_indices = task_data.get("cycling_indices", (0, 1, 2))
+        title += f" (cycling: {cycling_indices[0]},{cycling_indices[1]} -> {cycling_indices[2]})"
+    if is_counterfactual:
+        title += " (counterfactual)"
+
+    fig.suptitle(title, fontsize=16)
 
     # get support examples and test examples
     support_examples = task_data["support_examples"]
@@ -232,22 +242,46 @@ def visualize_task_combination(
         axes[0, 3].imshow(img4_rgb)
         axes[0, 3].axis("off")
 
-    # Row 2: Test input/output pair
-    # 5. test input
-    axes[1, 0].set_title("test input", fontsize=10)
-    test_input_np = tensor_to_grayscale_numpy(test_example["input"])
-    rgb_test_input = apply_arc_color_palette(test_input_np)
-    axes[1, 0].imshow(rgb_test_input)
-    axes[1, 0].axis("off")
+    # Row 2: Target example (cycling) or Test example (fallback)
+    if is_cycling:
+        # Show target example for cycling format
+        target_example = task_data["target_example"]
 
-    # 6. test output (to be rotated with cf)
-    axes[1, 1].set_title(
-        "test output (cf)" if is_counterfactual else "test output", fontsize=10
-    )
-    test_output_np = tensor_to_grayscale_numpy(test_example["output"])
-    rgb_test_output = apply_arc_color_palette(test_output_np)
-    axes[1, 1].imshow(rgb_test_output)
-    axes[1, 1].axis("off")
+        # 5. target input
+        axes[1, 0].set_title("target input (cycling)", fontsize=10)
+        target_input_np = tensor_to_grayscale_numpy(target_example["input"])
+        rgb_target_input = apply_arc_color_palette(target_input_np)
+        axes[1, 0].imshow(rgb_target_input)
+        axes[1, 0].axis("off")
+
+        # 6. target output
+        axes[1, 1].set_title(
+            "target output (cycling, cf)"
+            if is_counterfactual
+            else "target output (cycling)",
+            fontsize=10,
+        )
+        target_output_np = tensor_to_grayscale_numpy(target_example["output"])
+        rgb_target_output = apply_arc_color_palette(target_output_np)
+        axes[1, 1].imshow(rgb_target_output)
+        axes[1, 1].axis("off")
+    else:
+        # This should not happen in cycling format
+        # 5. test input
+        axes[1, 0].set_title("test input", fontsize=10)
+        test_input_np = tensor_to_grayscale_numpy(test_example["input"])
+        rgb_test_input = apply_arc_color_palette(test_input_np)
+        axes[1, 0].imshow(rgb_test_input)
+        axes[1, 0].axis("off")
+
+        # 6. test output (to be rotated with cf)
+        axes[1, 1].set_title(
+            "test output (cf)" if is_counterfactual else "test output", fontsize=10
+        )
+        test_output_np = tensor_to_grayscale_numpy(test_example["output"])
+        rgb_test_output = apply_arc_color_palette(test_output_np)
+        axes[1, 1].imshow(rgb_test_output)
+        axes[1, 1].axis("off")
 
     # 7. Additional test examples (if any)
     if len(test_examples) > 1:
@@ -263,19 +297,43 @@ def visualize_task_combination(
         axes[1, 3].imshow(rgb_test2_output)
         axes[1, 3].axis("off")
     else:
-        # Hide additional test examples if not available
-        axes[1, 2].set_title("test input 2 (n/a)", fontsize=10)
-        axes[1, 2].text(
-            0.5,
-            0.5,
-            "Only 1 test",
-            ha="center",
-            va="center",
-            transform=axes[1, 2].transAxes,
-        )
+        # Show explanation for cycling format or hide additional test examples
+        if is_cycling:
+            axes[1, 2].set_title("cycling format", fontsize=10)
+            axes[1, 2].text(
+                0.5,
+                0.5,
+                "Model uses\nsupport examples\nto predict target",
+                ha="center",
+                va="center",
+                transform=axes[1, 2].transAxes,
+                fontsize=9,
+            )
+        else:
+            axes[1, 2].set_title("test input 2 (n/a)", fontsize=10)
+            axes[1, 2].text(
+                0.5,
+                0.5,
+                "Only 1 test",
+                ha="center",
+                va="center",
+                transform=axes[1, 2].transAxes,
+            )
         axes[1, 2].axis("off")
 
-        axes[1, 3].set_title("test output 2 (n/a)", fontsize=10)
+        if is_cycling:
+            axes[1, 3].set_title("test examples", fontsize=10)
+            axes[1, 3].text(
+                0.5,
+                0.5,
+                "Test examples\nare separate\nfor evaluation",
+                ha="center",
+                va="center",
+                transform=axes[1, 3].transAxes,
+                fontsize=9,
+            )
+        else:
+            axes[1, 3].set_title("test output 2 (n/a)", fontsize=10)
         axes[1, 3].text(
             0.5,
             0.5,
@@ -431,10 +489,14 @@ def visualize_prediction_comparison(
     if evaluation_mode == "holdout" and "holdout_example" in sample:
         target_data = sample["holdout_example"]
         axes[1, 0].set_title("holdout input", fontsize=12)
+    elif "target_example" in sample:
+        # Use target_example from cycling format (highest priority)
+        target_data = sample["target_example"]
+        axes[1, 0].set_title("target input (cycling)", fontsize=12)
     else:
-        # Handle both old (test_example) and new (test_examples) formats
+        # Fallback to test_examples format
         if "test_examples" in sample and len(sample["test_examples"]) > 0:
-            # New format - use specified test example index or first one
+            # Use specified test example index or first one
             if test_example_idx is not None and test_example_idx < len(
                 sample["test_examples"]
             ):
@@ -442,8 +504,8 @@ def visualize_prediction_comparison(
             else:
                 target_data = sample["test_examples"][0]
         else:
-            # Old format fallback
-            target_data = sample.get("test_example")
+            # This should not happen in cycling format
+            target_data = None
         axes[1, 0].set_title("test input", fontsize=12)
 
     if target_data and "input" in target_data:
@@ -457,6 +519,8 @@ def visualize_prediction_comparison(
     # ground truth output
     if evaluation_mode == "holdout" and "holdout_example" in sample:
         axes[1, 1].set_title("holdout ground truth", fontsize=12)
+    elif "target_example" in sample:
+        axes[1, 1].set_title("target ground truth (cycling)", fontsize=12)
     else:
         axes[1, 1].set_title("test ground truth", fontsize=12)
 
