@@ -312,14 +312,14 @@ def load_experiment_info(experiment_dir: Path) -> Dict[str, Any]:
         with open(training_info_path, "r") as f:
             training_data = json.load(f)
             # The training_info.json file contains the full experiment data
-            # Extract the nested "training" key for compatibility
+            # Extract the nested "training" key
             info["training"] = training_data.get("training", {})
-            # Extract the nested "tasks" key for compatibility
+            # Extract the nested "tasks" key
             info["tasks"] = training_data.get("tasks", {})
             # Also store the full data for other uses
             info["full_training_info"] = training_data
 
-    # load task selection (fallback if not in training_info.json)
+    # load task selection (if not in training_info.json)
     task_selection_path = experiment_dir / "task_selection.json"
     if task_selection_path.exists() and "tasks" not in info:
         with open(task_selection_path, "r") as f:
@@ -708,7 +708,8 @@ def evaluate_model_on_tasks(
             for combo in task_combinations:
                 # Extract combination data
                 combo_idx = combo["combination_idx"]
-                i, j = combo["pair_indices"]
+                cycling_indices = combo["cycling_indices"]
+                i, j, k = cycling_indices
                 # Use the counterfactual_type directly from the combination data
                 counterfactual_type = combo.get("counterfactual_type", "original")
                 is_counterfactual = counterfactual_type != "original"
@@ -718,6 +719,7 @@ def evaluate_model_on_tasks(
                 test_examples = combo["test_examples"]
                 num_test_examples = combo["num_test_examples"]
                 holdout_example = combo.get("holdout_example")
+                target_example = combo.get("target_example")
 
                 # Apply noise to training examples if requested
                 if (
@@ -943,7 +945,7 @@ def evaluate_model_on_tasks(
                             task_results.append(
                                 {
                                     "combination_idx": combo_idx,
-                                    "pair_indices": (i, j),
+                                    "cycling_indices": (i, j, k),
                                     "is_counterfactual": is_counterfactual,
                                     "counterfactual_type": counterfactual_type,
                                     "test_example_idx": test_idx,
@@ -959,58 +961,61 @@ def evaluate_model_on_tasks(
                         # Skip the normal result creation since we created separate results above
                         continue
                 else:
-                    # Use first test example only (original behavior)
-                    test_example = test_examples[0] if test_examples else None
-                    if test_example:
-                        # test_example["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
-                        target_input = test_example["input"].squeeze(1)  # [1, 30, 30]
-                        target_output = test_example["output"].unsqueeze(0)
+                    # Use target_example from cycling format
+                    if target_example:
+                        # target_example["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
+                        target_input = target_example["input"].squeeze(1)  # [1, 30, 30]
+                        target_output = target_example["output"].squeeze(
+                            0
+                        )  # [1, 30, 30]
+                    else:
+                        raise ValueError(
+                            "❌ target_example not found in cycling format - this should not happen"
+                        )
 
-                        if is_patch_model or is_transformer_model:
-                            # Patch model or Transformer model - use direct forward pass
-                            support1_input = support_examples[0]["input"].squeeze(
-                                1
-                            )  # [1, 30, 30]
-                            support1_output = support_examples[0]["output"].squeeze(
-                                1
-                            )  # [1, 30, 30]
-                            support2_input = support_examples[1]["input"].squeeze(
-                                1
-                            )  # [1, 30, 30]
-                            support2_output = support_examples[1]["output"].squeeze(
-                                1
-                            )  # [1, 30, 30]
+                    if is_patch_model or is_transformer_model:
+                        # Patch model or Transformer model - use direct forward pass
+                        support1_input = support_examples[0]["input"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        support1_output = support_examples[0]["output"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        support2_input = support_examples[1]["input"].squeeze(
+                            1
+                        )  # [1, 30, 30]
+                        support2_output = support_examples[1]["output"].squeeze(
+                            1
+                        )  # [1, 30, 30]
 
-                            # target_input is already [1, 30, 30], which is what the model expects
-                            if is_transformer_model:
-                                target_logits = forward_transformer_with_noise(
-                                    model,
-                                    support1_input,
-                                    support1_output,
-                                    support2_input,
-                                    support2_output,
-                                    target_input,
-                                    noise_config,
-                                )
-                            else:
-                                target_logits = model(
-                                    support1_input,
-                                    support1_output,
-                                    support2_input,
-                                    support2_output,
-                                    target_input,
-                                )
+                        # target_input is already [1, 30, 30], which is what the model expects
+                        if is_transformer_model:
+                            target_logits = forward_transformer_with_noise(
+                                model,
+                                support1_input,
+                                support1_output,
+                                support2_input,
+                                support2_output,
+                                target_input,
+                                noise_config,
+                            )
                         else:
-                            # ResNet model - use decoder with rule latents
-                            target_logits = model.decoder(
-                                outputs["rule_latents"][0:1],
+                            target_logits = model(
+                                support1_input,
+                                support1_output,
+                                support2_input,
+                                support2_output,
                                 target_input,
                             )
-                        predictions = torch.argmax(target_logits, dim=1).squeeze(0)
-                        metrics = calculate_accuracy_metrics(predictions, target_output)
                     else:
-                        metrics = {"accuracy": 0.0, "exact_match": 0.0}
-                        predictions = None
+                        # ResNet model - use decoder with rule latents
+                        target_logits = model.decoder(
+                            outputs["rule_latents"][0:1],
+                            target_input,
+                        )
+
+                    predictions = torch.argmax(target_logits, dim=1).squeeze(0)
+                    metrics = calculate_accuracy_metrics(predictions, target_output)
 
                 if evaluation_mode == "holdout" and holdout_example is not None:
                     # Evaluate on holdout example
@@ -1061,11 +1066,16 @@ def evaluate_model_on_tasks(
                     predictions = torch.argmax(target_logits, dim=1).squeeze(0)
                     metrics = calculate_accuracy_metrics(predictions, target_output)
                 else:
-                    # Fallback to first test example
-                    test_example = test_examples[0]
-                    # test_example["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
-                    target_input = test_example["input"].squeeze(1)  # [1, 30, 30]
-                    target_output = test_example["output"].unsqueeze(0)
+                    # Use target_example from cycling format
+                    if target_example:
+                        target_input = target_example["input"].squeeze(1)  # [1, 30, 30]
+                        target_output = target_example["output"].squeeze(
+                            0
+                        )  # [1, 30, 30]
+                    else:
+                        raise ValueError(
+                            "❌ target_example not found in cycling format - this should not happen"
+                        )
 
                     if is_patch_model or is_transformer_model:
                         # Patch model or Transformer model - use direct forward pass
@@ -1145,6 +1155,15 @@ def evaluate_model_on_tasks(
                         ],
                         "num_test_examples": num_test_examples,
                     }
+
+                    # Add target_example for cycling format visualization
+                    if target_example:
+                        sample_data["target_example"] = {
+                            "input": tensor_to_grayscale_numpy(target_example["input"]),
+                            "output": tensor_to_grayscale_numpy(
+                                target_example["output"]
+                            ),
+                        }
                 else:
                     # ResNet model - use RGB support examples
                     sample_data = {
@@ -1180,6 +1199,15 @@ def evaluate_model_on_tasks(
                         "num_test_examples": num_test_examples,
                     }
 
+                    # Add target_example for cycling format visualization
+                    if target_example:
+                        sample_data["target_example"] = {
+                            "input": tensor_to_grayscale_numpy(target_example["input"]),
+                            "output": tensor_to_grayscale_numpy(
+                                target_example["output"]
+                            ),
+                        }
+
                 # Add holdout data if available
                 if holdout_example is not None:
                     sample_data["holdout_example"] = {
@@ -1190,7 +1218,7 @@ def evaluate_model_on_tasks(
                 task_results.append(
                     {
                         "combination_idx": combo_idx,
-                        "pair_indices": (i, j),
+                        "cycling_indices": (i, j, k),
                         "is_counterfactual": is_counterfactual,
                         "counterfactual_type": counterfactual_type,
                         "perfect_accuracy": metrics["perfect_accuracy"],
@@ -1210,7 +1238,7 @@ def evaluate_model_on_tasks(
                     "global_task_index": task_idx,
                     "task_id": dataset.tasks[task_idx]["task_id"],
                     "combination_idx": combo_result["combination_idx"],
-                    "pair_indices": combo_result["pair_indices"],
+                    "cycling_indices": combo_result["cycling_indices"],
                     "is_counterfactual": combo_result["is_counterfactual"],
                     "counterfactual_type": combo_result.get(
                         "counterfactual_type", "original"
@@ -1335,7 +1363,8 @@ def test_all_combinations(
             for combo in task_combinations:
                 # Extract combination data
                 combo_idx = combo["combination_idx"]
-                i, j = combo["pair_indices"]
+                cycling_indices = combo["cycling_indices"]
+                i, j, k = cycling_indices
                 # Use the counterfactual_type directly from the combination data
                 counterfactual_type = combo.get("counterfactual_type", "original")
                 is_counterfactual = counterfactual_type != "original"
@@ -1345,6 +1374,7 @@ def test_all_combinations(
                 test_examples = combo["test_examples"]
                 num_test_examples = combo["num_test_examples"]
                 holdout_example = combo.get("holdout_example")
+                target_example = combo.get("target_example")
 
                 # Apply noise to training examples if requested
                 if (
@@ -1558,7 +1588,7 @@ def test_all_combinations(
                             task_results.append(
                                 {
                                     "combination_idx": combo_idx,
-                                    "pair_indices": (i, j),
+                                    "cycling_indices": (i, j, k),
                                     "is_counterfactual": is_counterfactual,
                                     "counterfactual_type": counterfactual_type,
                                     "test_example_idx": test_idx,
@@ -1574,8 +1604,13 @@ def test_all_combinations(
                         # Skip the normal result creation since we created separate results above
                         continue
                     else:
-                        # Use first test example (original behavior)
-                        target = test_examples[0]
+                        # Use target_example from cycling format
+                        if target_example:
+                            target = target_example
+                        else:
+                            raise ValueError(
+                                "❌ target_example not found in cycling format - this should not happen"
+                            )
                         if is_patch_model or is_transformer_model:
                             # Patch model or Transformer model - use direct forward pass
                             support1_input = support_examples[0]["input"].squeeze(
@@ -1666,8 +1701,13 @@ def test_all_combinations(
                     predictions = torch.argmax(logits, dim=1).squeeze(0)
                     metrics = calculate_accuracy_metrics(predictions, target["output"])
                 else:
-                    # Fallback to first test example
-                    target = test_examples[0]
+                    # Use target_example from cycling format
+                    if target_example:
+                        target = target_example
+                    else:
+                        raise ValueError(
+                            "❌ target_example not found in cycling format - this should not happen"
+                        )
                     if is_patch_model or is_transformer_model:
                         # Patch model or Transformer model - use direct forward pass
                         support1_input = support_examples[0]["input"].squeeze(
@@ -1772,6 +1812,13 @@ def test_all_combinations(
                     "num_test_examples": num_test_examples,
                 }
 
+                # Add target_example for cycling format visualization
+                if target_example:
+                    sample_data["target_example"] = {
+                        "input": tensor_to_grayscale_numpy(target_example["input"]),
+                        "output": tensor_to_grayscale_numpy(target_example["output"]),
+                    }
+
                 # Add holdout data if available
                 if holdout_example is not None:
                     sample_data["holdout_example"] = {
@@ -1782,7 +1829,7 @@ def test_all_combinations(
                 task_results.append(
                     {
                         "combination_idx": combo_idx,
-                        "pair_indices": (i, j),
+                        "cycling_indices": (i, j, k),
                         "is_counterfactual": is_counterfactual,
                         "counterfactual_type": counterfactual_type,  # Add counterfactual flag
                         "perfect_accuracy": metrics["perfect_accuracy"],
@@ -1802,7 +1849,7 @@ def test_all_combinations(
                         "global_task_index": global_task_index,
                         "task_id": task_data["task_id"],
                         "combination_idx": combo_result["combination_idx"],
-                        "pair_indices": combo_result["pair_indices"],
+                        "cycling_indices": combo_result["cycling_indices"],
                         "is_counterfactual": combo_result["is_counterfactual"],
                         "counterfactual_type": combo_result.get(
                             "counterfactual_type", "original"
@@ -2746,8 +2793,8 @@ def main():
             combination_info = ""
             if "combination_idx" in result:
                 combination_info = f" - combo {result['combination_idx']}"
-                if "pair_indices" in result:
-                    combination_info += f" {result['pair_indices']}"
+                if "cycling_indices" in result:
+                    combination_info += f" {result['cycling_indices']}"
 
             # Add test example info if available
             test_example_info = ""
@@ -2845,20 +2892,11 @@ def main():
                 )
                 st.pyplot(fig)
             else:
-                # Old format - extract from batch
-                batch = selected_task["batch"]
-                sample_idx = selected_task[
-                    "batch_sample_idx"
-                ]  # Use stored batch sample index
-
-                evaluation_mode = st.session_state.get("evaluation_mode", "test")
-                sample_data = extract_sample_from_batch(
-                    batch, sample_idx, evaluation_mode
+                # This should not happen in cycling format
+                st.error(
+                    "❌ Old format detected - this should not happen with cycling format"
                 )
-                fig = visualize_prediction_comparison(
-                    sample_data, selected_task["predictions"], evaluation_mode
-                )
-                st.pyplot(fig)
+                st.stop()
 
             # show detailed metrics
             st.subheader("📈 detailed metrics")
@@ -2967,9 +3005,7 @@ def main():
 
         for result in results:
             # Build combination string
-            combination_str = (
-                f"({result['pair_indices'][0]}, {result['pair_indices'][1]})"
-            )
+            combination_str = f"({result['cycling_indices'][0]}, {result['cycling_indices'][1]}) -> {result['cycling_indices'][2]}"
             if result.get("is_counterfactual", False):
                 counterfactual_type = result.get("counterfactual_type", "original")
                 combination_str += f" (counterfactual {counterfactual_type})"
@@ -3130,14 +3166,14 @@ def main():
                 col1, col2 = st.columns(2)
                 with col1:
                     st.write(f"**Task ID:** {selected_task['task_id']}")
-                    combination_display = f"{selected_combo['pair_indices']}"
+                    combination_display = f"{selected_combo['cycling_indices']}"
                     if selected_combo.get("is_counterfactual", False):
                         combination_display += " (counterfactual)"
                     st.write(f"**Combination:** {combination_display}")
                     st.write(f"**Evaluation Mode:** {evaluation_mode}")
                 with col2:
                     st.write(
-                        f"**Training Examples Used:** {selected_combo['pair_indices'][0]} and {selected_combo['pair_indices'][1]}"
+                        f"**Training Examples Used:** {selected_combo['cycling_indices'][0]} and {selected_combo['cycling_indices'][1]} -> {selected_combo['cycling_indices'][2]}"
                     )
                     st.write(
                         f"**Status:** {'✅ perfect' if selected_combo['perfect_accuracy'] == 1.0 else '⚠️ partial' if selected_combo['pixel_accuracy'] > 0.5 else '❌ failed'}"

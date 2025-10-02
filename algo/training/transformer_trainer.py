@@ -98,67 +98,45 @@ class TransformerTrainer(BaseTrainer):
                 ]
             )  # [B, 2, 30, 30]
 
-            # Get test examples
-            test_inputs = batch["test_inputs"]  # [B, max_test_examples, 30, 30]
-            test_outputs = batch["test_outputs"]  # [B, max_test_examples, 30, 30]
-            test_masks = batch["test_masks"]  # [B, max_test_examples]
-            num_test_examples = batch["num_test_examples"]  # [B] list
+            # Get target examples for cycling (instead of test examples)
+            target_example_inputs = batch[
+                "target_example_inputs"
+            ]  # [B] list of target input tensors
+            target_example_outputs = batch[
+                "target_example_outputs"
+            ]  # [B] list of target output tensors
 
-            # Collect all valid test examples for batched processing
-            all_test_inputs = []
-            all_test_outputs = []
-            all_support_inputs_expanded = []
-            all_support_outputs_expanded = []
+            # Convert target examples to batched tensors
+            batched_target_inputs = torch.stack(target_example_inputs).to(
+                self.device
+            )  # [B, 30, 30]
+            batched_target_outputs = torch.stack(target_example_outputs).to(
+                self.device
+            )  # [B, 30, 30]
 
-            for i in range(batch_size):
-                num_test = num_test_examples[i]
-                for test_idx in range(num_test):
-                    if test_masks[i, test_idx]:
-                        all_test_inputs.append(test_inputs[i, test_idx])  # [30, 30]
-                        all_test_outputs.append(test_outputs[i, test_idx])  # [30, 30]
-                        all_support_inputs_expanded.append(
-                            support_inputs[i]
-                        )  # [2, 30, 30]
-                        all_support_outputs_expanded.append(
-                            support_outputs[i]
-                        )  # [2, 30, 30]
-
-            if not all_test_inputs:
-                continue  # Skip batch if no valid test examples
-
-            # Convert to batched tensors
-            batched_test_inputs = torch.stack(all_test_inputs)  # [N, 30, 30]
-            batched_test_outputs = torch.stack(all_test_outputs)  # [N, 30, 30]
-            batched_support_inputs = torch.stack(
-                all_support_inputs_expanded
-            )  # [N, 2, 30, 30]
-            batched_support_outputs = torch.stack(
-                all_support_outputs_expanded
-            )  # [N, 2, 30, 30]
-
-            # Main forward pass - batched
+            # Main forward pass - cycling: use support examples to predict target
             main_logits = self.model.forward_with_support_batch(
-                batched_support_inputs, batched_support_outputs, batched_test_inputs
-            )  # [N, 10, 30, 30]
+                support_inputs, support_outputs, batched_target_inputs
+            )  # [B, 10, 30, 30]
 
             # Calculate main loss
             main_loss, main_components = calculate_classification_loss(
-                main_logits, batched_test_outputs, self.config
+                main_logits, batched_target_outputs, self.config
             )
 
             # Calculate accuracy
             with torch.no_grad():
                 predictions = torch.argmax(main_logits, dim=1)
-                accuracy = (predictions == batched_test_outputs).float().mean()
+                accuracy = (predictions == batched_target_outputs).float().mean()
 
             # Support reconstruction loss - batched
             support_loss = self._calculate_support_reconstruction_loss_batched(
-                batched_support_inputs, batched_support_outputs
+                support_inputs, support_outputs
             )
 
             # CLS regularization loss - batched
             cls_loss = self._calculate_cls_regularization_loss_batched(
-                batched_support_inputs, batched_support_outputs
+                support_inputs, support_outputs
             )
 
             # Total loss
@@ -178,7 +156,7 @@ class TransformerTrainer(BaseTrainer):
 
             # Update metrics
             total_loss += total_batch_loss.item()
-            total_examples += len(all_test_inputs)
+            total_examples += batch_size
 
             # Update loss components
             loss_components["main_loss"] += main_loss.item()
@@ -360,58 +338,36 @@ class TransformerTrainer(BaseTrainer):
                     ]
                 )
 
-                # Get test examples
-                test_inputs = batch["test_inputs"]
-                test_outputs = batch["test_outputs"]
-                test_masks = batch["test_masks"]
-                num_test_examples = batch["num_test_examples"]
+                # Get target examples for cycling (instead of test examples)
+                target_example_inputs = batch["target_example_inputs"]
+                target_example_outputs = batch["target_example_outputs"]
 
-                # Collect all valid test examples for batched processing
-                all_test_inputs = []
-                all_test_outputs = []
-                all_support_inputs_expanded = []
-                all_support_outputs_expanded = []
+                # Convert target examples to batched tensors
+                batched_target_inputs = torch.stack(target_example_inputs)
+                batched_target_outputs = torch.stack(target_example_outputs)
 
-                for i in range(batch_size):
-                    num_test = num_test_examples[i]
-                    for test_idx in range(num_test):
-                        if test_masks[i, test_idx]:
-                            all_test_inputs.append(test_inputs[i, test_idx])
-                            all_test_outputs.append(test_outputs[i, test_idx])
-                            all_support_inputs_expanded.append(support_inputs[i])
-                            all_support_outputs_expanded.append(support_outputs[i])
-
-                if not all_test_inputs:
-                    continue
-
-                # Convert to batched tensors
-                batched_test_inputs = torch.stack(all_test_inputs)
-                batched_test_outputs = torch.stack(all_test_outputs)
-                batched_support_inputs = torch.stack(all_support_inputs_expanded)
-                batched_support_outputs = torch.stack(all_support_outputs_expanded)
-
-                # Main forward pass - batched
+                # Main forward pass - cycling: use support examples to predict target
                 main_logits = self.model.forward_with_support_batch(
-                    batched_support_inputs, batched_support_outputs, batched_test_inputs
+                    support_inputs, support_outputs, batched_target_inputs
                 )
 
                 # Calculate main loss
                 main_loss, _ = calculate_classification_loss(
-                    main_logits, batched_test_outputs, self.config
+                    main_logits, batched_target_outputs, self.config
                 )
 
                 # Calculate accuracy
                 predictions = torch.argmax(main_logits, dim=1)
-                accuracy = (predictions == batched_test_outputs).float().mean()
+                accuracy = (predictions == batched_target_outputs).float().mean()
 
                 # Support reconstruction loss - batched
                 support_loss = self._calculate_support_reconstruction_loss_batched(
-                    batched_support_inputs, batched_support_outputs
+                    support_inputs, support_outputs
                 )
 
                 # CLS regularization loss - batched
                 cls_loss = self._calculate_cls_regularization_loss_batched(
-                    batched_support_inputs, batched_support_outputs
+                    support_inputs, support_outputs
                 )
 
                 # Total loss
@@ -423,7 +379,7 @@ class TransformerTrainer(BaseTrainer):
 
                 # Update metrics
                 total_loss += total_batch_loss.item()
-                total_examples += len(all_test_inputs)
+                total_examples += batch_size
 
                 # Update loss components
                 loss_components["main_loss"] += main_loss.item()

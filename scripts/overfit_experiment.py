@@ -218,7 +218,8 @@ class OverfitExperiment:
 
         # create data loader (no validation split for overfitting)
         # Get appropriate collate function for model type
-        collate_fn = get_collate_fn(self.config.model_type, use_flattening=True)
+        # Use unified format for transformer models to maintain batch efficiency
+        collate_fn = get_collate_fn(self.config.model_type, use_flattening=False)
         train_loader = DataLoader(
             task_dataset,
             batch_size=self.config.batch_size,
@@ -338,7 +339,8 @@ class OverfitExperiment:
         task_dataset = self.create_task_subset(task_indices)
 
         # create data loader
-        collate_fn = get_collate_fn(self.config.model_type, use_flattening=True)
+        # Use unified format for transformer models to maintain batch efficiency
+        collate_fn = get_collate_fn(self.config.model_type, use_flattening=False)
         eval_loader = DataLoader(
             task_dataset,
             batch_size=self.config.batch_size,
@@ -378,85 +380,63 @@ class OverfitExperiment:
                 device = next(model.parameters()).device
                 test_inputs = batch["test_inputs"].to(device)
 
-                # Use correct key based on collate function format
-                if "test_targets" in batch:
-                    test_outputs = batch["test_targets"].to(device)  # Flattened format
-                else:
-                    test_outputs = batch["test_outputs"].to(device)  # Unified format
-                # Note: holdout inputs/outputs not available in flattened format
-                holdout_inputs = None
-                holdout_outputs = None
-                has_holdout = torch.zeros(
-                    test_inputs.size(0), dtype=torch.bool, device=device
+                # Use unified format - get target examples for cycling
+                target_inputs = [
+                    t.to(device) for t in batch["target_example_inputs"]
+                ]  # List of target inputs
+                target_outputs = [
+                    t.to(device) for t in batch["target_example_outputs"]
+                ]  # List of target outputs
+
+                # Get holdout data if available
+                holdout_inputs = batch.get("holdout_inputs")
+                holdout_outputs = batch.get("holdout_outputs")
+                has_holdout = batch.get(
+                    "has_holdout",
+                    torch.zeros(test_inputs.size(0), dtype=torch.bool, device=device),
                 )
+
+                if holdout_inputs is not None:
+                    holdout_inputs = holdout_inputs.to(device)
+                if holdout_outputs is not None:
+                    holdout_outputs = holdout_outputs.to(device)
 
                 # Get task indices for this batch
                 task_indices = batch["task_indices"]
 
-                # Determine collate function format once
-                is_flattened_format = "test_targets" in batch
-
-                # Helper functions for handling different formats
-                def get_test_example(test_inputs, test_outputs, i, test_idx):
-                    """Get test example in correct format based on collate function."""
-                    if is_flattened_format:
-                        # Flattened format: each sample is already flattened
-                        return test_inputs[i].unsqueeze(0), test_outputs[i].unsqueeze(0)
-                    else:
-                        # Unified format: get specific test example from batch
-                        return (
-                            test_inputs[i, test_idx : test_idx + 1],
-                            test_outputs[i, test_idx : test_idx + 1],
-                        )
+                # Use unified format with cycling - evaluate on target examples
+                def get_target_example(i):
+                    """Get target example for cycling format."""
+                    return target_inputs[i], target_outputs[i]
 
                 def get_support_examples(
                     support_example_inputs, support_example_outputs, i
                 ):
-                    """Get support examples in correct format based on collate function."""
-                    if is_flattened_format:
-                        # Flattened format: support examples are already [30, 30], just add batch dimension
-                        return (
-                            support_example_inputs[i][0].unsqueeze(0),
-                            support_example_outputs[i][0].unsqueeze(0),
-                            support_example_inputs[i][1].unsqueeze(0),
-                            support_example_outputs[i][1].unsqueeze(0),
-                        )
-                    else:
-                        # Unified format: need to unsqueeze and squeeze
-                        return (
-                            support_example_inputs[i][0].unsqueeze(0).squeeze(1),
-                            support_example_outputs[i][0].unsqueeze(0).squeeze(1),
-                            support_example_inputs[i][1].unsqueeze(0).squeeze(1),
-                            support_example_outputs[i][1].unsqueeze(0).squeeze(1),
-                        )
+                    """Get support examples in unified format."""
+                    return (
+                        support_example_inputs[i][0]
+                        .unsqueeze(0)
+                        .squeeze(1),  # [1, 30, 30]
+                        support_example_outputs[i][0]
+                        .unsqueeze(0)
+                        .squeeze(1),  # [1, 30, 30]
+                        support_example_inputs[i][1]
+                        .unsqueeze(0)
+                        .squeeze(1),  # [1, 30, 30]
+                        support_example_outputs[i][1]
+                        .unsqueeze(0)
+                        .squeeze(1),  # [1, 30, 30]
+                    )
 
-                # Create support examples structure based on format
-                if is_flattened_format:
-                    # Flattened format: support examples are tensors
-                    support_example_inputs_rgb = [None] * len(
-                        task_indices
-                    )  # Not available
-                    support_example_outputs_rgb = [None] * len(
-                        task_indices
-                    )  # Not available
-                    support_example_inputs = [
-                        [batch["support1_inputs"][i], batch["support2_inputs"][i]]
-                        for i in range(len(task_indices))
-                    ]
-                    support_example_outputs = [
-                        [batch["support1_outputs"][i], batch["support2_outputs"][i]]
-                        for i in range(len(task_indices))
-                    ]
-                else:
-                    # Unified format: support examples are already lists
-                    support_example_inputs_rgb = batch.get(
-                        "support_example_inputs_rgb", [None] * len(task_indices)
-                    )
-                    support_example_outputs_rgb = batch.get(
-                        "support_example_outputs_rgb", [None] * len(task_indices)
-                    )
-                    support_example_inputs = batch["support_example_inputs"]
-                    support_example_outputs = batch["support_example_outputs"]
+                # Unified format: support examples are already lists
+                support_example_inputs_rgb = batch.get(
+                    "support_example_inputs_rgb", [None] * len(task_indices)
+                )
+                support_example_outputs_rgb = batch.get(
+                    "support_example_outputs_rgb", [None] * len(task_indices)
+                )
+                support_example_inputs = batch["support_example_inputs"]
+                support_example_outputs = batch["support_example_outputs"]
 
                 # Get all training examples for each task in the batch
                 batch_size = len(support_example_inputs)
@@ -528,104 +508,86 @@ class OverfitExperiment:
 
                 # Process each task in the batch
                 for i in range(batch_size):
-                    # Get number of test examples for this task
-                    num_test = batch["num_test_examples"][i]
+                    # Evaluate on target example for cycling format
+                    target_input, target_output = get_target_example(i)
 
-                    # Evaluate on all test examples for this task
-                    for test_idx in range(num_test):
-                        # Get test example in correct format
-                        test_input, test_output = get_test_example(
-                            test_inputs, test_outputs, i, test_idx
+                    # Evaluate on this target example
+                    if is_patch_model or is_transformer_model:
+                        # Patch model or Transformer model - use direct forward pass
+                        # Get support examples in correct format
+                        (
+                            support1_input,
+                            support1_output,
+                            support2_input,
+                            support2_output,
+                        ) = get_support_examples(
+                            support_example_inputs, support_example_outputs, i
                         )
 
-                        # Evaluate on this test example
-                        if is_patch_model or is_transformer_model:
-                            # Patch model or Transformer model - use direct forward pass
-                            # Get support examples in correct format
-                            (
-                                support1_input,
-                                support1_output,
-                                support2_input,
-                                support2_output,
-                            ) = get_support_examples(
-                                support_example_inputs, support_example_outputs, i
-                            )
-                            # Ensure test_input has the correct shape [1, 30, 30]
-                            if is_flattened_format:
-                                # Flattened format: test_input is already [1, 30, 30]
-                                test_input_clean = test_input
-                            else:
-                                # Unified format: handle potential shape issues
-                                if test_input.dim() == 2:
-                                    # test_input is [1, 30], need to add the missing dimension
-                                    test_input_clean = test_input.unsqueeze(-1).expand(
-                                        -1, -1, 30
-                                    )
-                                elif test_input.dim() == 3:
-                                    # test_input is already [1, 30, 30]
-                                    test_input_clean = test_input
-                                else:
-                                    raise ValueError(
-                                        f"Unexpected test_input shape: {test_input.shape}"
-                                    )
-
-                            test_logits = model(
-                                support1_input,
-                                support1_output,
-                                support2_input,
-                                support2_output,
-                                test_input_clean,
-                            )
+                        # Ensure target_input has the correct shape [1, 30, 30]
+                        if target_input.dim() == 2:
+                            # target_input is [30, 30], need to add batch dimension
+                            target_input_clean = target_input.unsqueeze(0)
+                        elif target_input.dim() == 3:
+                            # target_input is already [1, 30, 30]
+                            target_input_clean = target_input
                         else:
-                            # ResNet model - use decoder with rule latents
-                            test_logits = model.decoder(
-                                outputs["rule_latents"][i : i + 1], test_input
+                            raise ValueError(
+                                f"Unexpected target_input shape: {target_input.shape}"
                             )
 
-                        # test_output is already in correct format from get_test_example
-                        test_target = test_output
-
-                        # calculate metrics using existing functions
-                        batch_size = test_logits.size(0)
-                        total_samples += batch_size
-
-                        # use existing accuracy functions
-                        perfect_matches += (
-                            calculate_perfect_accuracy(test_logits, test_target)
-                            * batch_size
+                        test_logits = model(
+                            support1_input,
+                            support1_output,
+                            support2_input,
+                            support2_output,
+                            target_input_clean,
+                        )
+                    else:
+                        # ResNet model - use decoder with rule latents
+                        test_logits = model.decoder(
+                            outputs["rule_latents"][i : i + 1], target_input
                         )
 
-                        pixel_correct += (
-                            calculate_pixel_accuracy(test_logits, test_target)
-                            * batch_size
-                        )
+                    # target_output is already in correct format
+                    test_target = target_output
 
-                        near_miss_correct += (
-                            calculate_near_miss_accuracy(test_logits, test_target)
-                            * batch_size
-                        )
+                    # calculate metrics using existing functions
+                    batch_size = test_logits.size(0)
+                    total_samples += batch_size
 
-                        # foreground metrics
-                        perfect_matches_foreground += (
-                            calculate_perfect_accuracy_foreground(
-                                test_logits, test_target
-                            )
-                            * batch_size
-                        )
+                    # use existing accuracy functions
+                    perfect_matches += (
+                        calculate_perfect_accuracy(test_logits, test_target)
+                        * batch_size
+                    )
 
-                        pixel_correct_foreground += (
-                            calculate_pixel_accuracy_foreground(
-                                test_logits, test_target
-                            )
-                            * batch_size
-                        )
+                    pixel_correct += (
+                        calculate_pixel_accuracy(test_logits, test_target) * batch_size
+                    )
 
-                        near_miss_correct_foreground += (
-                            calculate_near_miss_accuracy_foreground(
-                                test_logits, test_target
-                            )
-                            * batch_size
+                    near_miss_correct += (
+                        calculate_near_miss_accuracy(test_logits, test_target)
+                        * batch_size
+                    )
+
+                    # foreground metrics
+                    perfect_matches_foreground += (
+                        calculate_perfect_accuracy_foreground(test_logits, test_target)
+                        * batch_size
+                    )
+
+                    pixel_correct_foreground += (
+                        calculate_pixel_accuracy_foreground(test_logits, test_target)
+                        * batch_size
+                    )
+
+                    near_miss_correct_foreground += (
+                        calculate_near_miss_accuracy_foreground(
+                            test_logits, test_target
                         )
+                        * batch_size
+                    )
 
                     # evaluate on holdout target (if available)
                     if has_holdout[i]:
@@ -694,11 +656,7 @@ class OverfitExperiment:
                         self.holdout_metrics["total_samples"] += batch_size
 
                     # per-task results for detailed analysis
-                    task_idx = (
-                        task_indices[batch_idx * self.config.batch_size + i]
-                        if batch_idx * self.config.batch_size + i < len(task_indices)
-                        else batch_idx
-                    )
+                    task_idx = task_indices[i]
 
                     # calculate per-sample metrics using test target
                     sample_logits = test_logits[0:1]  # [1, 10, 30, 30]

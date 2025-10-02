@@ -5,7 +5,6 @@ This module provides the PatchARCDataset class that handles
 combination-based training for patch-based cross-attention models.
 """
 
-import itertools
 import copy
 import torch
 from typing import List, Dict, Any, Tuple
@@ -57,75 +56,6 @@ class PatchARCDataset(BaseARCDataset):
         self.combinations = self._generate_combinations()
         self._create_combination_mapping()
 
-    def _generate_combinations(self) -> List[List[Tuple[int, int]]]:
-        """Generate all possible 2-combinations for support examples (same as ResNet)."""
-        combinations = []
-
-        for task_idx, task in enumerate(self.tasks):
-            # Get original examples (already preserved in setup_color_augmentation)
-            original_examples = task["train"]
-
-            # Calculate total examples (including augmented if available)
-            if self.config.use_color_relabeling and "augmented_train" in task:
-                total_examples = len(original_examples) + len(task["augmented_train"])
-            else:
-                total_examples = len(original_examples)
-
-            # Generate combinations from all examples
-            if total_examples >= 2:
-                # For holdout mode, exclude the last original example from combinations
-                if self.holdout and len(original_examples) > 2:
-                    # Only use the first (len(original_examples) - 1) examples for combinations
-                    # This excludes the holdout example
-                    max_original_idx = len(original_examples) - 1
-                    if self.config.use_color_relabeling and "augmented_train" in task:
-                        # Augmented examples come after original examples
-                        max_idx = max_original_idx + len(task["augmented_train"])
-                    else:
-                        max_idx = max_original_idx
-
-                    # Generate combinations only from non-holdout examples
-                    task_combinations = list(itertools.combinations(range(max_idx), 2))
-                else:
-                    # Use all available examples for combinations
-                    task_combinations = list(
-                        itertools.combinations(range(total_examples), 2)
-                    )
-
-                # Add counterfactual combinations if enabled
-                if self.config.enable_counterfactuals:
-                    # Start with original combinations
-                    all_combinations = [
-                        (combo[0], combo[1], "original") for combo in task_combinations
-                    ]
-
-                    # Add Y counterfactual combinations if enabled
-                    if self.config.counterfactual_Y:
-                        y_counterfactual_combinations = [
-                            (combo[0], combo[1], "Y") for combo in task_combinations
-                        ]
-                        all_combinations.extend(y_counterfactual_combinations)
-
-                    # Add X counterfactual combinations if enabled
-                    if self.config.counterfactual_X:
-                        x_counterfactual_combinations = [
-                            (combo[0], combo[1], "X") for combo in task_combinations
-                        ]
-                        all_combinations.extend(x_counterfactual_combinations)
-
-                    task_combinations = all_combinations
-                else:
-                    # Original behavior - mark all as original
-                    task_combinations = [
-                        (combo[0], combo[1], "original") for combo in task_combinations
-                    ]
-
-                combinations.append(task_combinations)
-            else:
-                combinations.append([])
-
-        return combinations
-
     def _create_combination_mapping(self):
         """Create mapping from linear index to (task_idx, combination_idx) pairs (same as ResNet)."""
         self.combination_mapping = []
@@ -148,20 +78,22 @@ class PatchARCDataset(BaseARCDataset):
         """Return total number of combinations across all valid tasks (same as ResNet)."""
         return len(self.combination_mapping)
 
-    def _get_combination_info(self, idx: int) -> Tuple[int, int, Tuple[int, int], str]:
-        """Get task index, combination index, pair indices, and counterfactual type (same as ResNet)."""
+    def _get_combination_info(
+        self, idx: int
+    ) -> Tuple[int, int, Tuple[int, int, int], str]:
+        """Get task index, combination index, cycling indices, and counterfactual type (same as ResNet)."""
         task_idx, combination_idx = self.combination_mapping[idx]
         task_combinations = self.combinations[task_idx]
-        pair_indices = task_combinations[combination_idx]
+        combination = task_combinations[combination_idx]
 
         # Check if this is a counterfactual combination
-        if len(pair_indices) == 3:  # (i, j, counterfactual_type)
-            i, j, counterfactual_type = pair_indices
+        if len(combination) == 4:  # (i, j, k, counterfactual_type)
+            i, j, k, counterfactual_type = combination
         else:
-            i, j = pair_indices
+            i, j, k = combination
             counterfactual_type = "original"
 
-        return task_idx, combination_idx, (i, j), counterfactual_type
+        return task_idx, combination_idx, (i, j, k), counterfactual_type
 
     def _get_all_examples(
         self, task: Dict[str, Any], counterfactual_type: str
@@ -199,35 +131,22 @@ class PatchARCDataset(BaseARCDataset):
         all_examples: List[Dict[str, Any]],
         i: int,
         j: int,
+        k: int,
         counterfactual_type: str,
     ) -> List[Dict[str, torch.Tensor]]:
-        """Create support examples from examples i and j (same as ResNet - RGB format)."""
-        if counterfactual_type != "original":
-            # For counterfactual combinations, create counterfactual versions
-            ex1 = copy.deepcopy(all_examples[i])
-            ex2 = copy.deepcopy(all_examples[j])
+        """Create support examples from examples i and j (same as ResNet - grayscale format)."""
+        # Get the actual examples for i and j, handling test examples
+        ex1 = self._get_example_by_index(all_examples, i, counterfactual_type)
+        ex2 = self._get_example_by_index(all_examples, j, counterfactual_type)
 
-            # Preprocess with counterfactual transformation (grayscale for patch model)
-            ex1_processed = self._preprocess_grid(
-                ex1, apply_counterfactual=True, counterfactual_type=counterfactual_type
-            )
-            ex2_processed = self._preprocess_grid(
-                ex2, apply_counterfactual=True, counterfactual_type=counterfactual_type
-            )
-
-            return [ex1_processed, ex2_processed]
-        else:
-            # For non-counterfactual combinations, use original examples (grayscale for patch model)
-            return [
-                self._preprocess_grid(all_examples[i]),
-                self._preprocess_grid(all_examples[j]),
-            ]
+        return [ex1, ex2]
 
     def _create_support_targets(
         self,
         all_examples: List[Dict[str, Any]],
         i: int,
         j: int,
+        k: int,
         counterfactual_type: str,
     ) -> List[Dict[str, torch.Tensor]]:
         """Create support targets (ARC format) from examples i and j for decoder (same as ResNet)."""
@@ -314,9 +233,9 @@ class PatchARCDataset(BaseARCDataset):
             return self._preprocess_grid(task["train"][-1])
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        """Get sample by index - combination data for patch model (same structure as ResNet)."""
+        """Get sample by index - cycling combination data for patch model (same structure as ResNet)."""
         # Get combination information
-        task_idx, combination_idx, (i, j), counterfactual_type = (
+        task_idx, combination_idx, (i, j, k), counterfactual_type = (
             self._get_combination_info(idx)
         )
         task = self.tasks[task_idx]
@@ -326,12 +245,17 @@ class PatchARCDataset(BaseARCDataset):
 
         # Create support examples (2 examples for encoder)
         support_examples = self._create_support_examples(
-            all_examples, i, j, counterfactual_type
+            all_examples, i, j, k, counterfactual_type
         )
 
         # Create support targets (2 examples for decoder)
         support_targets = self._create_support_targets(
-            all_examples, i, j, counterfactual_type
+            all_examples, i, j, k, counterfactual_type
+        )
+
+        # Create target example (the third example in cycling)
+        target_example = self._create_target_example(
+            all_examples, i, j, k, counterfactual_type
         )
 
         # Create test examples (all of them)
@@ -345,10 +269,11 @@ class PatchARCDataset(BaseARCDataset):
         augmentation_group = get_augmentation_group(task, is_counterfactual, i, j)
 
         return {
-            # Core data - same structure as ResNet
+            # Core data - cycling format
             "support_examples": support_examples,  # 2 examples for encoder (grayscale grid format)
             "support_examples_rgb": None,  # No RGB support examples needed for patch model
             "support_targets": support_targets,  # 2 examples for decoder
+            "target_example": target_example,  # Target example for cycling (grayscale grid format)
             "test_examples": test_examples,  # All test examples
             "num_test_examples": len(test_examples),  # Number of test examples
             "holdout_example": holdout_example,  # Optional holdout
@@ -357,7 +282,7 @@ class PatchARCDataset(BaseARCDataset):
             "task_id": task["task_id"],  # Top-level task ID
             "is_counterfactual": is_counterfactual,  # Top-level flag
             "combination_idx": combination_idx,  # Top-level combination index
-            "pair_indices": (i, j),  # Top-level pair indices
+            "cycling_indices": (i, j, k),  # Top-level cycling indices
             "total_combinations": len(self.combinations[task_idx]),  # Top-level count
             "augmentation_group": augmentation_group,  # Augmentation group for regularization
         }
@@ -373,11 +298,11 @@ class PatchARCDataset(BaseARCDataset):
         counterfactual_combinations = []
 
         for combo_idx, combo in enumerate(task_combinations):
-            if len(combo) == 3:
-                i, j, counterfactual_type = combo
+            if len(combo) == 4:
+                i, j, k, counterfactual_type = combo
                 is_counterfactual = counterfactual_type != "original"
             else:
-                i, j = combo
+                i, j, k = combo
                 counterfactual_type = "original"
                 is_counterfactual = False
 
@@ -393,10 +318,11 @@ class PatchARCDataset(BaseARCDataset):
 
                 clean_data = {
                     "combination_idx": combo_idx,
-                    "pair_indices": (i, j),
+                    "cycling_indices": (i, j, k),
                     "is_counterfactual": is_counterfactual,
                     "counterfactual_type": counterfactual_type,
                     "support_examples": combination_data["support_examples"],
+                    "target_example": combination_data["target_example"],
                     "test_examples": combination_data["test_examples"],
                     "num_test_examples": combination_data["num_test_examples"],
                     "holdout_example": combination_data["holdout_example"],

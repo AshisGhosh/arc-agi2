@@ -163,7 +163,9 @@ def main():
                         config.arc_agi1_dir, config, holdout=holdout_mode
                     )
                 else:
-                    dataset = create_dataset(config.processed_dir, config)
+                    dataset = create_dataset(
+                        config.processed_dir, config, holdout=holdout_mode
+                    )
             except Exception as e:
                 st.error(f"❌ error during dataset initialization: {e}")
                 st.error(f"error type: {type(e).__name__}")
@@ -346,11 +348,14 @@ def main():
         # create combination options
         combo_options = []
         for i, combo in enumerate(combinations):
-            pair_indices = combo["pair_indices"]
+            # Cycling format with cycling_indices
+            indices = combo["cycling_indices"]
+            indices_str = f"({indices[0]}, {indices[1]}) -> {indices[2]}"
+
             is_counterfactual = combo.get("is_counterfactual", False)
             counterfactual_marker = " (counterfactual)" if is_counterfactual else ""
             combo_options.append(
-                f"combination {combo['combination_idx']}: {pair_indices}{counterfactual_marker}"
+                f"combination {combo['combination_idx']}: {indices_str}{counterfactual_marker}"
             )
 
         selected_combo_idx = st.selectbox(
@@ -397,7 +402,14 @@ def main():
         with col1:
             st.write("**combination info**")
             st.write(f"combination index: {selected_combo['combination_idx']}")
-            st.write(f"pair indices: {selected_combo['pair_indices']}")
+
+            # Display cycling indices
+            cycling_indices = selected_combo["cycling_indices"]
+            st.write(
+                f"cycling pattern: ({cycling_indices[0]}, {cycling_indices[1]}) -> {cycling_indices[2]}"
+            )
+            st.write("format: (support1, support2) -> target")
+
             st.write(
                 f"is counterfactual: {'✅' if selected_combo.get('is_counterfactual', False) else '❌'}"
             )
@@ -405,6 +417,11 @@ def main():
         with col2:
             st.write("**data structure**")
             st.write("support examples: 2")
+
+            # Cycling format
+            st.write("target example: 1 (cycling)")
+            st.write("format: support1 + support2 -> target")
+
             st.write(f"test examples: {task_data.get('num_test_examples', 1)}")
             if task_data.get("holdout_example") is not None:
                 st.write("holdout example: 1")
@@ -467,6 +484,41 @@ def main():
                             plt.close(fig)
         else:
             st.write("❌ no test examples available")
+
+        # target example display (for cycling format)
+        if "target_example" in task_data:
+            st.subheader("🎯 target example (cycling)")
+            st.write(
+                "This is the target that the model should predict using the two support examples above."
+            )
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.write("**target input**")
+                target_input_np = tensor_to_grayscale_numpy(
+                    task_data["target_example"]["input"]
+                )
+                rgb_target_input = apply_arc_color_palette(target_input_np)
+                fig, ax = plt.subplots(1, 1, figsize=(4, 4))
+                ax.imshow(rgb_target_input)
+                ax.set_title("target input", fontsize=12)
+                ax.axis("off")
+                st.pyplot(fig)
+                plt.close(fig)
+
+            with col2:
+                st.write("**target output**")
+                target_output_np = tensor_to_grayscale_numpy(
+                    task_data["target_example"]["output"]
+                )
+                rgb_target_output = apply_arc_color_palette(target_output_np)
+                fig, ax = plt.subplots(1, 1, figsize=(4, 4))
+                ax.imshow(rgb_target_output)
+                ax.set_title("target output", fontsize=12)
+                ax.axis("off")
+                st.pyplot(fig)
+                plt.close(fig)
 
         # holdout vs test comparison
         if has_holdout and holdout_mode and dataset_choice == "arc_agi1":
@@ -561,6 +613,16 @@ def main():
             st.write(f"- data type: {test_img.dtype}")
             st.write(f"- value range: [{test_img.min():.0f}, {test_img.max():.0f}]")
             st.write(f"- number of test examples: {num_test_examples}")
+
+            # Add target example stats if available
+            if "target_example" in task_data:
+                st.write("**target image (cycling)**")
+                target_img = task_data["target_example"]["input"]
+                st.write(f"- shape: {target_img.shape}")
+                st.write(f"- data type: {target_img.dtype}")
+                st.write(
+                    f"- value range: [{target_img.min():.0f}, {target_img.max():.0f}]"
+                )
 
         with col3:
             if has_holdout:
