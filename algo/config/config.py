@@ -60,6 +60,9 @@ class Config:
     # Auxiliary loss weights
     support_reconstruction_weight: float = 0.1  # Weight for support reconstruction loss
     cls_regularization_weight: float = 0.01  # Weight for CLS regularization loss
+    rule_token_consistency_weight: float = (
+        0.01  # Weight for rule token consistency loss
+    )
     contrastive_temperature: float = 0.07  # Temperature for contrastive learning
 
     # =============================================================================
