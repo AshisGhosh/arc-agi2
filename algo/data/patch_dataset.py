@@ -266,7 +266,9 @@ class PatchARCDataset(BaseARCDataset):
 
         # Determine augmentation group for regularization (use original function!)
         is_counterfactual = counterfactual_type != "original"
-        augmentation_group = get_augmentation_group(task, is_counterfactual, i, j)
+        augmentation_group = get_augmentation_group(
+            task, is_counterfactual, i, j, counterfactual_type
+        )
 
         return {
             # Core data - cycling format
