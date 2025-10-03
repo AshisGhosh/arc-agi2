@@ -34,6 +34,7 @@ class TransformerTrainer(BaseTrainer):
             config, "rule_token_consistency_weight", 0.01
         )
         self.contrastive_temperature = getattr(config, "contrastive_temperature", 0.07)
+        self.cls_l2_weight = getattr(config, "cls_l2_weight", 0.01)
 
     def train_epoch(self, train_loader: DataLoader) -> Dict[str, float]:
         """
@@ -146,7 +147,10 @@ class TransformerTrainer(BaseTrainer):
 
             # Rule token consistency loss - batched
             consistency_loss = self._calculate_rule_token_consistency_loss_batched(
-                support_inputs, support_outputs, batch["augmentation_groups"]
+                support_inputs,
+                support_outputs,
+                batch["task_indices"],
+                batch["augmentation_groups"],
             )
 
             # Total loss
@@ -280,8 +284,10 @@ class TransformerTrainer(BaseTrainer):
         R_1_norm = F.normalize(R_1, p=2, dim=1)
         R_2_norm = F.normalize(R_2, p=2, dim=1)
 
-        # Calculate similarity
-        similarity = torch.sum(R_1_norm * R_2_norm, dim=1)  # [B]
+        # Calculate similarity with temperature scaling
+        similarity = (
+            torch.sum(R_1_norm * R_2_norm, dim=1) / self.contrastive_temperature
+        )  # [B]
 
         # L2 regularization
         l2_loss = torch.mean(torch.norm(R_1, p=2, dim=1) + torch.norm(R_2, p=2, dim=1))
@@ -289,12 +295,13 @@ class TransformerTrainer(BaseTrainer):
         # Contrastive loss: encourage R_1 and R_2 to be similar
         contrastive_loss = -torch.mean(similarity)
 
-        return contrastive_loss + 0.01 * l2_loss
+        return contrastive_loss + self.cls_l2_weight * l2_loss
 
     def _calculate_rule_token_consistency_loss_batched(
         self,
         support_inputs: torch.Tensor,
         support_outputs: torch.Tensor,
+        task_indices: List[int],
         augmentation_groups: List[int],
     ) -> torch.Tensor:
         """
@@ -303,6 +310,7 @@ class TransformerTrainer(BaseTrainer):
         Args:
             support_inputs: [B, 2, 30, 30] - batch of support input pairs
             support_outputs: [B, 2, 30, 30] - batch of support output pairs
+            task_indices: [B] - task index for each sample
             augmentation_groups: [B] - augmentation group for each sample
 
         Returns:
@@ -329,13 +337,15 @@ class TransformerTrainer(BaseTrainer):
             )
             rule_tokens = rule_tokens_compressed
 
-        # Group rule tokens by augmentation group
+        # Group rule tokens by (task_idx, augmentation_group)
         groups = {}
         for i in range(B):
-            aug_group = augmentation_groups[i]  # Already an integer from the list
-            if aug_group not in groups:
-                groups[aug_group] = []
-            groups[aug_group].append(rule_tokens[i])
+            task_idx = task_indices[i]
+            aug_group = augmentation_groups[i]
+            key = (task_idx, aug_group)
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(rule_tokens[i])
 
         # Calculate within-group consistency loss
         total_loss = 0.0
@@ -466,7 +476,10 @@ class TransformerTrainer(BaseTrainer):
 
                 # Rule token consistency loss - batched
                 consistency_loss = self._calculate_rule_token_consistency_loss_batched(
-                    support_inputs, support_outputs, batch["augmentation_groups"]
+                    support_inputs,
+                    support_outputs,
+                    batch["task_indices"],
+                    batch["augmentation_groups"],
                 )
 
                 # Total loss

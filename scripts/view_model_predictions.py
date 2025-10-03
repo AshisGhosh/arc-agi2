@@ -578,7 +578,7 @@ def calculate_accuracy_metrics(
     with torch.no_grad():
         # Ensure both tensors are on the same device
         targets = targets.to(predictions.device)
-        
+
         if predictions.dim() == 2:
             predictions = predictions.unsqueeze(0)
         if targets.dim() == 2:
@@ -637,7 +637,7 @@ def evaluate_model_on_tasks(
     """
     if noise_config is None:
         noise_config = NoiseConfig()
-    
+
     if device is None:
         device = config.device
 
@@ -749,7 +749,7 @@ def evaluate_model_on_tasks(
                         noise_config.noise_test_range,
                         noise_config.noise_test_ratio,
                     )
-                    
+
                     # Also apply noise to target_example if it exists
                     if target_example is not None:
                         target_example["input"] = generate_noise_tensor(
@@ -789,11 +789,21 @@ def evaluate_model_on_tasks(
                         ]  # [1, 3, 64, 64]
 
                         # Create rule latent inputs tensor [1, 2, 2, 3, 64, 64]
-                        rule_latent_inputs = torch.zeros([1, 2, 2, 3, 64, 64], device=device)
-                        rule_latent_inputs[0, 0, 0] = example1_input.squeeze(0).to(device)  # [3, 64, 64]
-                        rule_latent_inputs[0, 0, 1] = example1_output.squeeze(0).to(device)
-                        rule_latent_inputs[0, 1, 0] = example2_input.squeeze(0).to(device)
-                        rule_latent_inputs[0, 1, 1] = example2_output.squeeze(0).to(device)
+                        rule_latent_inputs = torch.zeros(
+                            [1, 2, 2, 3, 64, 64], device=device
+                        )
+                        rule_latent_inputs[0, 0, 0] = example1_input.squeeze(0).to(
+                            device
+                        )  # [3, 64, 64]
+                        rule_latent_inputs[0, 0, 1] = example1_output.squeeze(0).to(
+                            device
+                        )
+                        rule_latent_inputs[0, 1, 0] = example2_input.squeeze(0).to(
+                            device
+                        )
+                        rule_latent_inputs[0, 1, 1] = example2_output.squeeze(0).to(
+                            device
+                        )
 
                         # Run model inference
                         outputs = model.forward_rule_latent_training(
@@ -828,16 +838,28 @@ def evaluate_model_on_tasks(
                         for test_idx in range(num_test_examples):
                             test_example = test_examples[test_idx]
                             # test_example["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
-                            target_input = test_example["input"].squeeze(1).to(device)  # [1, 30, 30]
-                            target_output = test_example["output"].unsqueeze(0).to(device)
+                            target_input = (
+                                test_example["input"].squeeze(1).to(device)
+                            )  # [1, 30, 30]
+                            target_output = (
+                                test_example["output"].unsqueeze(0).to(device)
+                            )
 
                             if is_patch_model or is_transformer_model:
                                 # Patch model or Transformer model - use direct forward pass
                                 # Get support examples for this task
-                                support1_input = support_examples[0]["input"].squeeze(1).to(device)  # [1, 30, 30]
-                                support1_output = support_examples[0]["output"].squeeze(1).to(device)  # [1, 30, 30]
-                                support2_input = support_examples[1]["input"].squeeze(1).to(device)  # [1, 30, 30]
-                                support2_output = support_examples[1]["output"].squeeze(1).to(device)  # [1, 30, 30]
+                                support1_input = (
+                                    support_examples[0]["input"].squeeze(1).to(device)
+                                )  # [1, 30, 30]
+                                support1_output = (
+                                    support_examples[0]["output"].squeeze(1).to(device)
+                                )  # [1, 30, 30]
+                                support2_input = (
+                                    support_examples[1]["input"].squeeze(1).to(device)
+                                )  # [1, 30, 30]
+                                support2_output = (
+                                    support_examples[1]["output"].squeeze(1).to(device)
+                                )  # [1, 30, 30]
 
                                 # target_input is already [1, 30, 30], which is what the model expects
                                 if is_transformer_model:
@@ -970,8 +992,12 @@ def evaluate_model_on_tasks(
                     # Use target_example from cycling format
                     if target_example:
                         # target_example["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
-                        target_input = target_example["input"].squeeze(1).to(device)  # [1, 30, 30]
-                        target_output = target_example["output"].squeeze(0).to(device)  # [1, 30, 30]
+                        target_input = (
+                            target_example["input"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
+                        target_output = (
+                            target_example["output"].squeeze(0).to(device)
+                        )  # [1, 30, 30]
                     else:
                         raise ValueError(
                             "❌ target_example not found in cycling format - this should not happen"
@@ -979,10 +1005,18 @@ def evaluate_model_on_tasks(
 
                     if is_patch_model or is_transformer_model:
                         # Patch model or Transformer model - use direct forward pass
-                        support1_input = support_examples[0]["input"].squeeze(1).to(device)  # [1, 30, 30]
-                        support1_output = support_examples[0]["output"].squeeze(1).to(device)  # [1, 30, 30]
-                        support2_input = support_examples[1]["input"].squeeze(1).to(device)  # [1, 30, 30]
-                        support2_output = support_examples[1]["output"].squeeze(1).to(device)  # [1, 30, 30]
+                        support1_input = (
+                            support_examples[0]["input"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
+                        support1_output = (
+                            support_examples[0]["output"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
+                        support2_input = (
+                            support_examples[1]["input"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
+                        support2_output = (
+                            support_examples[1]["output"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
 
                         # target_input is already [1, 30, 30], which is what the model expects
                         if is_transformer_model:
@@ -1016,15 +1050,25 @@ def evaluate_model_on_tasks(
                 if evaluation_mode == "holdout" and holdout_example is not None:
                     # Evaluate on holdout example
                     # holdout_example["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
-                    target_input = holdout_example["input"].squeeze(1).to(device)  # [1, 30, 30]
+                    target_input = (
+                        holdout_example["input"].squeeze(1).to(device)
+                    )  # [1, 30, 30]
                     target_output = holdout_example["output"].unsqueeze(0).to(device)
 
                     if is_patch_model or is_transformer_model:
                         # Patch model or Transformer model - use direct forward pass
-                        support1_input = support_examples[0]["input"].squeeze(1).to(device)  # [1, 30, 30]
-                        support1_output = support_examples[0]["output"].squeeze(1).to(device)  # [1, 30, 30]
-                        support2_input = support_examples[1]["input"].squeeze(1).to(device)  # [1, 30, 30]
-                        support2_output = support_examples[1]["output"].squeeze(1).to(device)  # [1, 30, 30]
+                        support1_input = (
+                            support_examples[0]["input"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
+                        support1_output = (
+                            support_examples[0]["output"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
+                        support2_input = (
+                            support_examples[1]["input"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
+                        support2_output = (
+                            support_examples[1]["output"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
 
                         # target_input is already [1, 30, 30], which is what the model expects
                         if is_transformer_model:
@@ -1067,10 +1111,18 @@ def evaluate_model_on_tasks(
 
                     if is_patch_model or is_transformer_model:
                         # Patch model or Transformer model - use direct forward pass
-                        support1_input = support_examples[0]["input"].squeeze(1).to(device)  # [1, 30, 30]
-                        support1_output = support_examples[0]["output"].squeeze(1).to(device)  # [1, 30, 30]
-                        support2_input = support_examples[1]["input"].squeeze(1).to(device)  # [1, 30, 30]
-                        support2_output = support_examples[1]["output"].squeeze(1).to(device)  # [1, 30, 30]
+                        support1_input = (
+                            support_examples[0]["input"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
+                        support1_output = (
+                            support_examples[0]["output"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
+                        support2_input = (
+                            support_examples[1]["input"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
+                        support2_output = (
+                            support_examples[1]["output"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
 
                         # target_input is already [1, 30, 30], which is what the model expects
                         if is_transformer_model:
@@ -1278,7 +1330,7 @@ def test_all_combinations(
     """
     if noise_config is None:
         noise_config = NoiseConfig()
-    
+
     if device is None:
         device = config.device
 
@@ -1381,7 +1433,7 @@ def test_all_combinations(
                         noise_config.noise_test_range,
                         noise_config.noise_test_ratio,
                     )
-                    
+
                     # Also apply noise to target_example if it exists
                     if target_example is not None:
                         target_example["input"] = generate_noise_tensor(
@@ -1451,14 +1503,24 @@ def test_all_combinations(
                         for test_idx, test_example in enumerate(test_examples):
                             if is_patch_model or is_transformer_model:
                                 # Patch model or Transformer model - use direct forward pass
-                                support1_input = support_examples[0]["input"].squeeze(1).to(device)  # [1, 30, 30]
-                                support1_output = support_examples[0]["output"].squeeze(1).to(device)  # [1, 30, 30]
-                                support2_input = support_examples[1]["input"].squeeze(1).to(device)  # [1, 30, 30]
-                                support2_output = support_examples[1]["output"].squeeze(1).to(device)  # [1, 30, 30]
+                                support1_input = (
+                                    support_examples[0]["input"].squeeze(1).to(device)
+                                )  # [1, 30, 30]
+                                support1_output = (
+                                    support_examples[0]["output"].squeeze(1).to(device)
+                                )  # [1, 30, 30]
+                                support2_input = (
+                                    support_examples[1]["input"].squeeze(1).to(device)
+                                )  # [1, 30, 30]
+                                support2_output = (
+                                    support_examples[1]["output"].squeeze(1).to(device)
+                                )  # [1, 30, 30]
 
                                 # Ensure test input is properly formatted for patch model
                                 # test_example["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
-                                test_input_clean = test_example["input"].squeeze(1).to(device)  # [1, 30, 30]
+                                test_input_clean = (
+                                    test_example["input"].squeeze(1).to(device)
+                                )  # [1, 30, 30]
 
                                 if is_transformer_model:
                                     logits = forward_transformer_with_noise(
@@ -1613,7 +1675,9 @@ def test_all_combinations(
 
                             # Ensure test input is properly formatted for patch model
                             # target["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
-                            test_input_clean = target["input"].squeeze(1).to(device)  # [1, 30, 30]
+                            test_input_clean = (
+                                target["input"].squeeze(1).to(device)
+                            )  # [1, 30, 30]
 
                             if is_transformer_model:
                                 logits = forward_transformer_with_noise(
@@ -1644,15 +1708,25 @@ def test_all_combinations(
                     target = holdout_example
                     if is_patch_model or is_transformer_model:
                         # Patch model or Transformer model - use direct forward pass
-                        support1_input = support_examples[0]["input"].squeeze(1).to(device)  # [1, 30, 30]
-                        support1_output = support_examples[0]["output"].squeeze(1).to(device)  # [1, 30, 30]
-                        support2_input = support_examples[1]["input"].squeeze(1).to(device)  # [1, 30, 30]
-                        support2_output = support_examples[1]["output"].squeeze(1).to(device)  # [1, 30, 30]
+                        support1_input = (
+                            support_examples[0]["input"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
+                        support1_output = (
+                            support_examples[0]["output"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
+                        support2_input = (
+                            support_examples[1]["input"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
+                        support2_output = (
+                            support_examples[1]["output"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
 
                         # Ensure test input is properly formatted for patch model
                         # target["input"] is [1, 1, 30, 30], we need [1, 30, 30]
                         # target["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
-                        test_input_clean = target["input"].squeeze(1).to(device)  # [1, 30, 30]
+                        test_input_clean = (
+                            target["input"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
 
                         if is_transformer_model:
                             logits = forward_transformer_with_noise(
@@ -1687,15 +1761,25 @@ def test_all_combinations(
                         )
                     if is_patch_model or is_transformer_model:
                         # Patch model or Transformer model - use direct forward pass
-                        support1_input = support_examples[0]["input"].squeeze(1).to(device)  # [1, 30, 30]
-                        support1_output = support_examples[0]["output"].squeeze(1).to(device)  # [1, 30, 30]
-                        support2_input = support_examples[1]["input"].squeeze(1).to(device)  # [1, 30, 30]
-                        support2_output = support_examples[1]["output"].squeeze(1).to(device)  # [1, 30, 30]
+                        support1_input = (
+                            support_examples[0]["input"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
+                        support1_output = (
+                            support_examples[0]["output"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
+                        support2_input = (
+                            support_examples[1]["input"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
+                        support2_output = (
+                            support_examples[1]["output"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
 
                         # Ensure test input is properly formatted for patch model
                         # target["input"] is [1, 1, 30, 30], we need [1, 30, 30]
                         # target["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
-                        test_input_clean = target["input"].squeeze(1).to(device)  # [1, 30, 30]
+                        test_input_clean = (
+                            target["input"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
 
                         if is_transformer_model:
                             logits = forward_transformer_with_noise(
