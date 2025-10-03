@@ -96,48 +96,31 @@ class ResNetARCDataset(BaseARCDataset):
 
         return task_idx, combination_idx, (i, j, k), counterfactual_type
 
-    def _get_all_examples(
-        self, task: Dict[str, Any], counterfactual_type: str
-    ) -> List[Dict[str, Any]]:
-        """Get all available examples (original + augmented + counterfactual if applicable)."""
-        # Start with training examples, excluding holdout if holdout mode is enabled
-        if self.holdout and len(task["train"]) > 2:
-            # Exclude the last training example (holdout) from rule latent creation
-            all_examples = task["train"][:-1]
-        else:
-            all_examples = task["train"]
-
-        if self.config.use_color_relabeling and "augmented_train" in task:
-            all_examples = all_examples + task["augmented_train"]
-
-        if counterfactual_type == "Y":
-            all_examples = all_examples + task["counterfactual_train"]
-            if (
-                self.config.use_color_relabeling
-                and "counterfactual_augmented_train" in task
-            ):
-                all_examples = all_examples + task["counterfactual_augmented_train"]
-        elif counterfactual_type == "X":
-            all_examples = all_examples + task["counterfactual_X_train"]
-            if (
-                self.config.use_color_relabeling
-                and "counterfactual_X_augmented_train" in task
-            ):
-                all_examples = all_examples + task["counterfactual_X_augmented_train"]
-
-        return all_examples
 
     def _get_raw_example_by_index(
-        self, all_examples: List[Dict[str, Any]], idx: int, counterfactual_type: str
+        self,
+        all_examples: List[Dict[str, Any]],
+        idx: int,
+        counterfactual_type: str,
+        group_name: str,
+        task_idx: int,
     ) -> Dict[str, Any]:
         """Get raw example by index, handling both training and test examples."""
         # Check if idx is a test example (negative index)
         if idx < 0:
             # This is a test example, get it from the task's test examples
-            task_idx = self._get_task_from_examples(all_examples)
             task = self.tasks[task_idx]
-            test_examples = task.get("test", [])
             test_idx = -(idx + 1)  # Convert -1 to 0, -2 to 1, etc.
+
+            # Determine which test examples to use based on the group
+            if (
+                group_name == "augmented"
+                and self.config.use_color_relabeling
+                and "augmented_test" in task
+            ):
+                test_examples = task["augmented_test"]
+            else:
+                test_examples = task.get("test", [])
 
             if test_idx < len(test_examples):
                 return test_examples[test_idx]
@@ -146,6 +129,7 @@ class ResNetARCDataset(BaseARCDataset):
                 return test_examples[0]
         else:
             # This is a training example (positive index)
+            # all_examples already contains the correct group's examples with adjusted indices
             return all_examples[idx]
 
     def _create_support_examples(
@@ -155,11 +139,17 @@ class ResNetARCDataset(BaseARCDataset):
         j: int,
         k: int,
         counterfactual_type: str,
+        group_name: str = None,
+        task_idx: int = None,
     ) -> List[Dict[str, torch.Tensor]]:
         """Create support examples from examples i and j (always grayscale grid format)."""
         # Get the actual examples for i and j, handling test examples
-        ex1 = self._get_example_by_index(all_examples, i, counterfactual_type)
-        ex2 = self._get_example_by_index(all_examples, j, counterfactual_type)
+        ex1 = self._get_example_by_index(
+            all_examples, i, counterfactual_type, group_name, task_idx
+        )
+        ex2 = self._get_example_by_index(
+            all_examples, j, counterfactual_type, group_name, task_idx
+        )
 
         return [ex1, ex2]
 
@@ -170,11 +160,17 @@ class ResNetARCDataset(BaseARCDataset):
         j: int,
         k: int,
         counterfactual_type: str,
+        group_name: str,
+        task_idx: int,
     ) -> List[Dict[str, torch.Tensor]]:
         """Create RGB support examples from examples i and j (for ResNet encoder)."""
         # Get the actual examples for i and j, handling test examples
-        ex1_raw = self._get_raw_example_by_index(all_examples, i, counterfactual_type)
-        ex2_raw = self._get_raw_example_by_index(all_examples, j, counterfactual_type)
+        ex1_raw = self._get_raw_example_by_index(
+            all_examples, i, counterfactual_type, group_name, task_idx
+        )
+        ex2_raw = self._get_raw_example_by_index(
+            all_examples, j, counterfactual_type, group_name, task_idx
+        )
 
         if counterfactual_type != "original":
             # For counterfactual combinations, create counterfactual versions
@@ -259,8 +255,14 @@ class ResNetARCDataset(BaseARCDataset):
             return test_examples
         else:
             test_examples = []
-            for test_example in task["test"]:
-                test_examples.append(self._preprocess_grid(test_example))
+            # Use augmented test examples if available and color augmentation is enabled
+            if self.config.use_color_relabeling and "augmented_test" in task:
+                for test_example in task["augmented_test"]:
+                    test_examples.append(self._preprocess_grid(test_example))
+            else:
+                # Fall back to original test examples
+                for test_example in task["test"]:
+                    test_examples.append(self._preprocess_grid(test_example))
             return test_examples
 
     def _get_holdout_example(
@@ -296,17 +298,50 @@ class ResNetARCDataset(BaseARCDataset):
         )
         task = self.tasks[task_idx]
 
-        # Get all available examples
-        all_examples = self._get_all_examples(task, counterfactual_type)
+        # Get examples by augmentation group to avoid mixing groups
+        groups = self._get_examples_by_augmentation_group(task, counterfactual_type)
+
+        # Determine which group this combination belongs to based on the indices
+        # We need to find which group contains the examples at indices i and j
+        all_examples = []
+        group_name = "original"  # default
+
+        # Calculate group boundaries
+        original_size = len(groups.get("original", []))
+        augmented_size = len(groups.get("augmented", []))
+
+        # Determine which group based on indices
+        # Check if any training example indices are in the augmented range
+        has_augmented_training = (
+            (i >= original_size and i < (original_size + augmented_size))
+            or (j >= original_size and j < (original_size + augmented_size))
+            or (k >= original_size and k < (original_size + augmented_size))
+        )
+
+        if has_augmented_training:
+            # This is an augmented group combination
+            group_name = "augmented"
+            all_examples = groups["augmented"]
+            # Adjust indices to be relative to the augmented group
+            if i >= original_size:
+                i = i - original_size
+            if j >= original_size:
+                j = j - original_size
+            if k >= original_size:
+                k = k - original_size
+        else:
+            # This is an original group combination
+            group_name = "original"
+            all_examples = groups["original"]
 
         # Create support examples (2 examples for encoder - grayscale grid format)
         support_examples = self._create_support_examples(
-            all_examples, i, j, k, counterfactual_type
+            all_examples, i, j, k, counterfactual_type, group_name, task_idx
         )
 
         # Create RGB support examples (2 examples for ResNet encoder - RGB format)
         support_examples_rgb = self._create_support_examples_rgb(
-            all_examples, i, j, k, counterfactual_type
+            all_examples, i, j, k, counterfactual_type, group_name, task_idx
         )
 
         # Create support targets (2 examples for decoder)
@@ -316,7 +351,7 @@ class ResNetARCDataset(BaseARCDataset):
 
         # Create target example (the third example in cycling)
         target_example = self._create_target_example(
-            all_examples, i, j, k, counterfactual_type
+            all_examples, i, j, k, counterfactual_type, group_name, task_idx
         )
 
         # Create test examples (all of them)

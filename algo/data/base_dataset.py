@@ -212,6 +212,57 @@ class BaseARCDataset(Dataset, ABC):
 
         return training_examples
 
+    def _get_examples_by_augmentation_group(
+        self, task: Dict[str, Any], counterfactual_type: str
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Get examples separated by augmentation group to avoid mixing groups in combinations."""
+        groups = {}
+
+        # Start with training examples, excluding holdout if holdout mode is enabled
+        if self.holdout and len(task["train"]) > 2:
+            # Exclude the last training example (holdout) from rule latent creation
+            original_examples = task["train"][:-1]
+        else:
+            original_examples = task["train"]
+
+        # Group 0: Original training examples only (no test examples in groups)
+        groups["original"] = original_examples.copy()
+
+        # Group 1: Color-augmented training examples only (if available)
+        if self.config.use_color_relabeling and "augmented_train" in task:
+            groups["augmented"] = task["augmented_train"].copy()
+        else:
+            groups["augmented"] = []
+
+        # Handle counterfactual groups
+        if counterfactual_type == "Y":
+            groups["counterfactual"] = task["counterfactual_train"].copy()
+            if (
+                self.config.use_color_relabeling
+                and "counterfactual_augmented_train" in task
+            ):
+                groups["counterfactual_augmented"] = task[
+                    "counterfactual_augmented_train"
+                ].copy()
+            else:
+                groups["counterfactual_augmented"] = []
+        elif counterfactual_type == "X":
+            groups["counterfactual"] = task["counterfactual_X_train"].copy()
+            if (
+                self.config.use_color_relabeling
+                and "counterfactual_X_augmented_train" in task
+            ):
+                groups["counterfactual_augmented"] = task[
+                    "counterfactual_X_augmented_train"
+                ].copy()
+            else:
+                groups["counterfactual_augmented"] = []
+        else:
+            groups["counterfactual"] = []
+            groups["counterfactual_augmented"] = []
+
+        return groups
+
     def _get_task_from_examples(self, all_examples: List[Dict[str, Any]]) -> int:
         """Helper method to get task index from all_examples list."""
         # This is a bit of a hack, but we can find the task by looking at the examples
@@ -224,16 +275,31 @@ class BaseARCDataset(Dataset, ABC):
         return 0  # Fallback to first task
 
     def _get_example_by_index(
-        self, all_examples: List[Dict[str, Any]], idx: int, counterfactual_type: str
+        self,
+        all_examples: List[Dict[str, Any]],
+        idx: int,
+        counterfactual_type: str,
+        group_name: str = None,
+        task_idx: int = None,
     ) -> Dict[str, torch.Tensor]:
         """Get example by index, handling both training and test examples."""
         # Check if idx is a test example (negative index)
         if idx < 0:
             # This is a test example, get it from the task's test examples
-            task_idx = self._get_task_from_examples(all_examples)
+            if task_idx is None:
+                task_idx = self._get_task_from_examples(all_examples)
             task = self.tasks[task_idx]
-            test_examples = task.get("test", [])
             test_idx = -(idx + 1)  # Convert -1 to 0, -2 to 1, etc.
+
+            # Determine which test examples to use based on the group
+            if (
+                group_name == "augmented"
+                and self.config.use_color_relabeling
+                and "augmented_test" in task
+            ):
+                test_examples = task["augmented_test"]
+            else:
+                test_examples = task.get("test", [])
 
             if test_idx < len(test_examples):
                 test_example = test_examples[test_idx]
@@ -247,7 +313,7 @@ class BaseARCDataset(Dataset, ABC):
                     )
                     return ex_processed
                 else:
-                    # For non-counterfactual combinations, use original test example
+                    # For non-counterfactual combinations, use test example as-is
                     return self._preprocess_grid(test_example)
             else:
                 # Fallback to first test example if index is out of range
@@ -275,15 +341,47 @@ class BaseARCDataset(Dataset, ABC):
         j: int,
         k: int,
         counterfactual_type: str,
+        group_name: str = None,
+        task_idx: int = None,
     ) -> Dict[str, torch.Tensor]:
         """Create target example from example k (grayscale grid format)."""
         # Check if k is a test example (negative index)
         if k < 0:
             # This is a test example, get it from the task's test examples
-            task_idx = self._get_task_from_examples(all_examples)
+            if task_idx is None:
+                task_idx = self._get_task_from_examples(all_examples)
             task = self.tasks[task_idx]
-            test_examples = task.get("test", [])
             test_idx = -(k + 1)  # Convert -1 to 0, -2 to 1, etc.
+
+            # Determine which test examples to use based on the augmentation group
+            # Use the provided group_name if available, otherwise try to determine from indices
+            if group_name is not None:
+                is_augmented_group = group_name == "augmented"
+            else:
+                # Fallback: try to determine from indices (this may not work with adjusted indices)
+                groups = self._get_examples_by_augmentation_group(
+                    task, counterfactual_type
+                )
+                original_size = len(groups.get("original", []))
+                augmented_size = len(groups.get("augmented", []))
+
+                is_augmented_group = (
+                    i >= original_size
+                    and j >= original_size
+                    and i < (original_size + augmented_size)
+                    and j < (original_size + augmented_size)
+                )
+
+            if (
+                is_augmented_group
+                and self.config.use_color_relabeling
+                and "augmented_test" in task
+            ):
+                # Use augmented test examples for augmented group combinations
+                test_examples = task["augmented_test"]
+            else:
+                # Use original test examples for original group combinations
+                test_examples = task.get("test", [])
 
             if test_idx < len(test_examples):
                 test_example = test_examples[test_idx]
@@ -297,7 +395,7 @@ class BaseARCDataset(Dataset, ABC):
                     )
                     return ex_processed
                 else:
-                    # For non-counterfactual combinations, use original test example
+                    # For non-counterfactual combinations, use test example as-is
                     return self._preprocess_grid(test_example)
             else:
                 # Fallback to first test example if index is out of range
@@ -319,78 +417,102 @@ class BaseARCDataset(Dataset, ABC):
                 return self._preprocess_grid(all_examples[k])
 
     def _generate_combinations(self) -> List[List[Tuple[int, int, int, str]]]:
-        """Generate cycling combinations: (S_A, S_B, T_1, counterfactual_type)."""
+        """Generate cycling combinations: (S_A, S_B, T_1, counterfactual_type) with separate augmentation groups."""
         combinations = []
 
         for task_idx, task in enumerate(self.tasks):
-            # Get original examples (already preserved in setup_color_augmentation)
-            original_examples = task["train"]
+            task_combinations = []
 
-            # Calculate total examples (including augmented if available)
-            if self.config.use_color_relabeling and "augmented_train" in task:
-                total_examples = len(original_examples) + len(task["augmented_train"])
-            else:
-                total_examples = len(original_examples)
+            # Generate combinations for each counterfactual type
+            counterfactual_types = ["original"]
+            if self.config.enable_counterfactuals:
+                if self.config.counterfactual_Y:
+                    counterfactual_types.append("Y")
+                if self.config.counterfactual_X:
+                    counterfactual_types.append("X")
 
-            # Generate cycling combinations from all examples
-            if total_examples >= 2:  # Need at least 2 training examples for cycling
-                # For holdout mode, exclude the last original example from combinations
-                if self.holdout and len(original_examples) > 2:
-                    # Only use the first (len(original_examples) - 1) examples for combinations
-                    # This excludes the holdout example
-                    max_original_idx = len(original_examples) - 1
-                    if self.config.use_color_relabeling and "augmented_train" in task:
-                        # Augmented examples come after original examples
-                        max_idx = max_original_idx + len(task["augmented_train"])
-                    else:
-                        max_idx = max_original_idx
-                else:
-                    # Use all available examples for combinations
-                    max_idx = total_examples
-
-                # Generate cycling combinations that always use test examples as targets
-                cycling_combinations = self._generate_cycling_with_test_combinations(
-                    range(max_idx), task
+            for counterfactual_type in counterfactual_types:
+                # Get examples separated by augmentation group
+                groups = self._get_examples_by_augmentation_group(
+                    task, counterfactual_type
                 )
 
-                # No separate test combinations needed since cycling already includes test examples
-                task_combinations = cycling_combinations
+                # Generate combinations for each group separately
+                for group_name, group_examples in groups.items():
+                    if len(group_examples) >= 2:  # Need at least 2 examples for cycling
+                        # Generate cycling combinations for this group
+                        group_combinations = (
+                            self._generate_cycling_with_test_combinations_for_group(
+                                group_examples, task, group_name, counterfactual_type
+                            )
+                        )
+                        task_combinations.extend(group_combinations)
 
-                # Add counterfactual combinations if enabled
-                if self.config.enable_counterfactuals:
-                    # Start with original combinations
-                    all_combinations = [
-                        (combo[0], combo[1], combo[2], "original")
-                        for combo in task_combinations
-                    ]
+            # Remove duplicates while preserving order
+            seen = set()
+            unique_combinations = []
+            for combo in task_combinations:
+                if combo not in seen:
+                    seen.add(combo)
+                    unique_combinations.append(combo)
 
-                    # Add Y counterfactual combinations if enabled
-                    if self.config.counterfactual_Y:
-                        y_counterfactual_combinations = [
-                            (combo[0], combo[1], combo[2], "Y")
-                            for combo in task_combinations
-                        ]
-                        all_combinations.extend(y_counterfactual_combinations)
+            combinations.append(unique_combinations)
 
-                    # Add X counterfactual combinations if enabled
-                    if self.config.counterfactual_X:
-                        x_counterfactual_combinations = [
-                            (combo[0], combo[1], combo[2], "X")
-                            for combo in task_combinations
-                        ]
-                        all_combinations.extend(x_counterfactual_combinations)
+        return combinations
 
-                    task_combinations = all_combinations
-                else:
-                    # Original behavior - mark all as original
-                    task_combinations = [
-                        (combo[0], combo[1], combo[2], "original")
-                        for combo in task_combinations
-                    ]
+    def _generate_cycling_with_test_combinations_for_group(
+        self,
+        group_examples: List[Dict[str, Any]],
+        task: Dict,
+        group_name: str,
+        counterfactual_type: str,
+    ) -> List[Tuple[int, int, int, str]]:
+        """Generate cycling combinations for a specific augmentation group."""
+        combinations = []
+        test_examples = task.get("test", [])
 
-                combinations.append(task_combinations)
-            else:
-                combinations.append([])
+        if len(test_examples) == 0 or len(group_examples) < 2:
+            return combinations
+
+        # Calculate the starting index for this group to avoid conflicts
+        # Original group starts at 0, augmented group starts after original group
+        if group_name == "original":
+            start_idx = 0
+        elif group_name == "augmented":
+            # Get the size of the original group to offset augmented indices
+            original_groups = self._get_examples_by_augmentation_group(
+                task, counterfactual_type
+            )
+            start_idx = len(original_groups.get("original", []))
+        else:
+            # For counterfactual groups, calculate appropriate offset
+            start_idx = 0  # This will be handled by the group separation logic
+
+        # Generate cycling combinations within the group
+        # Use only the first pair of training examples to avoid too many combinations
+        if len(group_examples) >= 2:
+            i, j = 0, 1  # Use first two training examples
+            for test_idx in range(len(test_examples)):
+                # Use negative indices to indicate test examples
+                test_target_idx = -(test_idx + 1)  # -1, -2, -3, etc.
+
+                # Offset the indices to avoid conflicts between groups
+                offset_i = start_idx + i
+                offset_j = start_idx + j
+
+                # Add all 3 cycling patterns with test examples:
+                # 1. (group_i, group_j) -> test_k
+                # 2. (group_i, test_k) -> group_j
+                # 3. (test_k, group_j) -> group_i
+                combinations.append(
+                    (offset_i, offset_j, test_target_idx, counterfactual_type)
+                )
+                combinations.append(
+                    (offset_i, test_target_idx, offset_j, counterfactual_type)
+                )
+                combinations.append(
+                    (test_target_idx, offset_j, offset_i, counterfactual_type)
+                )
 
         return combinations
 
