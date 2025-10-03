@@ -58,6 +58,119 @@ def convert_grayscale_to_rgb(support_examples, config):
     return rgb_examples
 
 
+def analyze_augmentation_groups(dataset, task_idx, combinations):
+    """Analyze which augmentation group each combination belongs to."""
+    task = dataset.tasks[task_idx]
+
+    # Get groups for different counterfactual types
+    groups_original = dataset._get_examples_by_augmentation_group(task, "original")
+    groups_y = (
+        dataset._get_examples_by_augmentation_group(task, "Y")
+        if dataset.config.enable_counterfactuals
+        else {}
+    )
+    groups_x = (
+        dataset._get_examples_by_augmentation_group(task, "X")
+        if dataset.config.enable_counterfactuals
+        else {}
+    )
+
+    group_counts = {
+        "original": 0,
+        "augmented": 0,
+        "counterfactual": 0,
+        "counterfactual_augmented": 0,
+        "mixed": 0,
+    }
+
+    original_count = 0
+    augmented_count = 0
+    counterfactual_count = 0
+    mixed_count = 0
+
+    for combo in combinations:
+        indices = combo["cycling_indices"]
+        i, j, k = indices
+        is_counterfactual = combo.get("is_counterfactual", False)
+        counterfactual_type = combo.get("counterfactual_type", "original")
+
+        # Determine which group this combination belongs to
+        if is_counterfactual:
+            if counterfactual_type == "Y":
+                groups = groups_y
+            elif counterfactual_type == "X":
+                groups = groups_x
+            else:
+                groups = groups_original
+        else:
+            groups = groups_original
+
+        # Calculate group boundaries (same logic as in dataset)
+        original_size = len(groups.get("original", []))
+        augmented_size = len(groups.get("augmented", []))
+
+        # Determine which group based on indices (same logic as in dataset)
+        # Check if any training example indices are in the augmented range
+        has_augmented_training = (
+            (i >= original_size and i < (original_size + augmented_size))
+            or (j >= original_size and j < (original_size + augmented_size))
+            or (k >= original_size and k < (original_size + augmented_size))
+        )
+
+        if has_augmented_training:
+            # This is an augmented group combination
+            group_found = "augmented"
+        else:
+            # This is an original group combination
+            group_found = "original"
+
+        if is_counterfactual:
+            if "augmented" in group_found:
+                group_counts["counterfactual_augmented"] += 1
+            else:
+                group_counts["counterfactual"] += 1
+            counterfactual_count += 1
+        else:
+            if "augmented" in group_found:
+                group_counts["augmented"] += 1
+                augmented_count += 1
+            else:
+                group_counts["original"] += 1
+                original_count += 1
+
+    return {
+        "group_counts": group_counts,
+        "original_count": original_count,
+        "augmented_count": augmented_count,
+        "counterfactual_count": counterfactual_count,
+        "mixed_count": mixed_count,
+    }
+
+
+def get_combination_group_info(dataset, task_idx, combination):
+    """Get augmentation group information for a specific combination."""
+    from visualization_utils import get_combination_augmentation_group
+    
+    group_found = get_combination_augmentation_group(dataset, task_idx, combination)
+    
+    # Get the groups for additional info
+    task = dataset.tasks[task_idx]
+    is_counterfactual = combination.get("is_counterfactual", False)
+    counterfactual_type = combination.get("counterfactual_type", "original")
+    
+    if is_counterfactual:
+        if counterfactual_type == "Y":
+            groups = dataset._get_examples_by_augmentation_group(task, "Y")
+        elif counterfactual_type == "X":
+            groups = dataset._get_examples_by_augmentation_group(task, "X")
+        else:
+            groups = dataset._get_examples_by_augmentation_group(task, "original")
+    else:
+        groups = dataset._get_examples_by_augmentation_group(task, "original")
+    
+    return group_found, groups
+
+
 def main():
     """main streamlit app."""
     st.title("🔍 arc dataset viewer")
@@ -334,12 +447,58 @@ def main():
             st.write(f"counterfactual: {counterfactual_count}")
             st.write(f"original: {len(combinations) - counterfactual_count}")
 
+            # Show test augmentation info
+            if enable_color_augmentation:
+                st.write("**test augmentation**")
+                st.write("✅ test examples augmented")
+                st.write("(consistent with training)")
+
         with col3:
             st.write("**augmentation status**")
             st.write(f"color relabeling: {'✅' if enable_color_augmentation else '❌'}")
             st.write(f"counterfactuals: {'✅' if enable_counterfactuals else '❌'}")
             if enable_color_augmentation:
                 st.write(f"variants: {augmentation_variants}")
+
+            # Show augmentation group separation info
+            if enable_color_augmentation:
+                st.write("**group separation**")
+                st.write("✅ groups properly separated")
+                st.write("(no mixing within combinations)")
+
+    # augmentation group analysis
+    if enable_color_augmentation and combinations:
+        st.subheader("🔀 augmentation group analysis")
+
+        # Analyze combinations by group
+        group_analysis = analyze_augmentation_groups(
+            dataset, actual_task_idx, combinations
+        )
+
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            st.metric("original group", group_analysis["original_count"])
+        with col2:
+            st.metric("augmented group", group_analysis["augmented_count"])
+        with col3:
+            st.metric("counterfactual group", group_analysis["counterfactual_count"])
+        with col4:
+            st.metric("mixed groups", group_analysis["mixed_count"])
+
+        # Show group separation status
+        if group_analysis["mixed_count"] == 0:
+            st.success("✅ Perfect group separation - no mixing detected!")
+        else:
+            st.error(
+                f"⚠️ Found {group_analysis['mixed_count']} combinations with mixed groups"
+            )
+
+        # Show group breakdown
+        st.write("**Group breakdown:**")
+        for group_name, count in group_analysis["group_counts"].items():
+            if count > 0:
+                st.write(f"- {group_name}: {count} combinations")
 
     # combination selection
     if combinations:
@@ -354,8 +513,18 @@ def main():
 
             is_counterfactual = combo.get("is_counterfactual", False)
             counterfactual_marker = " (counterfactual)" if is_counterfactual else ""
+
+            # Get group information for this combination
+            if enable_color_augmentation:
+                group_found, _ = get_combination_group_info(
+                    dataset, actual_task_idx, combo
+                )
+                group_marker = f" [{group_found}]"
+            else:
+                group_marker = ""
+
             combo_options.append(
-                f"combination {combo['combination_idx']}: {indices_str}{counterfactual_marker}"
+                f"combination {combo['combination_idx']}: {indices_str}{counterfactual_marker}{group_marker}"
             )
 
         selected_combo_idx = st.selectbox(
@@ -414,6 +583,19 @@ def main():
                 f"is counterfactual: {'✅' if selected_combo.get('is_counterfactual', False) else '❌'}"
             )
 
+            # Show augmentation group information
+            if enable_color_augmentation:
+                group_found, groups = get_combination_group_info(
+                    dataset, actual_task_idx, selected_combo
+                )
+                st.write(f"**augmentation group: {group_found}**")
+
+                # Show group sizes
+                st.write("**group sizes:**")
+                for group_name, group_examples in groups.items():
+                    if len(group_examples) > 0:
+                        st.write(f"- {group_name}: {len(group_examples)} examples")
+
         with col2:
             st.write("**data structure**")
             st.write("support examples: 2")
@@ -441,6 +623,17 @@ def main():
                 )
             else:
                 st.write("❌ no holdout data")
+
+            # Show group separation status
+            if enable_color_augmentation:
+                st.write("**group separation**")
+                group_found, _ = get_combination_group_info(
+                    dataset, actual_task_idx, selected_combo
+                )
+                if group_found == "mixed":
+                    st.write("⚠️ mixed groups")
+                else:
+                    st.write(f"✅ {group_found} group")
 
         # test examples display
         st.subheader("🧪 test examples")

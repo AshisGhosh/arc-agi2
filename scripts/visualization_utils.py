@@ -133,6 +133,54 @@ def show_color_palette():
     return fig
 
 
+def get_combination_augmentation_group(dataset, task_idx: int, combination: dict) -> str:
+    """Get augmentation group for a specific combination (shared utility).
+    
+    Args:
+        dataset: The ARC dataset instance
+        task_idx: Index of the task
+        combination: Dictionary containing combination information with 'cycling_indices' key
+        
+    Returns:
+        str: The augmentation group name ('original' or 'augmented')
+    """
+    task = dataset.tasks[task_idx]
+    indices = combination["cycling_indices"]
+    i, j, k = indices
+    is_counterfactual = combination.get("is_counterfactual", False)
+    counterfactual_type = combination.get("counterfactual_type", "original")
+    
+    # Get the appropriate groups
+    if is_counterfactual:
+        if counterfactual_type == "Y":
+            groups = dataset._get_examples_by_augmentation_group(task, "Y")
+        elif counterfactual_type == "X":
+            groups = dataset._get_examples_by_augmentation_group(task, "X")
+        else:
+            groups = dataset._get_examples_by_augmentation_group(task, "original")
+    else:
+        groups = dataset._get_examples_by_augmentation_group(task, "original")
+    
+    # Calculate group boundaries (same logic as in dataset)
+    original_size = len(groups.get('original', []))
+    augmented_size = len(groups.get('augmented', []))
+    
+    # Determine which group based on indices (same logic as in dataset)
+    # Check if any training example indices are in the augmented range
+    has_augmented_training = ((i >= original_size and i < (original_size + augmented_size)) or 
+                             (j >= original_size and j < (original_size + augmented_size)) or
+                             (k >= original_size and k < (original_size + augmented_size)))
+    
+    if has_augmented_training:
+        # This is an augmented group combination
+        group_found = "augmented"
+    else:
+        # This is an original group combination
+        group_found = "original"
+    
+    return group_found
+
+
 def visualize_task_combination(
     task_data, task_idx=0, combination_idx=0, show_holdout=False
 ):

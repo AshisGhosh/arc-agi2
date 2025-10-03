@@ -20,19 +20,31 @@ def setup_color_augmentation(tasks: List[Dict[str, Any]], config) -> None:
     """
     for task_idx, task in enumerate(tasks):
         # Get original examples and preserve them
-        original_examples = task["train"]
-        task["original_train"] = copy.deepcopy(original_examples)
+        original_train_examples = task["train"]
+        original_test_examples = task["test"]
+        task["original_train"] = copy.deepcopy(original_train_examples)
+        task["original_test"] = copy.deepcopy(original_test_examples)
 
         # Generate augmented examples if enabled
         if config.use_color_relabeling:
-            augmented_examples = generate_augmented_examples(
-                original_examples,
+            # Augment training examples
+            augmented_train_examples = generate_augmented_examples(
+                original_train_examples,
                 num_variants=config.augmentation_variants,
                 preserve_background=config.preserve_background,
                 seed=config.random_seed + task_idx,  # Different seed per task
             )
-            # Store augmented examples in task
-            task["augmented_train"] = augmented_examples
+            task["augmented_train"] = augmented_train_examples
+
+            # Augment test examples with the SAME color permutation as training
+            # This ensures consistency between training and test augmentation
+            augmented_test_examples = generate_augmented_examples(
+                original_test_examples,
+                num_variants=config.augmentation_variants,
+                preserve_background=config.preserve_background,
+                seed=config.random_seed + task_idx,  # Same seed as training
+            )
+            task["augmented_test"] = augmented_test_examples
 
 
 def get_augmentation_group(

@@ -95,36 +95,6 @@ class PatchARCDataset(BaseARCDataset):
 
         return task_idx, combination_idx, (i, j, k), counterfactual_type
 
-    def _get_all_examples(
-        self, task: Dict[str, Any], counterfactual_type: str
-    ) -> List[Dict[str, Any]]:
-        """Get all available examples (original + augmented + counterfactual if applicable) (same as ResNet)."""
-        # Start with training examples, excluding holdout if holdout mode is enabled
-        if self.holdout and len(task["train"]) > 2:
-            # Exclude the last training example (holdout) from support creation
-            all_examples = task["train"][:-1]
-        else:
-            all_examples = task["train"]
-
-        if self.config.use_color_relabeling and "augmented_train" in task:
-            all_examples = all_examples + task["augmented_train"]
-
-        if counterfactual_type == "Y":
-            all_examples = all_examples + task["counterfactual_train"]
-            if (
-                self.config.use_color_relabeling
-                and "counterfactual_augmented_train" in task
-            ):
-                all_examples = all_examples + task["counterfactual_augmented_train"]
-        elif counterfactual_type == "X":
-            all_examples = all_examples + task["counterfactual_X_train"]
-            if (
-                self.config.use_color_relabeling
-                and "counterfactual_X_augmented_train" in task
-            ):
-                all_examples = all_examples + task["counterfactual_X_augmented_train"]
-
-        return all_examples
 
     def _create_support_examples(
         self,
@@ -133,11 +103,17 @@ class PatchARCDataset(BaseARCDataset):
         j: int,
         k: int,
         counterfactual_type: str,
+        group_name: str = None,
+        task_idx: int = None,
     ) -> List[Dict[str, torch.Tensor]]:
         """Create support examples from examples i and j (same as ResNet - grayscale format)."""
         # Get the actual examples for i and j, handling test examples
-        ex1 = self._get_example_by_index(all_examples, i, counterfactual_type)
-        ex2 = self._get_example_by_index(all_examples, j, counterfactual_type)
+        ex1 = self._get_example_by_index(
+            all_examples, i, counterfactual_type, group_name, task_idx
+        )
+        ex2 = self._get_example_by_index(
+            all_examples, j, counterfactual_type, group_name, task_idx
+        )
 
         return [ex1, ex2]
 
@@ -203,8 +179,14 @@ class PatchARCDataset(BaseARCDataset):
             return test_examples
         else:
             test_examples = []
-            for test_example in task["test"]:
-                test_examples.append(self._preprocess_grid(test_example))
+            # Use augmented test examples if available and color augmentation is enabled
+            if self.config.use_color_relabeling and "augmented_test" in task:
+                for test_example in task["augmented_test"]:
+                    test_examples.append(self._preprocess_grid(test_example))
+            else:
+                # Fall back to original test examples
+                for test_example in task["test"]:
+                    test_examples.append(self._preprocess_grid(test_example))
             return test_examples
 
     def _get_holdout_example(
@@ -240,12 +222,45 @@ class PatchARCDataset(BaseARCDataset):
         )
         task = self.tasks[task_idx]
 
-        # Get all available examples
-        all_examples = self._get_all_examples(task, counterfactual_type)
+        # Get examples by augmentation group to avoid mixing groups
+        groups = self._get_examples_by_augmentation_group(task, counterfactual_type)
+
+        # Determine which group this combination belongs to based on the indices
+        # We need to find which group contains the examples at indices i and j
+        all_examples = []
+        group_name = "original"  # default
+
+        # Calculate group boundaries
+        original_size = len(groups.get("original", []))
+        augmented_size = len(groups.get("augmented", []))
+
+        # Determine which group based on indices
+        # Check if any training example indices are in the augmented range
+        has_augmented_training = (
+            (i >= original_size and i < (original_size + augmented_size))
+            or (j >= original_size and j < (original_size + augmented_size))
+            or (k >= original_size and k < (original_size + augmented_size))
+        )
+
+        if has_augmented_training:
+            # This is an augmented group combination
+            group_name = "augmented"
+            all_examples = groups["augmented"]
+            # Adjust indices to be relative to the augmented group
+            if i >= original_size:
+                i = i - original_size
+            if j >= original_size:
+                j = j - original_size
+            if k >= original_size:
+                k = k - original_size
+        else:
+            # This is an original group combination
+            group_name = "original"
+            all_examples = groups["original"]
 
         # Create support examples (2 examples for encoder)
         support_examples = self._create_support_examples(
-            all_examples, i, j, k, counterfactual_type
+            all_examples, i, j, k, counterfactual_type, group_name, task_idx
         )
 
         # Create support targets (2 examples for decoder)
@@ -255,7 +270,7 @@ class PatchARCDataset(BaseARCDataset):
 
         # Create target example (the third example in cycling)
         target_example = self._create_target_example(
-            all_examples, i, j, k, counterfactual_type
+            all_examples, i, j, k, counterfactual_type, group_name, task_idx
         )
 
         # Create test examples (all of them)

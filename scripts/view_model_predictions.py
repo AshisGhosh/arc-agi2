@@ -571,6 +571,12 @@ def apply_noise_to_test_inputs(
     return noisy_test_examples
 
 
+def get_combination_augmentation_group(dataset, task_idx, combination):
+    """Get augmentation group for a specific combination."""
+    from visualization_utils import get_combination_augmentation_group as get_group
+    return get_group(dataset, task_idx, combination)
+
+
 def calculate_accuracy_metrics(
     predictions: torch.Tensor, targets: torch.Tensor
 ) -> Dict[str, float]:
@@ -670,7 +676,9 @@ def evaluate_model_on_tasks(
         dataset = TaskSubset(
             task_indices=task_indices,
             config=augmented_config,
-            arc_agi1_dir=config.arc_agi1_dir,
+            arc_agi1_dir=str(
+                dataset.raw_data_dir
+            ),  # Use the original dataset's data directory
             holdout=True,
             use_first_combination_only=False,
         )
@@ -970,6 +978,11 @@ def evaluate_model_on_tasks(
                                     ),
                                 }
 
+                            # Get augmentation group for this combination
+                            augmentation_group = get_combination_augmentation_group(
+                                dataset, task_idx, combo
+                            )
+
                             task_results.append(
                                 {
                                     "combination_idx": combo_idx,
@@ -977,6 +990,7 @@ def evaluate_model_on_tasks(
                                     "is_counterfactual": is_counterfactual,
                                     "counterfactual_type": counterfactual_type,
                                     "test_example_idx": test_idx,
+                                    "augmentation_group": augmentation_group,
                                     "perfect_accuracy": metrics["perfect_accuracy"],
                                     "pixel_accuracy": metrics["pixel_accuracy"],
                                     "near_miss_accuracy": metrics["near_miss_accuracy"],
@@ -1247,12 +1261,18 @@ def evaluate_model_on_tasks(
                         "output": tensor_to_grayscale_numpy(holdout_example["output"]),
                     }
 
+                # Get augmentation group for this combination
+                augmentation_group = get_combination_augmentation_group(
+                    dataset, task_idx, combo
+                )
+
                 task_results.append(
                     {
                         "combination_idx": combo_idx,
                         "cycling_indices": (i, j, k),
                         "is_counterfactual": is_counterfactual,
                         "counterfactual_type": counterfactual_type,
+                        "augmentation_group": augmentation_group,
                         "perfect_accuracy": metrics["perfect_accuracy"],
                         "pixel_accuracy": metrics["pixel_accuracy"],
                         "near_miss_accuracy": metrics["near_miss_accuracy"],
@@ -1274,6 +1294,9 @@ def evaluate_model_on_tasks(
                     "is_counterfactual": combo_result["is_counterfactual"],
                     "counterfactual_type": combo_result.get(
                         "counterfactual_type", "original"
+                    ),
+                    "augmentation_group": combo_result.get(
+                        "augmentation_group", "original"
                     ),
                     "perfect_accuracy": combo_result["perfect_accuracy"],
                     "pixel_accuracy": combo_result["pixel_accuracy"],
@@ -1366,7 +1389,9 @@ def test_all_combinations(
         dataset = TaskSubset(
             task_indices=task_indices,
             config=augmented_config,
-            arc_agi1_dir=config.arc_agi1_dir,
+            arc_agi1_dir=str(
+                dataset.raw_data_dir
+            ),  # Use the original dataset's data directory
             holdout=True,
             use_first_combination_only=False,
         )
@@ -1632,6 +1657,11 @@ def test_all_combinations(
                                     ),
                                 }
 
+                            # Get augmentation group for this combination
+                            augmentation_group = get_combination_augmentation_group(
+                                dataset, task_idx, combo
+                            )
+
                             task_results.append(
                                 {
                                     "combination_idx": combo_idx,
@@ -1639,6 +1669,7 @@ def test_all_combinations(
                                     "is_counterfactual": is_counterfactual,
                                     "counterfactual_type": counterfactual_type,
                                     "test_example_idx": test_idx,
+                                    "augmentation_group": augmentation_group,
                                     "perfect_accuracy": metrics["perfect_accuracy"],
                                     "pixel_accuracy": metrics["pixel_accuracy"],
                                     "near_miss_accuracy": metrics["near_miss_accuracy"],
@@ -1879,12 +1910,18 @@ def test_all_combinations(
                         "output": tensor_to_grayscale_numpy(holdout_example["output"]),
                     }
 
+                # Get augmentation group for this combination
+                augmentation_group = get_combination_augmentation_group(
+                    dataset, task_idx, combo
+                )
+
                 task_results.append(
                     {
                         "combination_idx": combo_idx,
                         "cycling_indices": (i, j, k),
                         "is_counterfactual": is_counterfactual,
                         "counterfactual_type": counterfactual_type,  # Add counterfactual flag
+                        "augmentation_group": augmentation_group,
                         "perfect_accuracy": metrics["perfect_accuracy"],
                         "pixel_accuracy": metrics["pixel_accuracy"],
                         "near_miss_accuracy": metrics["near_miss_accuracy"],
@@ -1906,6 +1943,9 @@ def test_all_combinations(
                         "is_counterfactual": combo_result["is_counterfactual"],
                         "counterfactual_type": combo_result.get(
                             "counterfactual_type", "original"
+                        ),
+                        "augmentation_group": combo_result.get(
+                            "augmentation_group", "original"
                         ),
                         "test_example_idx": combo_result.get(
                             "test_example_idx"
@@ -2858,10 +2898,15 @@ def main():
             if "test_example_idx" in result:
                 test_example_info = f" - test {result['test_example_idx']}"
 
+            # Add augmentation group info
+            augmentation_group = result.get("augmentation_group", "original")
+            group_display = f"[{augmentation_group}]"
+
             df_data.append(
                 {
                     "idx": result["global_task_index"],
                     "task_id": task_id_display + combination_info + test_example_info,
+                    "group": group_display,
                     "perfect": f"{result['perfect_accuracy']:.3f}",
                     "pixel": f"{result['pixel_accuracy']:.3f}",
                     "near_miss": f"{result['near_miss_accuracy']:.3f}",
@@ -3071,11 +3116,16 @@ def main():
             if "test_example_idx" in result:
                 combination_str += f" - test {result['test_example_idx']}"
 
+            # Add augmentation group info
+            augmentation_group = result.get("augmentation_group", "original")
+            group_display = f"[{augmentation_group}]"
+
             combo_df_data.append(
                 {
                     "idx": result["global_task_index"],  # Global task index
                     "task_id": result["task_id"],  # Task ID (filename)
                     "combination": combination_str,
+                    "group": group_display,
                     "perfect": f"{result['perfect_accuracy']:.3f}",
                     "pixel": f"{result['pixel_accuracy']:.3f}",
                     "near_miss": f"{result['near_miss_accuracy']:.3f}",
