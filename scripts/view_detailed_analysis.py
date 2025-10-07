@@ -82,7 +82,7 @@ class DetailedModelAnalyzer:
         )  # [2, num_rule_tokens, d_model]
 
         # Reconstruct all support examples
-        support_processed = self.model.cross_attention_decoder(
+        support_processed = self.model.alternating_cross_attention_decoder(
             all_support_inputs, expanded_rule_tokens
         )
         support_pred = self.model.output_head(support_processed)  # [2, 10, 30, 30]
@@ -226,6 +226,7 @@ class DetailedModelAnalyzer:
 
         loss_components = {
             "rule_token_consistency": consistency_loss.item(),
+            "rule_token_consistency_unweighted": avg_group_loss_value,
             "avg_group_loss": avg_group_loss_value,
             "active_groups": group_count,
             "total_pairs": total_pairs,
@@ -305,7 +306,7 @@ class DetailedModelAnalyzer:
                     )
 
                     # Use noisy rule tokens in cross-attention decoder
-                    processed_patches = self.model.cross_attention_decoder(
+                    processed_patches = self.model.alternating_cross_attention_decoder(
                         target_input, rule_tokens
                     )
                     target_logits = self.model.output_head(processed_patches)
@@ -349,7 +350,7 @@ class DetailedModelAnalyzer:
                         )
 
                 # Get processed patches for analysis
-                processed_patches = self.model.cross_attention_decoder(
+                processed_patches = self.model.alternating_cross_attention_decoder(
                     target_input, rule_tokens
                 )
 
@@ -435,7 +436,7 @@ class DetailedModelAnalyzer:
                     expanded_rule_tokens = rule_tokens.repeat_interleave(
                         2, dim=0
                     )  # [2, num_rule_tokens, d_model]
-                    support_processed = self.model.cross_attention_decoder(
+                    support_processed = self.model.alternating_cross_attention_decoder(
                         all_support_inputs, expanded_rule_tokens
                     )
                     support_reconstruction = self.model.output_head(
@@ -571,8 +572,8 @@ class DetailedModelAnalyzer:
                     "processed_patches": None,
                     "rule_tokens_norm": 0.0,
                     "processed_patches_norm": 0.0,
-                    "support_reconstruction_weight": 0.0,
-                    "cls_regularization_weight": 0.0,
+                    "support_reconstruction_weight": self.support_reconstruction_weight,
+                    "cls_regularization_weight": self.cls_regularization_weight,
                 }
 
 
@@ -1392,47 +1393,6 @@ def main():
                 col1, col2 = st.columns(2)
 
                 with col1:
-                    st.write("**rule tokens**")
-
-                    # Show compressed tokens if available, otherwise show expanded tokens
-                    if (
-                        "rule_tokens_compressed" in selected_result
-                        and selected_result["rule_tokens_compressed"] is not None
-                    ):
-                        rule_tokens = (
-                            selected_result["rule_tokens_compressed"].numpy().squeeze()
-                        )
-                        st.write("**Compressed Bottleneck Tokens:**")
-                        num_rule_tokens = rule_tokens.shape[0]
-                        bottleneck_dim = rule_tokens.shape[1]
-                        st.write(
-                            f"Shape: {rule_tokens.shape} (num_rule_tokens × rule_bottleneck_dim)"
-                        )
-                        st.write(f"Dimensions: {num_rule_tokens} × {bottleneck_dim}")
-                    else:
-                        rule_tokens = selected_result["rule_tokens"].numpy().squeeze()
-                        st.write("**Expanded Rule Tokens:**")
-                        num_rule_tokens = rule_tokens.shape[0]
-                        d_model = rule_tokens.shape[1]
-                        st.write(
-                            f"Shape: {rule_tokens.shape} (num_rule_tokens × d_model)"
-                        )
-                        st.write(f"Dimensions: {num_rule_tokens} × {d_model}")
-
-                    if rule_tokens.ndim == 2:
-                        rule_fig = go.Figure(
-                            data=go.Heatmap(
-                                z=rule_tokens, colorscale="Viridis", showscale=True
-                            )
-                        )
-                        rule_fig.update_layout(
-                            title=f"rule tokens {rule_tokens.shape}",
-                            width=400,
-                            height=400,
-                        )
-                        st.plotly_chart(rule_fig, use_container_width=True)
-
-                with col2:
                     st.write("**processed patches**")
                     processed_patches = (
                         selected_result["processed_patches"].numpy().squeeze()
@@ -1453,115 +1413,96 @@ def main():
                         )
                         st.plotly_chart(patch_fig, use_container_width=True)
 
-                # CLS loss details
-                st.subheader("🔍 CLS loss analysis")
-                st.write("**CLS loss breakdown:**")
-                st.write(
-                    "- **Purpose:** Contrastive loss encouraging support example embeddings to be similar"
-                )
-                st.write(
-                    "- **Source:** Pairwise encoder outputs (R_1, R_2) from support examples"
-                )
-                st.write(
-                    "- **Negative values:** Normal! Means embeddings are similar (good)"
-                )
-                st.write("- **Formula:** -mean(similarity) + 0.01 × L2_regularization")
+                with col2:
+                    st.write("**rule tokens**")
 
-                # Show detailed mathematical breakdown
-                if (
-                    "pairwise_embeddings" in selected_result
-                    and selected_result["pairwise_embeddings"] is not None
-                ):
-                    pairwise_emb = (
-                        selected_result["pairwise_embeddings"].numpy().squeeze()
-                    )
-                    R_1 = pairwise_emb[0]  # [d_model]
-                    R_2 = pairwise_emb[1]  # [d_model]
-
-                    # Calculate the actual values used in the loss
-                    R_1_norm = R_1 / np.linalg.norm(R_1)
-                    R_2_norm = R_2 / np.linalg.norm(R_2)
-                    similarity = np.dot(R_1_norm, R_2_norm)
-
-                    l2_norm_1 = np.linalg.norm(R_1)
-                    l2_norm_2 = np.linalg.norm(R_2)
-                    l2_loss = l2_norm_1 + l2_norm_2
-
-                    contrastive_loss = -similarity
-                    regularization_loss = 0.01 * l2_loss
-                    total_cls_loss = contrastive_loss + regularization_loss
-
-                    st.write("**Mathematical Breakdown:**")
-                    col1, col2 = st.columns(2)
-
-                    with col1:
-                        st.write(f"**R_1 norm:** {l2_norm_1:.6f}")
-                        st.write(f"**R_2 norm:** {l2_norm_2:.6f}")
-                        st.write(f"**L2 regularization:** {l2_loss:.6f}")
-                        st.write(f"**0.01 × L2:** {regularization_loss:.6f}")
-
-                    with col2:
-                        st.write(f"**R_1 normalized:** {np.linalg.norm(R_1_norm):.6f}")
-                        st.write(f"**R_2 normalized:** {np.linalg.norm(R_2_norm):.6f}")
-                        st.write(f"**Cosine similarity:** {similarity:.6f}")
-                        st.write(f"**Contrastive loss:** {contrastive_loss:.6f}")
-
-                    st.write(
-                        f"**Total CLS Loss:** {contrastive_loss:.6f} + {regularization_loss:.6f} = **{total_cls_loss:.6f}**"
-                    )
-
-                    # Interpretation
-                    if similarity > 0.9:
-                        st.success(
-                            f"✅ High similarity ({similarity:.3f}) - embeddings are very similar"
+                    # Show compressed tokens if available, otherwise show expanded tokens
+                    if (
+                        "rule_tokens_compressed" in selected_result
+                        and selected_result["rule_tokens_compressed"] is not None
+                    ):
+                        rule_tokens = (
+                            selected_result["rule_tokens_compressed"].numpy().squeeze()
                         )
-                    elif similarity > 0.5:
-                        st.info(
-                            f"ℹ️ Moderate similarity ({similarity:.3f}) - embeddings are somewhat similar"
+                        st.write("**Compressed Bottleneck Tokens:**")
+                        num_rule_tokens = rule_tokens.shape[0]
+                        bottleneck_dim = rule_tokens.shape[1]
+                        st.write(
+                            f"Shape: {rule_tokens.shape} (num_rule_tokens × rule_bottleneck_dim)"
                         )
+                        st.write(f"Dimensions: {num_rule_tokens} × {bottleneck_dim}")
                     else:
-                        st.warning(
-                            f"⚠️ Low similarity ({similarity:.3f}) - embeddings are quite different"
+                        rule_tokens = selected_result["rule_tokens"].numpy().squeeze()
+                        st.write("**Full-Sized Rule Tokens:**")
+                        num_rule_tokens = rule_tokens.shape[0]
+                        d_model = rule_tokens.shape[1]
+                        st.write(
+                            f"Shape: {rule_tokens.shape} (num_rule_tokens × d_model)"
                         )
+                        st.write(f"Dimensions: {num_rule_tokens} × {d_model}")
 
-                # Show pairwise encoder outputs if available
-                if "pairwise_embeddings" in selected_result:
-                    st.write("**Pairwise encoder outputs:**")
-                    pairwise_emb = (
-                        selected_result["pairwise_embeddings"].numpy().squeeze()
-                    )
-                    st.write(f"Shape: {pairwise_emb.shape} (2 × d_model)")
-
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.write("**R_1 (first support example)**")
-                        r1_fig = go.Figure(
-                            data=go.Heatmap(
-                                z=pairwise_emb[0:1],
-                                colorscale="Viridis",
-                                showscale=True,
+                    if rule_tokens.ndim == 2:
+                        # Show individual rule tokens if there are multiple
+                        if num_rule_tokens > 1:
+                            st.write(
+                                f"**Individual Rule Tokens ({num_rule_tokens} tokens):**"
                             )
-                        )
-                        r1_fig.update_layout(
-                            title="R_1 embedding", width=300, height=200
-                        )
-                        st.plotly_chart(r1_fig, use_container_width=True)
 
-                    with col2:
-                        st.write("**R_2 (second support example)**")
-                        r2_fig = go.Figure(
-                            data=go.Heatmap(
-                                z=pairwise_emb[1:2],
-                                colorscale="Viridis",
-                                showscale=True,
+                            # Create a grid layout for individual rule tokens
+                            cols_per_row = min(4, num_rule_tokens)  # Max 4 per row
+                            num_rows = (
+                                num_rule_tokens + cols_per_row - 1
+                            ) // cols_per_row
+
+                            for row in range(num_rows):
+                                cols = st.columns(cols_per_row)
+                                for col in range(cols_per_row):
+                                    token_idx = row * cols_per_row + col
+                                    if token_idx < num_rule_tokens:
+                                        with cols[col]:
+                                            st.write(f"**Token {token_idx + 1}**")
+                                            token_fig = go.Figure(
+                                                data=go.Heatmap(
+                                                    z=rule_tokens[
+                                                        token_idx : token_idx + 1
+                                                    ],
+                                                    colorscale="Viridis",
+                                                    showscale=True,
+                                                )
+                                            )
+                                            token_fig.update_layout(
+                                                title=f"Rule Token {token_idx + 1}",
+                                                width=200,
+                                                height=200,
+                                            )
+                                            st.plotly_chart(
+                                                token_fig, use_container_width=True
+                                            )
+
+                                            # Show some statistics for this token
+                                            token_norm = np.linalg.norm(
+                                                rule_tokens[token_idx]
+                                            )
+                                            token_mean = np.mean(rule_tokens[token_idx])
+                                            token_std = np.std(rule_tokens[token_idx])
+                                            st.write(f"Norm: {token_norm:.3f}")
+                                            st.write(f"Mean: {token_mean:.3f}")
+                                            st.write(f"Std: {token_std:.3f}")
+                        else:
+                            # Single rule token - show as before
+                            rule_fig = go.Figure(
+                                data=go.Heatmap(
+                                    z=rule_tokens, colorscale="Viridis", showscale=True
+                                )
                             )
-                        )
-                        r2_fig.update_layout(
-                            title="R_2 embedding", width=300, height=200
-                        )
-                        st.plotly_chart(r2_fig, use_container_width=True)
+                            rule_fig.update_layout(
+                                title=f"rule token {rule_tokens.shape}",
+                                width=400,
+                                height=400,
+                            )
+                            st.plotly_chart(rule_fig, use_container_width=True)
 
-                # Rule token consistency analysis across augmentation groups
+                # Rule token consistency analysis - moved to come right after rule token visualization
                 st.subheader("🔄 rule token consistency analysis")
                 st.write("**Rule token consistency across augmentation groups:**")
                 st.write(
@@ -1584,11 +1525,18 @@ def main():
                         f"**Found {len(same_task_samples)} samples for task {selected_result['task_idx']}**"
                     )
 
-                    # Check if we have rule tokens for analysis
+                    # Check if we have rule tokens for analysis (prefer compressed, fallback to full)
                     current_rule_tokens = selected_result.get("rule_tokens_compressed")
+                    token_type = "compressed"
+                    if current_rule_tokens is None:
+                        current_rule_tokens = selected_result.get("rule_tokens")
+                        token_type = "full-sized"
+
                     if current_rule_tokens is not None:
                         # Calculate proposed consistency loss
-                        st.write("**Proposed Rule Token Consistency Loss:**")
+                        st.write(
+                            f"**Proposed Rule Token Consistency Loss (using {token_type} tokens):**"
+                        )
                         try:
                             # Collect rule tokens and metadata for loss calculation
                             rule_tokens_list = []
@@ -1596,13 +1544,13 @@ def main():
                             augmentation_groups = []
 
                             for result in same_task_samples:
-                                if (
-                                    "rule_tokens_compressed" in result
-                                    and result["rule_tokens_compressed"] is not None
-                                ):
-                                    rule_tokens_list.append(
-                                        result["rule_tokens_compressed"]
-                                    )
+                                # Try compressed first, fallback to full-sized
+                                rule_tokens = result.get("rule_tokens_compressed")
+                                if rule_tokens is None:
+                                    rule_tokens = result.get("rule_tokens")
+
+                                if rule_tokens is not None:
+                                    rule_tokens_list.append(rule_tokens)
                                     task_indices.append(result["task_idx"])
                                     # Use the augmentation group that's already calculated by the dataset
                                     # This uses get_augmentation_group() which properly handles all cases
@@ -1619,6 +1567,64 @@ def main():
                                         regularization_weight=0.1,
                                     )
                                 )
+
+                                # Show the rule tokens being compared
+                                st.write("**Rule Tokens Being Compared:**")
+                                st.write(
+                                    f"Comparing {len(rule_tokens_list)} rule token sets:"
+                                )
+
+                                # Display rule tokens in a grid
+                                cols_per_row = 3
+                                for i, (result, rule_tokens) in enumerate(
+                                    zip(same_task_samples, rule_tokens_list)
+                                ):
+                                    if i % cols_per_row == 0:
+                                        cols = st.columns(cols_per_row)
+
+                                    with cols[i % cols_per_row]:
+                                        st.write(
+                                            f"**Sample {i+1}** (Task {result['task_idx']}, Combo {result.get('combination_idx', 'N/A')})"
+                                        )
+                                        st.write(
+                                            f"Aug Group: {result.get('augmentation_group', 'N/A')}"
+                                        )
+                                        st.write(
+                                            f"Cycling: {result.get('cycling_indices', 'N/A')}"
+                                        )
+
+                                        # Show rule tokens heatmap
+                                        if rule_tokens is not None:
+                                            tokens_np = rule_tokens.numpy().squeeze()
+                                            if tokens_np.ndim == 2:
+                                                rule_fig = go.Figure(
+                                                    data=go.Heatmap(
+                                                        z=tokens_np,
+                                                        colorscale="Viridis",
+                                                        showscale=True,
+                                                    )
+                                                )
+                                                rule_fig.update_layout(
+                                                    title=f"Rule Tokens {tokens_np.shape}",
+                                                    width=200,
+                                                    height=200,
+                                                )
+                                                st.plotly_chart(
+                                                    rule_fig, use_container_width=True
+                                                )
+
+                                                # Show some statistics
+                                                st.write(
+                                                    f"Norm: {np.linalg.norm(tokens_np):.3f}"
+                                                )
+                                                st.write(
+                                                    f"Mean: {np.mean(tokens_np):.3f}"
+                                                )
+                                                st.write(
+                                                    f"Std: {np.std(tokens_np):.3f}"
+                                                )
+
+                                st.write("---")
 
                                 # Show group statistics
                                 st.write("**Group Statistics:**")
@@ -1780,13 +1786,13 @@ def main():
                                 col1, col2, col3, col4 = st.columns(4)
                                 with col1:
                                     st.metric(
-                                        "Consistency Loss",
+                                        "Consistency Loss (Weighted)",
                                         f"{loss_components['rule_token_consistency']:.4f}",
                                     )
                                 with col2:
                                     st.metric(
-                                        "Avg Group Loss",
-                                        f"{loss_components['avg_group_loss']:.4f}",
+                                        "Consistency Loss (Unweighted)",
+                                        f"{loss_components['rule_token_consistency_unweighted']:.4f}",
                                     )
                                 with col3:
                                     st.metric(
@@ -1799,16 +1805,23 @@ def main():
                                         f"{loss_components['total_pairs']}",
                                     )
 
-                                # Interpretation of the loss
-                                if loss_components["rule_token_consistency"] < 0.01:
+                                # Interpretation of the loss (using unweighted values)
+                                unweighted_loss = loss_components[
+                                    "rule_token_consistency_unweighted"
+                                ]
+                                if unweighted_loss < 1e-6:
+                                    st.warning(
+                                        "⚠️ Extremely low consistency loss - rule tokens are nearly identical! This suggests the model may not be learning diverse representations for different combinations."
+                                    )
+                                elif unweighted_loss < 0.01:
                                     st.success(
                                         "✅ Very low consistency loss - rule tokens are already well-regularized"
                                     )
-                                elif loss_components["rule_token_consistency"] < 0.05:
+                                elif unweighted_loss < 0.05:
                                     st.info(
                                         "ℹ️ Low consistency loss - rule tokens are reasonably consistent"
                                     )
-                                elif loss_components["rule_token_consistency"] < 0.1:
+                                elif unweighted_loss < 0.1:
                                     st.warning(
                                         "⚠️ Moderate consistency loss - some regularization would help"
                                     )
@@ -1819,7 +1832,10 @@ def main():
 
                                 st.write("**What this means:**")
                                 st.write(
-                                    f"- **Current loss:** {loss_components['rule_token_consistency']:.4f} (lower = more consistent)"
+                                    f"- **Unweighted loss:** {loss_components['rule_token_consistency_unweighted']:.2e} (raw consistency measure)"
+                                )
+                                st.write(
+                                    f"- **Weighted loss:** {loss_components['rule_token_consistency']:.2e} (for training, lower = more consistent)"
                                 )
                                 st.write(
                                     f"- **Groups analyzed:** {loss_components['active_groups']} groups with multiple samples"
@@ -1827,9 +1843,24 @@ def main():
                                 st.write(
                                     f"- **Pairs compared:** {loss_components['total_pairs']} pairwise comparisons"
                                 )
-                                st.write(
-                                    "- **Training impact:** Adding this loss would encourage more consistent rule tokens"
-                                )
+
+                                if unweighted_loss < 1e-6:
+                                    st.write(
+                                        "- **⚠️ Warning:** Extremely low loss suggests rule tokens are nearly identical across different combinations. This may indicate:"
+                                    )
+                                    st.write(
+                                        "  - The model is not learning task-specific patterns"
+                                    )
+                                    st.write(
+                                        "  - Rule tokens are not differentiating between different support combinations"
+                                    )
+                                    st.write(
+                                        "  - The model may be overfitting to a single pattern"
+                                    )
+                                else:
+                                    st.write(
+                                        "- **Training impact:** Adding this loss would encourage more consistent rule tokens"
+                                    )
                             else:
                                 st.warning(
                                     "⚠️ Need at least 2 samples with rule tokens to calculate consistency loss"
@@ -1838,12 +1869,126 @@ def main():
                             st.warning(f"Could not calculate consistency loss: {e}")
                     else:
                         st.warning(
-                            "⚠️ No compressed rule tokens available for current sample"
+                            "⚠️ No rule tokens (compressed or full-sized) available for current sample"
                         )
                 else:
                     st.info(
                         "ℹ️ Only one sample found for this task - no consistency analysis possible"
                     )
+
+                # CLS loss details - moved to come after rule token analysis
+                st.subheader("🔍 CLS loss analysis")
+                st.write("**CLS loss breakdown:**")
+                st.write(
+                    "- **Purpose:** Contrastive loss encouraging support example embeddings to be similar"
+                )
+                st.write(
+                    "- **Source:** Pairwise encoder outputs (R_1, R_2) from support examples"
+                )
+                st.write(
+                    "- **Negative values:** Normal! Means embeddings are similar (good)"
+                )
+                st.write("- **Formula:** -mean(similarity) + 0.01 × L2_regularization")
+
+                # Show detailed mathematical breakdown
+                if (
+                    "pairwise_embeddings" in selected_result
+                    and selected_result["pairwise_embeddings"] is not None
+                ):
+                    pairwise_emb = (
+                        selected_result["pairwise_embeddings"].numpy().squeeze()
+                    )
+                    R_1 = pairwise_emb[0]  # [d_model]
+                    R_2 = pairwise_emb[1]  # [d_model]
+
+                    # Calculate the actual values used in the loss
+                    R_1_norm = R_1 / np.linalg.norm(R_1)
+                    R_2_norm = R_2 / np.linalg.norm(R_2)
+                    similarity = np.dot(R_1_norm, R_2_norm)
+
+                    l2_norm_1 = np.linalg.norm(R_1)
+                    l2_norm_2 = np.linalg.norm(R_2)
+                    l2_loss = l2_norm_1 + l2_norm_2
+
+                    contrastive_loss = -similarity
+                    regularization_loss = 0.01 * l2_loss
+                    total_cls_loss = contrastive_loss + regularization_loss
+
+                    st.write("**Mathematical Breakdown:**")
+                    col1, col2 = st.columns(2)
+
+                    with col1:
+                        st.write(f"**R_1 norm:** {l2_norm_1:.6f}")
+                        st.write(f"**R_2 norm:** {l2_norm_2:.6f}")
+                        st.write(f"**L2 regularization:** {l2_loss:.6f}")
+                        st.write(f"**0.01 × L2:** {regularization_loss:.6f}")
+
+                    with col2:
+                        st.write(f"**R_1 normalized:** {np.linalg.norm(R_1_norm):.6f}")
+                        st.write(f"**R_2 normalized:** {np.linalg.norm(R_2_norm):.6f}")
+                        st.write(f"**Cosine similarity:** {similarity:.6f}")
+                        st.write(f"**Contrastive loss:** {contrastive_loss:.6f}")
+
+                    st.write(
+                        f"**Total CLS Loss:** {contrastive_loss:.6f} + {regularization_loss:.6f} = **{total_cls_loss:.6f}**"
+                    )
+
+                    # Interpretation
+                    if similarity > 0.9:
+                        st.success(
+                            f"✅ High similarity ({similarity:.3f}) - embeddings are very similar"
+                        )
+                    elif similarity > 0.5:
+                        st.info(
+                            f"ℹ️ Moderate similarity ({similarity:.3f}) - embeddings are somewhat similar"
+                        )
+                    else:
+                        st.warning(
+                            f"⚠️ Low similarity ({similarity:.3f}) - embeddings are quite different"
+                        )
+
+                # Show pairwise encoder outputs if available
+                if "pairwise_embeddings" in selected_result:
+                    st.write("**Pairwise encoder outputs (CLS tokens):**")
+                    st.write(
+                        "- **Purpose:** These are the CLS tokens extracted from each support example pair"
+                    )
+                    st.write(
+                        "- **Note:** There are always 2 CLS tokens (one per support example), regardless of num_cls_tokens"
+                    )
+                    st.write(
+                        "- **num_cls_tokens:** Controls how many rule tokens are generated from these 2 CLS tokens"
+                    )
+
+                    pairwise_emb = (
+                        selected_result["pairwise_embeddings"].numpy().squeeze()
+                    )
+                    st.write(f"Shape: {pairwise_emb.shape} (2 × d_model)")
+
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.write("**CLS Token 1 (from support example 1)**")
+                        r1_fig = go.Figure(
+                            data=go.Heatmap(
+                                z=pairwise_emb[0:1],
+                                colorscale="Viridis",
+                                showscale=True,
+                            )
+                        )
+                        r1_fig.update_layout(title="CLS Token 1", width=300, height=200)
+                        st.plotly_chart(r1_fig, use_container_width=True)
+
+                    with col2:
+                        st.write("**CLS Token 2 (from support example 2)**")
+                        r2_fig = go.Figure(
+                            data=go.Heatmap(
+                                z=pairwise_emb[1:2],
+                                colorscale="Viridis",
+                                showscale=True,
+                            )
+                        )
+                        r2_fig.update_layout(title="CLS Token 2", width=300, height=200)
+                        st.plotly_chart(r2_fig, use_container_width=True)
 
                 # Support loss details
                 st.subheader("🔧 support loss analysis")
@@ -1873,12 +2018,15 @@ def main():
                 with col4:
                     st.metric(
                         "Support Loss Weight",
-                        f"{selected_result.get('support_reconstruction_weight', 0.1):.3f}",
+                        f"{selected_result.get('support_reconstruction_weight', analyzer.support_reconstruction_weight):.3f}",
                     )
 
                 # Show contribution to total loss
                 support_contribution = (
-                    selected_result.get("support_reconstruction_weight", 0.1)
+                    selected_result.get(
+                        "support_reconstruction_weight",
+                        analyzer.support_reconstruction_weight,
+                    )
                     * selected_result["support_loss"]
                 )
                 st.write(
@@ -1887,11 +2035,17 @@ def main():
 
                 # Show individual contributions
                 support1_contribution = (
-                    selected_result.get("support_reconstruction_weight", 0.1)
+                    selected_result.get(
+                        "support_reconstruction_weight",
+                        analyzer.support_reconstruction_weight,
+                    )
                     * selected_result["support1_loss"]
                 )
                 support2_contribution = (
-                    selected_result.get("support_reconstruction_weight", 0.1)
+                    selected_result.get(
+                        "support_reconstruction_weight",
+                        analyzer.support_reconstruction_weight,
+                    )
                     * selected_result["support2_loss"]
                 )
                 st.write(

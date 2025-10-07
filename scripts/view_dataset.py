@@ -150,14 +150,14 @@ def analyze_augmentation_groups(dataset, task_idx, combinations):
 def get_combination_group_info(dataset, task_idx, combination):
     """Get augmentation group information for a specific combination."""
     from visualization_utils import get_combination_augmentation_group
-    
+
     group_found = get_combination_augmentation_group(dataset, task_idx, combination)
-    
+
     # Get the groups for additional info
     task = dataset.tasks[task_idx]
     is_counterfactual = combination.get("is_counterfactual", False)
     counterfactual_type = combination.get("counterfactual_type", "original")
-    
+
     if is_counterfactual:
         if counterfactual_type == "Y":
             groups = dataset._get_examples_by_augmentation_group(task, "Y")
@@ -167,7 +167,7 @@ def get_combination_group_info(dataset, task_idx, combination):
             groups = dataset._get_examples_by_augmentation_group(task, "original")
     else:
         groups = dataset._get_examples_by_augmentation_group(task, "original")
-    
+
     return group_found, groups
 
 
@@ -255,6 +255,14 @@ def main():
             help="type of transformation to apply to outputs",
         )
 
+    # cycling options
+    st.sidebar.subheader("cycling combinations")
+    enable_cycling = st.sidebar.checkbox(
+        "enable cycling",
+        value=True,
+        help="enable cycling combinations: (A,B)->T, (A,T)->B, (T,B)->A. Disable for simple (A,B)->T only.",
+    )
+
     # load dataset
     try:
         config = Config()
@@ -268,6 +276,7 @@ def main():
         config.random_seed = augmentation_seed
         config.enable_counterfactuals = enable_counterfactuals
         config.counterfactual_transform = counterfactual_transform
+        config.use_cycling = enable_cycling
 
         with st.spinner(f"loading {dataset_choice} dataset..."):
             try:
@@ -457,8 +466,17 @@ def main():
             st.write("**augmentation status**")
             st.write(f"color relabeling: {'✅' if enable_color_augmentation else '❌'}")
             st.write(f"counterfactuals: {'✅' if enable_counterfactuals else '❌'}")
+            st.write(f"cycling: {'✅' if enable_cycling else '❌'}")
             if enable_color_augmentation:
                 st.write(f"variants: {augmentation_variants}")
+
+            # Show cycling info
+            if enable_cycling:
+                st.write("**cycling patterns**")
+                st.write("✅ (A,B)->T, (A,T)->B, (T,B)->A")
+            else:
+                st.write("**simple patterns**")
+                st.write("✅ (A,B)->T only")
 
             # Show augmentation group separation info
             if enable_color_augmentation:
@@ -509,7 +527,21 @@ def main():
         for i, combo in enumerate(combinations):
             # Cycling format with cycling_indices
             indices = combo["cycling_indices"]
-            indices_str = f"({indices[0]}, {indices[1]}) -> {indices[2]}"
+
+            # Show different patterns based on cycling setting
+            if enable_cycling:
+                # Show the actual cycling pattern
+                if indices[2] < 0:  # Test example as target
+                    indices_str = f"({indices[0]}, {indices[1]}) -> T{abs(indices[2])}"
+                elif indices[1] < 0:  # Test example as support
+                    indices_str = f"({indices[0]}, T{abs(indices[1])}) -> {indices[2]}"
+                elif indices[0] < 0:  # Test example as first support
+                    indices_str = f"(T{abs(indices[0])}, {indices[1]}) -> {indices[2]}"
+                else:
+                    indices_str = f"({indices[0]}, {indices[1]}) -> {indices[2]}"
+            else:
+                # Simple pattern only
+                indices_str = f"({indices[0]}, {indices[1]}) -> T{abs(indices[2]) if indices[2] < 0 else indices[2]}"
 
             is_counterfactual = combo.get("is_counterfactual", False)
             counterfactual_marker = " (counterfactual)" if is_counterfactual else ""
@@ -574,10 +606,27 @@ def main():
 
             # Display cycling indices
             cycling_indices = selected_combo["cycling_indices"]
-            st.write(
-                f"cycling pattern: ({cycling_indices[0]}, {cycling_indices[1]}) -> {cycling_indices[2]}"
-            )
-            st.write("format: (support1, support2) -> target")
+
+            # Show pattern based on cycling setting
+            if enable_cycling:
+                if cycling_indices[2] < 0:  # Test example as target
+                    pattern_str = f"({cycling_indices[0]}, {cycling_indices[1]}) -> T{abs(cycling_indices[2])}"
+                    pattern_desc = "format: (support1, support2) -> test_target"
+                elif cycling_indices[1] < 0:  # Test example as support
+                    pattern_str = f"({cycling_indices[0]}, T{abs(cycling_indices[1])}) -> {cycling_indices[2]}"
+                    pattern_desc = "format: (support1, test_target) -> support2"
+                elif cycling_indices[0] < 0:  # Test example as first support
+                    pattern_str = f"(T{abs(cycling_indices[0])}, {cycling_indices[1]}) -> {cycling_indices[2]}"
+                    pattern_desc = "format: (test_target, support2) -> support1"
+                else:
+                    pattern_str = f"({cycling_indices[0]}, {cycling_indices[1]}) -> {cycling_indices[2]}"
+                    pattern_desc = "format: (support1, support2) -> target"
+            else:
+                pattern_str = f"({cycling_indices[0]}, {cycling_indices[1]}) -> T{abs(cycling_indices[2]) if cycling_indices[2] < 0 else cycling_indices[2]}"
+                pattern_desc = "format: (support1, support2) -> test_target (simple)"
+
+            st.write(f"pattern: {pattern_str}")
+            st.write(pattern_desc)
 
             st.write(
                 f"is counterfactual: {'✅' if selected_combo.get('is_counterfactual', False) else '❌'}"

@@ -9,7 +9,7 @@ import copy
 import torch
 from typing import List, Dict, Any, Tuple
 
-from .base_dataset import BaseARCDataset
+from .base_dataset import BaseARCDataset, ExampleRetriever
 from .augmentation_setup import setup_color_augmentation, get_augmentation_group
 from .counterfactuals import setup_counterfactuals
 
@@ -94,7 +94,6 @@ class PatchARCDataset(BaseARCDataset):
             counterfactual_type = "original"
 
         return task_idx, combination_idx, (i, j, k), counterfactual_type
-
 
     def _create_support_examples(
         self,
@@ -222,55 +221,52 @@ class PatchARCDataset(BaseARCDataset):
         )
         task = self.tasks[task_idx]
 
-        # Get examples by augmentation group to avoid mixing groups
-        groups = self._get_examples_by_augmentation_group(task, counterfactual_type)
+        # Create example retriever for unified data access
+        retriever = ExampleRetriever(self)
 
-        # Determine which group this combination belongs to based on the indices
-        # We need to find which group contains the examples at indices i and j
-        all_examples = []
-        group_name = "original"  # default
+        # Determine group name using the retriever
+        group_name = retriever.determine_group_name(task_idx, i, j, counterfactual_type)
 
-        # Calculate group boundaries
-        original_size = len(groups.get("original", []))
-        augmented_size = len(groups.get("augmented", []))
-
-        # Determine which group based on indices
-        # Check if any training example indices are in the augmented range
-        has_augmented_training = (
-            (i >= original_size and i < (original_size + augmented_size))
-            or (j >= original_size and j < (original_size + augmented_size))
-            or (k >= original_size and k < (original_size + augmented_size))
+        # Determine augmentation group for regularization (using original indices)
+        is_counterfactual = counterfactual_type != "original"
+        augmentation_group = get_augmentation_group(
+            task, is_counterfactual, i, j, counterfactual_type
         )
 
-        if has_augmented_training:
-            # This is an augmented group combination
-            group_name = "augmented"
-            all_examples = groups["augmented"]
-            # Adjust indices to be relative to the augmented group
-            if i >= original_size:
-                i = i - original_size
-            if j >= original_size:
-                j = j - original_size
-            if k >= original_size:
-                k = k - original_size
+        # Create support examples using the retriever
+        support_examples = [
+            retriever.get_example(task_idx, i, group_name, counterfactual_type),
+            retriever.get_example(task_idx, j, group_name, counterfactual_type),
+        ]
+
+        # Create support targets using the retriever
+        support_targets = [
+            retriever.get_example(task_idx, i, group_name, counterfactual_type),
+            retriever.get_example(task_idx, j, group_name, counterfactual_type),
+        ]
+
+        # Create target example using the retriever
+        # For cycling combinations, determine the correct target based on the pattern
+        if self.config.use_cycling:
+            # Determine which cycling pattern this is based on the indices
+            if k < 0:  # Pattern 1: (A, B) -> T (test as target)
+                target_idx = k
+            elif (
+                j < 0
+            ):  # Pattern 2: (A, T) -> B (k is the target, which is a training example)
+                target_idx = k
+            elif (
+                i < 0
+            ):  # Pattern 3: (T, B) -> A (k is the target, which is a training example)
+                target_idx = k
+            else:  # Fallback: use k as target
+                target_idx = k
         else:
-            # This is an original group combination
-            group_name = "original"
-            all_examples = groups["original"]
+            # Simple pattern: always use k as target
+            target_idx = k
 
-        # Create support examples (2 examples for encoder)
-        support_examples = self._create_support_examples(
-            all_examples, i, j, k, counterfactual_type, group_name, task_idx
-        )
-
-        # Create support targets (2 examples for decoder)
-        support_targets = self._create_support_targets(
-            all_examples, i, j, k, counterfactual_type
-        )
-
-        # Create target example (the third example in cycling)
-        target_example = self._create_target_example(
-            all_examples, i, j, k, counterfactual_type, group_name, task_idx
+        target_example = retriever.get_example(
+            task_idx, target_idx, group_name, counterfactual_type
         )
 
         # Create test examples (all of them)

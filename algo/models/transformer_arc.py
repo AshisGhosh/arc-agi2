@@ -280,7 +280,7 @@ class PMA(nn.Module):
         return rule_tokens
 
 
-class CrossAttentionDecoder(nn.Module):
+class AlternatingCrossAttentionDecoder(nn.Module):
     """Cross-attention decoder for test input processing."""
 
     def __init__(
@@ -301,6 +301,16 @@ class CrossAttentionDecoder(nn.Module):
         # Positional encoding
         self.pos_encoding = PositionalEncoding2D(d_model)
 
+        # Self-attention layers (alternating with cross-attention)
+        self.self_attention_layers = nn.ModuleList(
+            [
+                nn.MultiheadAttention(
+                    d_model, num_heads, dropout=dropout, batch_first=True
+                )
+                for _ in range(num_layers)
+            ]
+        )
+
         # Cross-attention layers
         self.cross_attention_layers = nn.ModuleList(
             [
@@ -311,8 +321,8 @@ class CrossAttentionDecoder(nn.Module):
             ]
         )
 
-        # Layer normalization
-        self.norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(num_layers)])
+        # RMS normalization (3x per layer: self-attn, cross-attn, ff)
+        self.norms = nn.ModuleList([nn.RMSNorm(d_model) for _ in range(num_layers * 3)])
 
         # Feed-forward networks
         self.ffs = nn.ModuleList(
@@ -376,18 +386,27 @@ class CrossAttentionDecoder(nn.Module):
         # Add positional encoding
         test_emb = self.pos_encoding(test_emb, (self.grid_size, self.grid_size))
 
-        # Apply cross-attention layers
+        # Apply alternating self-attention and cross-attention layers
         x = test_emb
-        for cross_attn, norm, ff in zip(
-            self.cross_attention_layers, self.norms, self.ffs
+        norm_idx = 0
+
+        for i, (self_attn, cross_attn, ff) in enumerate(
+            zip(self.self_attention_layers, self.cross_attention_layers, self.ffs)
         ):
+            # Self-attention: test patches attend to themselves
+            self_attn_out, _ = self_attn(x, x, x)
+            x = self.norms[norm_idx](x + self_attn_out)
+            norm_idx += 1
+
             # Cross-attention: test patches attend to rule tokens
-            attn_out, _ = cross_attn(x, rule_tokens, rule_tokens)
-            x = norm(x + attn_out)
+            cross_attn_out, _ = cross_attn(x, rule_tokens, rule_tokens)
+            x = self.norms[norm_idx](x + cross_attn_out)
+            norm_idx += 1
 
             # Feed-forward
             ff_out = ff(x)
-            x = norm(x + ff_out)
+            x = self.norms[norm_idx](x + ff_out)
+            norm_idx += 1
 
         return x
 
@@ -489,7 +508,7 @@ class TransformerARCModel(BaseARCModel):
     Architecture:
     1. PairEncoder: Encode support pairs into CLS summaries
     2. PMA: Create rule tokens from pair summaries
-    3. CrossAttentionDecoder: Process test input with rule tokens
+    3. AlternatingCrossAttentionDecoder: Process test input with rule tokens
     4. PatchOutputHead: Convert to pixel-level predictions
     """
 
@@ -533,7 +552,7 @@ class TransformerARCModel(BaseARCModel):
         else:
             self.rule_bottleneck = None
 
-        self.cross_attention_decoder = CrossAttentionDecoder(
+        self.alternating_cross_attention_decoder = AlternatingCrossAttentionDecoder(
             d_model=self.d_model,
             num_heads=self.num_heads,
             num_layers=self.num_decoder_layers,
@@ -588,7 +607,7 @@ class TransformerARCModel(BaseARCModel):
             )  # [B, num_rule_tokens, d_model]
 
         # Step 3: Process test input with cross-attention
-        processed_patches = self.cross_attention_decoder(
+        processed_patches = self.alternating_cross_attention_decoder(
             target_input, rule_tokens
         )  # [B, 100, d_model]
 
@@ -630,7 +649,9 @@ class TransformerARCModel(BaseARCModel):
             )  # [B, num_rule_tokens, d_model]
 
         # Process all test inputs with cross-attention
-        processed_patches = self.cross_attention_decoder(test_inputs, rule_tokens)
+        processed_patches = self.alternating_cross_attention_decoder(
+            test_inputs, rule_tokens
+        )
 
         # Convert to pixel-level predictions
         outputs = self.output_head(processed_patches)

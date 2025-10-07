@@ -38,6 +38,7 @@ def unified_collate_fn(batch):
     task_indices = []
     num_test_examples = []
     augmentation_groups = []
+    cycling_indices = []
 
     # Collect support examples - let trainers handle reshaping
     support_example_inputs = []  # [B] list of [2] support input tensors
@@ -51,14 +52,14 @@ def unified_collate_fn(batch):
 
     # Fill with real data
     for i, sample in enumerate(batch):
-        # Get support examples (always grayscale grid format [1, 30, 30])
+        # Get support examples (always grayscale grid format [1, 1, 30, 30])
         support_inputs = [
-            sample["support_examples"][0]["input"].squeeze(0),  # [1, 30, 30]
-            sample["support_examples"][1]["input"].squeeze(0),
+            sample["support_examples"][0]["input"].squeeze(0).squeeze(0),  # [30, 30]
+            sample["support_examples"][1]["input"].squeeze(0).squeeze(0),
         ]
         support_outputs = [
-            sample["support_examples"][0]["output"].squeeze(0),  # [1, 30, 30]
-            sample["support_examples"][1]["output"].squeeze(0),
+            sample["support_examples"][0]["output"].squeeze(0).squeeze(0),  # [30, 30]
+            sample["support_examples"][1]["output"].squeeze(0).squeeze(0),
         ]
         support_example_inputs.append(support_inputs)
         support_example_outputs.append(support_outputs)
@@ -84,10 +85,10 @@ def unified_collate_fn(batch):
         # Get target example for cycling (grayscale grid format [1, 1, 30, 30])
         target_input = (
             sample["target_example"]["input"].squeeze(0).squeeze(0)
-        )  # [30, 30]
+        )  # [30, 30] - model expects [B, H, W] format
         target_output = (
             sample["target_example"]["output"].squeeze(0).squeeze(0)
-        )  # [30, 30]
+        )  # [30, 30] - model expects [B, H, W] format
         target_example_inputs.append(target_input)
         target_example_outputs.append(target_output)
 
@@ -113,6 +114,7 @@ def unified_collate_fn(batch):
         task_indices.append(sample["task_idx"])
         num_test_examples.append(sample["num_test_examples"])
         augmentation_groups.append(sample["augmentation_group"])
+        cycling_indices.append(sample["cycling_indices"])
 
     return {
         # Support examples - trainers handle reshaping
@@ -136,6 +138,7 @@ def unified_collate_fn(batch):
         "task_indices": task_indices,  # [B] list of task indices
         "num_test_examples": num_test_examples,  # [B] list of number of test examples per task
         "augmentation_groups": augmentation_groups,  # [B] list of augmentation group IDs
+        "cycling_indices": cycling_indices,  # [B] list of cycling indices tuples
     }
 
 

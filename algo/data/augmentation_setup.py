@@ -95,12 +95,22 @@ def get_augmentation_group(
                 is_augmented = True
     else:
         # for regular, check if we're using augmented examples
-        if (
-            task.get("augmented_train")
-            and i >= len(task["train"])
-            and j >= len(task["train"])
-        ):
-            is_augmented = True
+        # With our new logic, augmented combinations have indices that fall in the augmented range
+        if task.get("augmented_train"):
+            # Account for holdout exclusion - original group excludes last training example
+            original_size = len(task["train"])
+            if len(task["train"]) > 2:  # If holdout is enabled
+                original_size = len(task["train"]) - 1  # Exclude holdout
+            augmented_size = len(task["augmented_train"])
+
+            # Check if indices are in the augmented range (after offset)
+            if (
+                i >= original_size
+                and i < (original_size + augmented_size)
+                and j >= original_size
+                and j < (original_size + augmented_size)
+            ):
+                is_augmented = True
 
     # determine group
     if is_counterfactual and is_augmented:

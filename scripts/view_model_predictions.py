@@ -573,7 +573,10 @@ def apply_noise_to_test_inputs(
 
 def get_combination_augmentation_group(dataset, task_idx, combination):
     """Get augmentation group for a specific combination."""
-    from visualization_utils import get_combination_augmentation_group as get_group
+    from scripts.visualization_utils import (
+        get_combination_augmentation_group as get_group,
+    )
+
     return get_group(dataset, task_idx, combination)
 
 
@@ -624,6 +627,7 @@ def evaluate_model_on_tasks(
     counterfactual_transform="rotate_90",
     selected_task_indices=None,
     test_all_test_pairs=False,
+    enable_cycling=True,
     device=None,
 ):
     """evaluate model on all tasks in dataset and return results.
@@ -649,8 +653,12 @@ def evaluate_model_on_tasks(
 
     results = []
 
-    # Create augmented dataset if either color augmentation or counterfactuals are enabled
-    if enable_color_augmentation or enable_counterfactuals:
+    # Create augmented dataset if any augmentation options are enabled
+    if (
+        enable_color_augmentation
+        or enable_counterfactuals
+        or enable_cycling != config.use_cycling
+    ):
         # Create a copy of the config with both augmentations enabled if needed
         augmented_config = Config()
         augmented_config.__dict__.update(config.__dict__)  # Copy all config values
@@ -666,6 +674,9 @@ def evaluate_model_on_tasks(
             augmented_config.counterfactual_Y = counterfactual_Y
             augmented_config.counterfactual_X = counterfactual_X
             augmented_config.counterfactual_transform = counterfactual_transform
+
+        # Apply cycling setting
+        augmented_config.use_cycling = enable_cycling
 
         # Create augmented dataset with both augmentations
         task_indices = (
@@ -1333,6 +1344,7 @@ def test_all_combinations(
     counterfactual_transform="rotate_90",
     selected_task_indices=None,
     test_all_test_pairs=False,
+    enable_cycling=True,
     device=None,
 ):
     """test all possible combinations of train examples for rule latent creation.
@@ -1362,8 +1374,12 @@ def test_all_combinations(
 
     results = []
 
-    # Create augmented dataset if either color augmentation or counterfactuals are enabled
-    if enable_color_augmentation or enable_counterfactuals:
+    # Create augmented dataset if any augmentation options are enabled
+    if (
+        enable_color_augmentation
+        or enable_counterfactuals
+        or enable_cycling != config.use_cycling
+    ):
         # Create a copy of the config with both augmentations enabled if needed
         augmented_config = Config()
         augmented_config.__dict__.update(config.__dict__)  # Copy all config values
@@ -1379,6 +1395,9 @@ def test_all_combinations(
             augmented_config.counterfactual_Y = counterfactual_Y
             augmented_config.counterfactual_X = counterfactual_X
             augmented_config.counterfactual_transform = counterfactual_transform
+
+        # Apply cycling setting
+        augmented_config.use_cycling = enable_cycling
 
         # Create augmented dataset with both augmentations
         task_indices = (
@@ -2125,6 +2144,7 @@ def main():
 
     config.use_color_relabeling = False
     config.enable_counterfactuals = False
+    config.use_cycling = True  # Default value, will be updated from sidebar
     dataset = create_dataset(
         config.arc_agi1_dir, config, holdout=True, use_first_combination_only=False
     )
@@ -2512,6 +2532,16 @@ def main():
             help="random seed for reproducible color relabeling",
         )
 
+    st.sidebar.subheader("cycling combinations")
+    enable_cycling = st.sidebar.checkbox(
+        "enable cycling",
+        value=True,
+        help="enable cycling combinations: (A,B)->T, (A,T)->B, (T,B)->A. Disable for simple (A,B)->T only.",
+    )
+
+    # Update config with cycling setting
+    config.use_cycling = enable_cycling
+
     st.sidebar.subheader("counterfactual analysis")
     enable_counterfactuals = st.sidebar.checkbox(
         "enable counterfactuals",
@@ -2653,6 +2683,7 @@ def main():
                 counterfactual_transform,
                 selected_task_indices=task_indices,
                 test_all_test_pairs=test_all_test_pairs,
+                enable_cycling=enable_cycling,
                 device=device,
             )
             st.session_state.combination_results = results
@@ -2718,6 +2749,7 @@ def main():
                 counterfactual_transform,
                 selected_task_indices=task_indices,
                 test_all_test_pairs=test_all_test_pairs,
+                enable_cycling=enable_cycling,
                 device=device,
             )
             st.session_state.evaluation_results = results
@@ -2726,6 +2758,7 @@ def main():
         st.session_state.evaluation_mode = evaluation_mode
         st.session_state.test_combinations = test_combinations
         st.session_state.test_all_test_pairs = test_all_test_pairs
+        st.session_state.enable_cycling = enable_cycling
         st.session_state.inject_noise = inject_noise
         st.session_state.noise_type = noise_type
         st.session_state.noise_std = noise_std
@@ -2899,7 +2932,7 @@ def main():
                 test_example_info = f" - test {result['test_example_idx']}"
 
             # Add augmentation group info
-            augmentation_group = result.get("augmentation_group", "original")
+            augmentation_group = result.get("augmentation_group", "unknown")
             group_display = f"[{augmentation_group}]"
 
             df_data.append(
@@ -3117,7 +3150,7 @@ def main():
                 combination_str += f" - test {result['test_example_idx']}"
 
             # Add augmentation group info
-            augmentation_group = result.get("augmentation_group", "original")
+            augmentation_group = result.get("augmentation_group", "unknown")
             group_display = f"[{augmentation_group}]"
 
             combo_df_data.append(
