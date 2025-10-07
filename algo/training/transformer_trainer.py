@@ -140,10 +140,13 @@ class TransformerTrainer(BaseTrainer):
                 support_inputs, support_outputs
             )
 
-            # CLS regularization loss - batched
-            cls_loss = self._calculate_cls_regularization_loss_batched(
-                support_inputs, support_outputs
-            )
+            # CLS regularization loss - batched (only if weight > 0)
+            if self.cls_regularization_weight > 0:
+                cls_loss = self._calculate_cls_regularization_loss_batched(
+                    support_inputs, support_outputs
+                )
+            else:
+                cls_loss = torch.tensor(0.0, device=main_loss.device)
 
             # Rule token consistency loss - batched
             consistency_loss = self._calculate_rule_token_consistency_loss_batched(
@@ -246,7 +249,7 @@ class TransformerTrainer(BaseTrainer):
         )  # [2B, num_rule_tokens, d_model]
 
         # Reconstruct all support examples
-        support_processed = self.model.cross_attention_decoder(
+        support_processed = self.model.alternating_cross_attention_decoder(
             all_support_inputs, expanded_rule_tokens
         )
         support_pred = self.model.output_head(support_processed)
@@ -469,10 +472,13 @@ class TransformerTrainer(BaseTrainer):
                     support_inputs, support_outputs
                 )
 
-                # CLS regularization loss - batched
-                cls_loss = self._calculate_cls_regularization_loss_batched(
-                    support_inputs, support_outputs
-                )
+                # CLS regularization loss - batched (only if weight > 0)
+                if self.cls_regularization_weight > 0:
+                    cls_loss = self._calculate_cls_regularization_loss_batched(
+                        support_inputs, support_outputs
+                    )
+                else:
+                    cls_loss = torch.tensor(0.0, device=main_loss.device)
 
                 # Rule token consistency loss - batched
                 consistency_loss = self._calculate_rule_token_consistency_loss_batched(
