@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from typing import Dict
+from typing import Dict, List
 from tqdm import tqdm
 
 from ..config import Config
@@ -17,6 +17,7 @@ class TransformerTrainer(BaseTrainer):
     - Main loss: pixel-level cross-entropy on test output
     - Support reconstruction: decode support inputs with rule tokens
     - CLS regularization: contrastive loss on pair summaries
+    - Rule token consistency: encourage similar rule tokens across augmentation groups
     """
 
     def __init__(self, model, config: Config, dataset=None):
@@ -29,7 +30,11 @@ class TransformerTrainer(BaseTrainer):
         self.cls_regularization_weight = getattr(
             config, "cls_regularization_weight", 0.01
         )
+        self.rule_token_consistency_weight = getattr(
+            config, "rule_token_consistency_weight", 0.01
+        )
         self.contrastive_temperature = getattr(config, "contrastive_temperature", 0.07)
+        self.cls_l2_weight = getattr(config, "cls_l2_weight", 0.01)
 
     def train_epoch(self, train_loader: DataLoader) -> Dict[str, float]:
         """
@@ -48,6 +53,7 @@ class TransformerTrainer(BaseTrainer):
             "main_loss": 0.0,
             "support_reconstruction_loss": 0.0,
             "cls_regularization_loss": 0.0,
+            "rule_token_consistency_loss": 0.0,
             "accuracy": 0.0,
         }
 
@@ -98,67 +104,56 @@ class TransformerTrainer(BaseTrainer):
                 ]
             )  # [B, 2, 30, 30]
 
-            # Get test examples
-            test_inputs = batch["test_inputs"]  # [B, max_test_examples, 30, 30]
-            test_outputs = batch["test_outputs"]  # [B, max_test_examples, 30, 30]
-            test_masks = batch["test_masks"]  # [B, max_test_examples]
-            num_test_examples = batch["num_test_examples"]  # [B] list
+            # Get target examples for cycling (instead of test examples)
+            target_example_inputs = batch[
+                "target_example_inputs"
+            ]  # [B] list of target input tensors
+            target_example_outputs = batch[
+                "target_example_outputs"
+            ]  # [B] list of target output tensors
 
-            # Collect all valid test examples for batched processing
-            all_test_inputs = []
-            all_test_outputs = []
-            all_support_inputs_expanded = []
-            all_support_outputs_expanded = []
+            # Convert target examples to batched tensors
+            batched_target_inputs = torch.stack(target_example_inputs).to(
+                self.device
+            )  # [B, 30, 30]
+            batched_target_outputs = torch.stack(target_example_outputs).to(
+                self.device
+            )  # [B, 30, 30]
 
-            for i in range(batch_size):
-                num_test = num_test_examples[i]
-                for test_idx in range(num_test):
-                    if test_masks[i, test_idx]:
-                        all_test_inputs.append(test_inputs[i, test_idx])  # [30, 30]
-                        all_test_outputs.append(test_outputs[i, test_idx])  # [30, 30]
-                        all_support_inputs_expanded.append(
-                            support_inputs[i]
-                        )  # [2, 30, 30]
-                        all_support_outputs_expanded.append(
-                            support_outputs[i]
-                        )  # [2, 30, 30]
-
-            if not all_test_inputs:
-                continue  # Skip batch if no valid test examples
-
-            # Convert to batched tensors
-            batched_test_inputs = torch.stack(all_test_inputs)  # [N, 30, 30]
-            batched_test_outputs = torch.stack(all_test_outputs)  # [N, 30, 30]
-            batched_support_inputs = torch.stack(
-                all_support_inputs_expanded
-            )  # [N, 2, 30, 30]
-            batched_support_outputs = torch.stack(
-                all_support_outputs_expanded
-            )  # [N, 2, 30, 30]
-
-            # Main forward pass - batched
+            # Main forward pass - cycling: use support examples to predict target
             main_logits = self.model.forward_with_support_batch(
-                batched_support_inputs, batched_support_outputs, batched_test_inputs
-            )  # [N, 10, 30, 30]
+                support_inputs, support_outputs, batched_target_inputs
+            )  # [B, 10, 30, 30]
 
             # Calculate main loss
             main_loss, main_components = calculate_classification_loss(
-                main_logits, batched_test_outputs, self.config
+                main_logits, batched_target_outputs, self.config
             )
 
             # Calculate accuracy
             with torch.no_grad():
                 predictions = torch.argmax(main_logits, dim=1)
-                accuracy = (predictions == batched_test_outputs).float().mean()
+                accuracy = (predictions == batched_target_outputs).float().mean()
 
             # Support reconstruction loss - batched
             support_loss = self._calculate_support_reconstruction_loss_batched(
-                batched_support_inputs, batched_support_outputs
+                support_inputs, support_outputs
             )
 
-            # CLS regularization loss - batched
-            cls_loss = self._calculate_cls_regularization_loss_batched(
-                batched_support_inputs, batched_support_outputs
+            # CLS regularization loss - batched (only if weight > 0)
+            if self.cls_regularization_weight > 0:
+                cls_loss = self._calculate_cls_regularization_loss_batched(
+                    support_inputs, support_outputs
+                )
+            else:
+                cls_loss = torch.tensor(0.0, device=main_loss.device)
+
+            # Rule token consistency loss - batched
+            consistency_loss = self._calculate_rule_token_consistency_loss_batched(
+                support_inputs,
+                support_outputs,
+                batch["task_indices"],
+                batch["augmentation_groups"],
             )
 
             # Total loss
@@ -166,6 +161,7 @@ class TransformerTrainer(BaseTrainer):
                 main_loss
                 + self.support_reconstruction_weight * support_loss
                 + self.cls_regularization_weight * cls_loss
+                + self.rule_token_consistency_weight * consistency_loss
             )
 
             # Backward pass
@@ -178,12 +174,13 @@ class TransformerTrainer(BaseTrainer):
 
             # Update metrics
             total_loss += total_batch_loss.item()
-            total_examples += len(all_test_inputs)
+            total_examples += batch_size
 
             # Update loss components
             loss_components["main_loss"] += main_loss.item()
             loss_components["support_reconstruction_loss"] += support_loss.item()
             loss_components["cls_regularization_loss"] += cls_loss.item()
+            loss_components["rule_token_consistency_loss"] += consistency_loss.item()
             loss_components["accuracy"] += accuracy.item()
 
             # Update progress bar
@@ -193,6 +190,7 @@ class TransformerTrainer(BaseTrainer):
                     "main": f"{main_loss.item():.4f}",
                     "support": f"{support_loss.item():.4f}",
                     "cls": f"{cls_loss.item():.4f}",
+                    "consistency": f"{consistency_loss.item():.4f}",
                     "acc": f"{accuracy.item():.4f}",
                 }
             )
@@ -205,6 +203,7 @@ class TransformerTrainer(BaseTrainer):
                     f"Main: {main_loss.item():.4f}, "
                     f"Support: {support_loss.item():.4f}, "
                     f"CLS: {cls_loss.item():.4f}, "
+                    f"Consistency: {consistency_loss.item():.4f}, "
                     f"Acc: {accuracy.item():.4f}"
                 )
 
@@ -250,7 +249,7 @@ class TransformerTrainer(BaseTrainer):
         )  # [2B, num_rule_tokens, d_model]
 
         # Reconstruct all support examples
-        support_processed = self.model.cross_attention_decoder(
+        support_processed = self.model.alternating_cross_attention_decoder(
             all_support_inputs, expanded_rule_tokens
         )
         support_pred = self.model.output_head(support_processed)
@@ -288,8 +287,10 @@ class TransformerTrainer(BaseTrainer):
         R_1_norm = F.normalize(R_1, p=2, dim=1)
         R_2_norm = F.normalize(R_2, p=2, dim=1)
 
-        # Calculate similarity
-        similarity = torch.sum(R_1_norm * R_2_norm, dim=1)  # [B]
+        # Calculate similarity with temperature scaling
+        similarity = (
+            torch.sum(R_1_norm * R_2_norm, dim=1) / self.contrastive_temperature
+        )  # [B]
 
         # L2 regularization
         l2_loss = torch.mean(torch.norm(R_1, p=2, dim=1) + torch.norm(R_2, p=2, dim=1))
@@ -297,7 +298,90 @@ class TransformerTrainer(BaseTrainer):
         # Contrastive loss: encourage R_1 and R_2 to be similar
         contrastive_loss = -torch.mean(similarity)
 
-        return contrastive_loss + 0.01 * l2_loss
+        return contrastive_loss + self.cls_l2_weight * l2_loss
+
+    def _calculate_rule_token_consistency_loss_batched(
+        self,
+        support_inputs: torch.Tensor,
+        support_outputs: torch.Tensor,
+        task_indices: List[int],
+        augmentation_groups: List[int],
+    ) -> torch.Tensor:
+        """
+        Calculate batched rule token consistency loss across augmentation groups.
+
+        Args:
+            support_inputs: [B, 2, 30, 30] - batch of support input pairs
+            support_outputs: [B, 2, 30, 30] - batch of support output pairs
+            task_indices: [B] - task index for each sample
+            augmentation_groups: [B] - augmentation group for each sample
+
+        Returns:
+            consistency_loss: scalar tensor
+        """
+        B = support_inputs.shape[0]
+
+        # Get rule tokens for all pairs
+        rule_tokens = self.model.get_rule_tokens(support_inputs, support_outputs)
+
+        # If bottleneck is enabled, get compressed tokens
+        if (
+            hasattr(self.model, "rule_bottleneck")
+            and self.model.rule_bottleneck is not None
+        ):
+            # Get the rule tokens before bottleneck expansion
+            pair_summaries = self.model.get_pair_summaries(
+                support_inputs, support_outputs
+            )
+            rule_tokens_before_bottleneck = self.model.pma(pair_summaries)
+            # Apply only the down-projection to get compressed tokens
+            rule_tokens_compressed = self.model.rule_bottleneck.down_proj(
+                rule_tokens_before_bottleneck
+            )
+            rule_tokens = rule_tokens_compressed
+
+        # Group rule tokens by (task_idx, augmentation_group)
+        groups = {}
+        for i in range(B):
+            task_idx = task_indices[i]
+            aug_group = augmentation_groups[i]
+            key = (task_idx, aug_group)
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(rule_tokens[i])
+
+        # Calculate within-group consistency loss
+        total_loss = 0.0
+        group_count = 0
+
+        for group_tokens in groups.values():
+            if len(group_tokens) > 1:  # Need at least 2 samples for regularization
+                group_tensor = torch.stack(
+                    group_tokens
+                )  # [N, num_rule_tokens, d_model]
+
+                # Flatten rule tokens for comparison
+                group_flat = group_tensor.view(
+                    group_tensor.size(0), -1
+                )  # [N, num_rule_tokens * d_model]
+
+                # Calculate pairwise L2 distances (want low distances for consistency)
+                distances = torch.cdist(group_flat, group_flat, p=2)
+
+                # Only consider upper triangular part (avoid double counting and self-comparison)
+                mask = torch.triu(torch.ones_like(distances), diagonal=1).bool()
+                group_loss = distances[mask].mean()
+
+                total_loss += group_loss
+                group_count += 1
+
+        # Normalize by number of groups with multiple samples
+        if group_count > 0:
+            consistency_loss = total_loss / group_count
+        else:
+            consistency_loss = torch.tensor(0.0, device=rule_tokens.device)
+
+        return consistency_loss
 
     def validate(self, val_loader: DataLoader) -> Dict[str, float]:
         """
@@ -316,6 +400,7 @@ class TransformerTrainer(BaseTrainer):
             "main_loss": 0.0,
             "support_reconstruction_loss": 0.0,
             "cls_regularization_loss": 0.0,
+            "rule_token_consistency_loss": 0.0,
             "accuracy": 0.0,
         }
 
@@ -360,58 +445,47 @@ class TransformerTrainer(BaseTrainer):
                     ]
                 )
 
-                # Get test examples
-                test_inputs = batch["test_inputs"]
-                test_outputs = batch["test_outputs"]
-                test_masks = batch["test_masks"]
-                num_test_examples = batch["num_test_examples"]
+                # Get target examples for cycling (instead of test examples)
+                target_example_inputs = batch["target_example_inputs"]
+                target_example_outputs = batch["target_example_outputs"]
 
-                # Collect all valid test examples for batched processing
-                all_test_inputs = []
-                all_test_outputs = []
-                all_support_inputs_expanded = []
-                all_support_outputs_expanded = []
+                # Convert target examples to batched tensors
+                batched_target_inputs = torch.stack(target_example_inputs)
+                batched_target_outputs = torch.stack(target_example_outputs)
 
-                for i in range(batch_size):
-                    num_test = num_test_examples[i]
-                    for test_idx in range(num_test):
-                        if test_masks[i, test_idx]:
-                            all_test_inputs.append(test_inputs[i, test_idx])
-                            all_test_outputs.append(test_outputs[i, test_idx])
-                            all_support_inputs_expanded.append(support_inputs[i])
-                            all_support_outputs_expanded.append(support_outputs[i])
-
-                if not all_test_inputs:
-                    continue
-
-                # Convert to batched tensors
-                batched_test_inputs = torch.stack(all_test_inputs)
-                batched_test_outputs = torch.stack(all_test_outputs)
-                batched_support_inputs = torch.stack(all_support_inputs_expanded)
-                batched_support_outputs = torch.stack(all_support_outputs_expanded)
-
-                # Main forward pass - batched
+                # Main forward pass - cycling: use support examples to predict target
                 main_logits = self.model.forward_with_support_batch(
-                    batched_support_inputs, batched_support_outputs, batched_test_inputs
+                    support_inputs, support_outputs, batched_target_inputs
                 )
 
                 # Calculate main loss
                 main_loss, _ = calculate_classification_loss(
-                    main_logits, batched_test_outputs, self.config
+                    main_logits, batched_target_outputs, self.config
                 )
 
                 # Calculate accuracy
                 predictions = torch.argmax(main_logits, dim=1)
-                accuracy = (predictions == batched_test_outputs).float().mean()
+                accuracy = (predictions == batched_target_outputs).float().mean()
 
                 # Support reconstruction loss - batched
                 support_loss = self._calculate_support_reconstruction_loss_batched(
-                    batched_support_inputs, batched_support_outputs
+                    support_inputs, support_outputs
                 )
 
-                # CLS regularization loss - batched
-                cls_loss = self._calculate_cls_regularization_loss_batched(
-                    batched_support_inputs, batched_support_outputs
+                # CLS regularization loss - batched (only if weight > 0)
+                if self.cls_regularization_weight > 0:
+                    cls_loss = self._calculate_cls_regularization_loss_batched(
+                        support_inputs, support_outputs
+                    )
+                else:
+                    cls_loss = torch.tensor(0.0, device=main_loss.device)
+
+                # Rule token consistency loss - batched
+                consistency_loss = self._calculate_rule_token_consistency_loss_batched(
+                    support_inputs,
+                    support_outputs,
+                    batch["task_indices"],
+                    batch["augmentation_groups"],
                 )
 
                 # Total loss
@@ -419,16 +493,20 @@ class TransformerTrainer(BaseTrainer):
                     main_loss
                     + self.support_reconstruction_weight * support_loss
                     + self.cls_regularization_weight * cls_loss
+                    + self.rule_token_consistency_weight * consistency_loss
                 )
 
                 # Update metrics
                 total_loss += total_batch_loss.item()
-                total_examples += len(all_test_inputs)
+                total_examples += batch_size
 
                 # Update loss components
                 loss_components["main_loss"] += main_loss.item()
                 loss_components["support_reconstruction_loss"] += support_loss.item()
                 loss_components["cls_regularization_loss"] += cls_loss.item()
+                loss_components["rule_token_consistency_loss"] += (
+                    consistency_loss.item()
+                )
                 loss_components["accuracy"] += accuracy.item()
 
         # Average metrics

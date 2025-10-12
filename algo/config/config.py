@@ -48,19 +48,27 @@ class Config:
     # =============================================================================
     # TRANSFORMER ARC MODEL PARAMETERS
     # =============================================================================
-    # Model architecture (reusing some patch attention params)
-    d_model: int = 128  # Model dimension (same as model_dim for compatibility)
-    num_rule_tokens: int = 2  # Number of rule tokens from PMA
-    num_encoder_layers: int = 3  # Number of transformer encoder layers
+    # Model architecture
+    d_model: int = 256  # Model dimension
+    num_rule_tokens: int = 4  # Number of rule tokens from PMA
+    num_encoder_layers: int = 8  # Number of transformer encoder layers
+    num_decoder_layers: int = 8  # Number of self and cross-attention transformer decoder layers, 3x per layer: self-attn, cross-attn, ff
+    num_heads: int = 8  # Number of attention heads for transformer
+    patch_size: int = 3  # Patch size for transformer input processing
+    num_cls_tokens: int = 4  # Number of CLS tokens from pairwise encoder
 
     # Rule bottleneck (optional compression)
     use_rule_bottleneck: bool = True  # Enable rule token bottleneck compression
     rule_bottleneck_dim: int = 8  # Compressed dimension for rule tokens
 
     # Auxiliary loss weights
-    support_reconstruction_weight: float = 0.1  # Weight for support reconstruction loss
-    cls_regularization_weight: float = 0.01  # Weight for CLS regularization loss
+    support_reconstruction_weight: float = 0.5  # Weight for support reconstruction loss
+    cls_regularization_weight: float = 0.0  # Weight for CLS regularization loss
+    rule_token_consistency_weight: float = (
+        0.01  # Weight for rule token consistency loss
+    )
     contrastive_temperature: float = 0.07  # Temperature for contrastive learning
+    cls_l2_weight: float = 0.01  # Weight for L2 regularization in CLS loss
 
     # =============================================================================
     # TRAINING PARAMETERS
@@ -87,15 +95,20 @@ class Config:
     # AUGMENTATION PARAMETERS
     # =============================================================================
     # Color augmentation
-    use_color_relabeling: bool = True
+    use_color_relabeling: bool = False
     augmentation_variants: int = 1  # Number of augmented versions per original example
     preserve_background: bool = True  # Keep background color (0) unchanged
 
     # Counterfactual augmentation
     enable_counterfactuals: bool = True
+    counterfactual_Y: bool = True  # Apply transformation to output (Y)
+    counterfactual_X: bool = True  # Apply transformation to input (X)
     counterfactual_transform: str = (
         "rotate_90"  # "rotate_90", "rotate_180", "rotate_270", "reflect_h", "reflect_v"
     )
+
+    # Cycling combinations
+    use_cycling: bool = True  # Enable cycling combinations (A,B)->T, (A,T)->B, (T,B)->A
 
     # =============================================================================
     # TRAINING INFRASTRUCTURE
@@ -155,12 +168,18 @@ class Config:
             }
         elif self.model_type == "transformer_arc":
             return {
-                "patch_size": self.patch_size,
+                "patch_size": self.patch_size,  # transformer_arc specific patch_size
                 "d_model": self.d_model,
                 "num_rule_tokens": self.num_rule_tokens,
                 "num_encoder_layers": self.num_encoder_layers,
+                "num_decoder_layers": self.num_decoder_layers,
+                "num_heads": self.num_heads,  # transformer_arc specific num_heads
+                "num_cls_tokens": self.num_cls_tokens,  # transformer_arc specific num_cls_tokens
+                "use_rule_bottleneck": self.use_rule_bottleneck,
+                "rule_bottleneck_dim": self.rule_bottleneck_dim,
                 "support_reconstruction_weight": self.support_reconstruction_weight,
                 "cls_regularization_weight": self.cls_regularization_weight,
+                "rule_token_consistency_weight": self.rule_token_consistency_weight,
                 "contrastive_temperature": self.contrastive_temperature,
             }
         else:
@@ -182,10 +201,22 @@ class Config:
                 raise ValueError("num_rule_tokens must be positive")
             if self.num_encoder_layers <= 0:
                 raise ValueError("num_encoder_layers must be positive")
+            if self.num_decoder_layers <= 0:
+                raise ValueError("num_decoder_layers must be positive")
+            if self.num_heads <= 0:
+                raise ValueError("num_heads must be positive")
+            if self.patch_size <= 0:
+                raise ValueError("patch_size must be positive")
+            if self.num_cls_tokens <= 0:
+                raise ValueError("num_cls_tokens must be positive")
+            if self.rule_bottleneck_dim <= 0:
+                raise ValueError("rule_bottleneck_dim must be positive")
             if self.support_reconstruction_weight < 0:
                 raise ValueError("support_reconstruction_weight must be non-negative")
             if self.cls_regularization_weight < 0:
                 raise ValueError("cls_regularization_weight must be non-negative")
+            if self.rule_token_consistency_weight < 0:
+                raise ValueError("rule_token_consistency_weight must be non-negative")
             if self.contrastive_temperature <= 0:
                 raise ValueError("contrastive_temperature must be positive")
 

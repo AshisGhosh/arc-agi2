@@ -12,6 +12,7 @@ help:
 	@echo "  make evaluate   - run evaluation"
 	@echo "  make view       - launch dataset viewer"
 	@echo "  make view-model - launch model predictions viewer"
+	@echo "  make view-analysis    - launch detailed model analysis"
 	@echo "  make clean      - clean up containers and images"
 	@echo "  make lint       - run linting"
 
@@ -55,6 +56,10 @@ view:
 # launch model predictions viewer
 view-model:
 	docker compose exec hrm-training streamlit run scripts/view_model_predictions.py --server.port 8503 --server.address 0.0.0.0
+
+# launch detailed model analysis
+view-analysis:
+	docker compose exec hrm-training streamlit run scripts/view_detailed_analysis.py --server.port 8504 --server.address 0.0.0.0
 
 # clean up
 clean:

@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import math
 from typing import Dict, Any, Tuple
 
@@ -280,7 +279,7 @@ class PMA(nn.Module):
         return rule_tokens
 
 
-class CrossAttentionDecoder(nn.Module):
+class AlternatingCrossAttentionDecoder(nn.Module):
     """Cross-attention decoder for test input processing."""
 
     def __init__(
@@ -294,12 +293,24 @@ class CrossAttentionDecoder(nn.Module):
         self.d_model = d_model
         self.patch_size = 3
         self.grid_size = 10
+        self.num_heads = num_heads
+        self.num_layers = num_layers
 
         # Patch embedding
         self.patch_embedding = nn.Linear(self.patch_size * self.patch_size, d_model)
 
         # Positional encoding
         self.pos_encoding = PositionalEncoding2D(d_model)
+
+        # Self-attention layers (alternating with cross-attention)
+        self.self_attention_layers = nn.ModuleList(
+            [
+                nn.MultiheadAttention(
+                    d_model, num_heads, dropout=dropout, batch_first=True
+                )
+                for _ in range(num_layers)
+            ]
+        )
 
         # Cross-attention layers
         self.cross_attention_layers = nn.ModuleList(
@@ -311,8 +322,8 @@ class CrossAttentionDecoder(nn.Module):
             ]
         )
 
-        # Layer normalization
-        self.norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(num_layers)])
+        # RMS normalization (3x per layer: self-attn, cross-attn, ff)
+        self.norms = nn.ModuleList([nn.RMSNorm(d_model) for _ in range(num_layers * 3)])
 
         # Feed-forward networks
         self.ffs = nn.ModuleList(
@@ -327,6 +338,10 @@ class CrossAttentionDecoder(nn.Module):
                 for _ in range(num_layers)
             ]
         )
+
+        # attention monitoring
+        self.attention_data = {}
+        self.enable_attention_monitoring = False
 
     def patchify(self, x: torch.Tensor) -> torch.Tensor:
         """Convert image to patches."""
@@ -348,6 +363,171 @@ class CrossAttentionDecoder(nn.Module):
         patches = patches.view(B, -1, self.patch_size * self.patch_size)
 
         return patches
+
+    def enable_attention_probes(self, enable: bool = True):
+        """enable or disable attention monitoring."""
+        self.enable_attention_monitoring = enable
+
+    def clear_attention_data(self):
+        """clear stored attention data."""
+        self.attention_data.clear()
+
+    def get_attention_analysis(self) -> Dict[str, Any]:
+        """analyze captured attention patterns."""
+        if not self.attention_data:
+            return {
+                "error": "no attention data captured. enable attention monitoring first."
+            }
+
+        analysis = {}
+
+        for key, data in self.attention_data.items():
+            weights = data[
+                "weights"
+            ]  # [batch, seq_len, seq_len] from MultiheadAttention
+            layer_idx = data["layer"]
+            attn_type = data["type"]
+
+            # compute attention statistics
+            if weights.dim() == 2:
+                # [seq_len, seq_len] - single sample, already averaged
+                seq_len = weights.shape[0]
+                batch_size = 1
+                num_heads = self.num_heads
+            elif weights.dim() == 3:
+                # [batch, seq_len, seq_len] - average across heads
+                batch_size, seq_len, _ = weights.shape
+                num_heads = self.num_heads
+            elif weights.dim() == 4:
+                # [batch, num_heads, seq_len, seq_len] - if we had per-head weights
+                batch_size, num_heads, seq_len, _ = weights.shape
+            else:
+                print(
+                    f"warning: unexpected attention weights dimension {weights.dim()} for {key}"
+                )
+                continue
+
+            # average attention across batch (weights are already averaged across heads)
+            if weights.dim() == 2:
+                avg_weights = weights  # [seq_len, seq_len] - already averaged
+            elif weights.dim() == 3:
+                avg_weights = weights.mean(dim=0)  # [seq_len, seq_len]
+            else:
+                avg_weights = weights.mean(dim=(0, 1))  # [seq_len, seq_len]
+
+            # safety check for empty or invalid weights
+            if avg_weights.numel() == 0 or torch.isnan(avg_weights).any():
+                print(f"warning: invalid attention weights for {key}")
+                continue
+
+            # attention entropy (measure of attention spread)
+            # add small epsilon to avoid log(0)
+            eps = 1e-8
+            entropy = -(avg_weights * torch.log(avg_weights + eps)).sum(dim=-1)
+            avg_entropy = entropy.mean().item()
+
+            # safety check for entropy
+            if torch.isnan(torch.tensor(avg_entropy)):
+                avg_entropy = 0.0
+
+            # attention sparsity (fraction of attention mass in top-k positions)
+            # for cross-attention, use the key dimension (rule tokens), not query dimension
+            if attn_type == "cross_attention":
+                # cross-attention: [query_seq_len, key_seq_len] = [100, 8]
+                key_seq_len = avg_weights.shape[1]  # number of rule tokens
+                k = min(5, key_seq_len - 1)  # top 5 or all but one rule token
+                if k > 0 and key_seq_len > 1:
+                    try:
+                        topk_values, _ = torch.topk(avg_weights, k, dim=-1)
+                        total_attention = avg_weights.sum(dim=-1)
+                        # avoid division by zero
+                        if total_attention.sum() > 0:
+                            sparsity = (
+                                (topk_values.sum(dim=-1) / total_attention)
+                                .mean()
+                                .item()
+                            )
+                        else:
+                            sparsity = 0.0
+                    except Exception as e:
+                        print(
+                            f"warning: cross-attention sparsity calculation failed for {key}: {e}"
+                        )
+                        sparsity = 0.0
+                else:
+                    sparsity = 1.0  # if sequence is too short, consider it fully sparse
+            else:
+                # self-attention: [seq_len, seq_len] = [100, 100]
+                k = min(5, seq_len - 1)  # top 5 or all but one position
+                if k > 0 and seq_len > 1:
+                    try:
+                        topk_values, _ = torch.topk(avg_weights, k, dim=-1)
+                        total_attention = avg_weights.sum(dim=-1)
+                        # avoid division by zero
+                        if total_attention.sum() > 0:
+                            sparsity = (
+                                (topk_values.sum(dim=-1) / total_attention)
+                                .mean()
+                                .item()
+                            )
+                        else:
+                            sparsity = 0.0
+                    except Exception as e:
+                        print(
+                            f"warning: self-attention sparsity calculation failed for {key}: {e}"
+                        )
+                        sparsity = 0.0
+                else:
+                    sparsity = 1.0  # if sequence is too short, consider it fully sparse
+
+            # max attention value
+            max_attn = avg_weights.max().item()
+
+            # safety check for max attention
+            if torch.isnan(torch.tensor(max_attn)):
+                max_attn = 0.0
+
+            # attention variance across heads (set to 0 since we don't have per-head weights)
+            head_variance = 0.0
+
+            analysis[key] = {
+                "layer": layer_idx,
+                "type": attn_type,
+                "avg_entropy": avg_entropy,
+                "sparsity": sparsity,
+                "max_attention": max_attn,
+                "head_variance": head_variance,
+                "seq_len": seq_len,
+                "num_heads": num_heads,
+            }
+
+        return analysis
+
+    def get_attention_visualization_data(
+        self, layer_idx: int = 0, head_idx: int = 0
+    ) -> Dict[str, torch.Tensor]:
+        """get attention weights for visualization."""
+        vis_data = {}
+
+        # get self-attention
+        self_key = f"self_attn_layer_{layer_idx}"
+        if self_key in self.attention_data:
+            weights = self.attention_data[self_key]["weights"]
+            if weights.dim() == 2:
+                vis_data["self_attention"] = weights  # [seq, seq]
+            else:
+                vis_data["self_attention"] = weights[0]  # [seq, seq]
+
+        # get cross-attention
+        cross_key = f"cross_attn_layer_{layer_idx}"
+        if cross_key in self.attention_data:
+            weights = self.attention_data[cross_key]["weights"]
+            if weights.dim() == 2:
+                vis_data["cross_attention"] = weights  # [seq, seq]
+            else:
+                vis_data["cross_attention"] = weights[0]  # [seq, seq]
+
+        return vis_data
 
     def forward(
         self, test_input: torch.Tensor, rule_tokens: torch.Tensor
@@ -376,18 +556,47 @@ class CrossAttentionDecoder(nn.Module):
         # Add positional encoding
         test_emb = self.pos_encoding(test_emb, (self.grid_size, self.grid_size))
 
-        # Apply cross-attention layers
+        # Apply alternating self-attention and cross-attention layers
         x = test_emb
-        for cross_attn, norm, ff in zip(
-            self.cross_attention_layers, self.norms, self.ffs
+        norm_idx = 0
+
+        for i, (self_attn, cross_attn, ff) in enumerate(
+            zip(self.self_attention_layers, self.cross_attention_layers, self.ffs)
         ):
+            # Self-attention: test patches attend to themselves
+            if self.enable_attention_monitoring:
+                self_attn_out, self_attn_weights = self_attn(x, x, x, need_weights=True)
+                # store attention weights for analysis
+                self.attention_data[f"self_attn_layer_{i}"] = {
+                    "weights": self_attn_weights.detach().cpu(),
+                    "layer": i,
+                    "type": "self_attention",
+                }
+            else:
+                self_attn_out, _ = self_attn(x, x, x)
+            x = self.norms[norm_idx](x + self_attn_out)
+            norm_idx += 1
+
             # Cross-attention: test patches attend to rule tokens
-            attn_out, _ = cross_attn(x, rule_tokens, rule_tokens)
-            x = norm(x + attn_out)
+            if self.enable_attention_monitoring:
+                cross_attn_out, cross_attn_weights = cross_attn(
+                    x, rule_tokens, rule_tokens, need_weights=True
+                )
+                # store attention weights for analysis
+                self.attention_data[f"cross_attn_layer_{i}"] = {
+                    "weights": cross_attn_weights.detach().cpu(),
+                    "layer": i,
+                    "type": "cross_attention",
+                }
+            else:
+                cross_attn_out, _ = cross_attn(x, rule_tokens, rule_tokens)
+            x = self.norms[norm_idx](x + cross_attn_out)
+            norm_idx += 1
 
             # Feed-forward
             ff_out = ff(x)
-            x = norm(x + ff_out)
+            x = self.norms[norm_idx](x + ff_out)
+            norm_idx += 1
 
         return x
 
@@ -435,51 +644,82 @@ class RuleBottleneck(nn.Module):
         return expanded
 
 
-class PatchOutputHead(nn.Module):
-    """Output head to convert processed patches back to pixel predictions."""
+def icnr_(weight: torch.Tensor, upscale_factor: int = 3):
+    # ICNR init for conv before PixelShuffle
+    with torch.no_grad():
+        out_c, in_c, kH, kW = weight.shape
+        assert out_c % (upscale_factor**2) == 0
+        nf = out_c // (upscale_factor**2)
+        sub = weight.new_zeros(nf, in_c, kH, kW)
+        nn.init.kaiming_normal_(sub, mode="fan_out", nonlinearity="relu")
+        weight.copy_(sub.repeat_interleave(upscale_factor**2, dim=0))
 
-    def __init__(self, d_model: int = 128, num_colors: int = 10, patch_size: int = 3):
+
+class PatchOutputHead(nn.Module):
+    """
+    Patch → sub-pixel logits → PixelShuffle → edge-safe refinement (logits stay logits).
+    """
+
+    def __init__(self, d_model: int, num_colors: int, patch_size: int = 3):
         super().__init__()
         self.d_model = d_model
         self.num_colors = num_colors
-        self.patch_size = patch_size
+        self.up = patch_size  # upscale factor (e.g., 3)
 
-        # Project to color logits
-        self.color_proj = nn.Linear(d_model, num_colors)
+        # Predict C * r^2 per patch (sub-pixel logits)
+        self.subpixel_proj = nn.Linear(d_model, num_colors * self.up * self.up)
 
-        # Pixel-level refinement
-        self.pixel_refinement = nn.Sequential(
-            nn.Conv2d(num_colors, 64, 3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(64, num_colors, 1),
+        # Pre-shuffle 1x1 conv (ICNR init) to avoid checkerboard at init
+        self.pre_shuffle = nn.Conv2d(
+            num_colors * self.up * self.up,
+            num_colors * self.up * self.up,
+            kernel_size=1,
+            bias=False,
         )
 
-    def forward(self, processed_patches: torch.Tensor) -> torch.Tensor:
+        self.pixel_shuffle = nn.PixelShuffle(self.up)
+
+        # Edge-safe refinement on logits: depthwise 3x3 then pointwise 1x1
+        self.refine = nn.Sequential(
+            nn.Conv2d(
+                num_colors,
+                num_colors,
+                kernel_size=3,
+                padding=1,
+                groups=num_colors,
+                padding_mode="reflect",
+            ),
+            nn.GELU(),
+            nn.Conv2d(num_colors, num_colors, kernel_size=1),
+        )
+
+        # Initialize
+        icnr_(self.pre_shuffle.weight, upscale_factor=self.up)
+
+    def forward(self, patch_tokens: torch.Tensor) -> torch.Tensor:
         """
-        Convert processed patches to pixel-level predictions.
-
-        Args:
-            processed_patches: [B, num_patches, d_model] - processed test patches
-
-        Returns:
-            output: [B, num_colors, 30, 30] - pixel-level color predictions
+        patch_tokens: [B, N, model_dim], N must be H_p*W_p (square)
+        returns logits: [B, num_colors, H_p*up, W_p*up]
         """
-        B, num_patches, d_model = processed_patches.shape
+        B, N, D = patch_tokens.shape
+        H_p = W_p = int(N**0.5)
+        assert H_p * W_p == N, "num_patches must be a perfect square"
 
-        # Project to color logits
-        color_logits = self.color_proj(processed_patches)  # [B, 100, num_colors]
+        # Sub-pixel logits per patch
+        sp = self.subpixel_proj(patch_tokens)  # [B, N, C*r^2]
+        sp = (
+            sp.view(B, H_p, W_p, self.num_colors * self.up * self.up)
+            .permute(0, 3, 1, 2)
+            .contiguous()
+        )  # [B, C*r^2, H_p, W_p]
 
-        # Reshape to 2D grid
-        color_logits = color_logits.view(B, 10, 10, self.num_colors)
-        color_logits = color_logits.permute(0, 3, 1, 2)  # [B, num_colors, 10, 10]
+        # ICNR-friendly 1x1 then PixelShuffle to full res logits
+        sp = self.pre_shuffle(sp)  # [B, C*r^2, H_p, W_p]
+        logits = self.pixel_shuffle(sp)  # [B, C, H_p*up, W_p*up]
 
-        # Upsample to full resolution
-        color_logits = F.interpolate(color_logits, size=(30, 30), mode="nearest")
-
-        # Pixel-level refinement
-        color_logits = self.pixel_refinement(color_logits)
-
-        return color_logits
+        # Light refinement on logits (no softmax here)
+        logits = self.refine(logits)  # [B, C, H, W]
+        return logits
 
 
 class TransformerARCModel(BaseARCModel):
@@ -489,7 +729,7 @@ class TransformerARCModel(BaseARCModel):
     Architecture:
     1. PairEncoder: Encode support pairs into CLS summaries
     2. PMA: Create rule tokens from pair summaries
-    3. CrossAttentionDecoder: Process test input with rule tokens
+    3. AlternatingCrossAttentionDecoder: Process test input with rule tokens
     4. PatchOutputHead: Convert to pixel-level predictions
     """
 
@@ -533,7 +773,7 @@ class TransformerARCModel(BaseARCModel):
         else:
             self.rule_bottleneck = None
 
-        self.cross_attention_decoder = CrossAttentionDecoder(
+        self.alternating_cross_attention_decoder = AlternatingCrossAttentionDecoder(
             d_model=self.d_model,
             num_heads=self.num_heads,
             num_layers=self.num_decoder_layers,
@@ -543,6 +783,9 @@ class TransformerARCModel(BaseARCModel):
         self.output_head = PatchOutputHead(
             d_model=self.d_model, num_colors=10, patch_size=3
         )
+
+        # attention monitoring
+        self.attention_monitoring_enabled = False
 
     def forward(
         self,
@@ -588,7 +831,7 @@ class TransformerARCModel(BaseARCModel):
             )  # [B, num_rule_tokens, d_model]
 
         # Step 3: Process test input with cross-attention
-        processed_patches = self.cross_attention_decoder(
+        processed_patches = self.alternating_cross_attention_decoder(
             target_input, rule_tokens
         )  # [B, 100, d_model]
 
@@ -630,7 +873,9 @@ class TransformerARCModel(BaseARCModel):
             )  # [B, num_rule_tokens, d_model]
 
         # Process all test inputs with cross-attention
-        processed_patches = self.cross_attention_decoder(test_inputs, rule_tokens)
+        processed_patches = self.alternating_cross_attention_decoder(
+            test_inputs, rule_tokens
+        )
 
         # Convert to pixel-level predictions
         outputs = self.output_head(processed_patches)
@@ -688,6 +933,54 @@ class TransformerARCModel(BaseARCModel):
         rule_tokens = self.pma(pair_summaries)
 
         return rule_tokens
+
+    def enable_attention_monitoring(self, enable: bool = True):
+        """enable or disable attention monitoring for the decoder."""
+        self.attention_monitoring_enabled = enable
+        self.alternating_cross_attention_decoder.enable_attention_probes(enable)
+
+    def clear_attention_data(self):
+        """clear stored attention data."""
+        if hasattr(self.alternating_cross_attention_decoder, "clear_attention_data"):
+            self.alternating_cross_attention_decoder.clear_attention_data()
+
+    def get_attention_analysis(self) -> Dict[str, Any]:
+        """get attention analysis from the decoder."""
+        return self.alternating_cross_attention_decoder.get_attention_analysis()
+
+    def get_attention_visualization_data(
+        self, layer_idx: int = 0, head_idx: int = 0
+    ) -> Dict[str, torch.Tensor]:
+        """get attention weights for visualization."""
+        return (
+            self.alternating_cross_attention_decoder.get_attention_visualization_data(
+                layer_idx, head_idx
+            )
+        )
+
+    def print_attention_summary(self):
+        """print a summary of attention patterns."""
+        analysis = self.get_attention_analysis()
+
+        if "error" in analysis:
+            print(f"attention analysis error: {analysis['error']}")
+            return
+
+        print("\n=== attention analysis summary ===")
+        for key, data in analysis.items():
+            attn_type = data["type"]
+            layer = data["layer"]
+            entropy = data["avg_entropy"]
+            sparsity = data["sparsity"]
+            max_attn = data["max_attention"]
+            head_var = data["head_variance"]
+
+            print(f"{attn_type} layer {layer}:")
+            print(f"  entropy: {entropy:.4f} (higher = more spread)")
+            print(f"  sparsity: {sparsity:.4f} (higher = more focused)")
+            print(f"  max attention: {max_attn:.4f}")
+            print(f"  head variance: {head_var:.4f} (higher = more diverse heads)")
+            print()
 
     def get_model_info(self) -> Dict[str, Any]:
         """Get model information for logging/debugging."""

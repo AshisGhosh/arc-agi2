@@ -6,3 +6,5 @@ tqdm
 Pillow
 streamlit
 matplotlib
+plotly
+pandas

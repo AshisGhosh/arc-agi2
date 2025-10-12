@@ -312,14 +312,14 @@ def load_experiment_info(experiment_dir: Path) -> Dict[str, Any]:
         with open(training_info_path, "r") as f:
             training_data = json.load(f)
             # The training_info.json file contains the full experiment data
-            # Extract the nested "training" key for compatibility
+            # Extract the nested "training" key
             info["training"] = training_data.get("training", {})
-            # Extract the nested "tasks" key for compatibility
+            # Extract the nested "tasks" key
             info["tasks"] = training_data.get("tasks", {})
             # Also store the full data for other uses
             info["full_training_info"] = training_data
 
-    # load task selection (fallback if not in training_info.json)
+    # load task selection (if not in training_info.json)
     task_selection_path = experiment_dir / "task_selection.json"
     if task_selection_path.exists() and "tasks" not in info:
         with open(task_selection_path, "r") as f:
@@ -349,7 +349,7 @@ def load_model_checkpoint(checkpoint_path: str, config: Config = None):
     model.to(config.device)
     model.eval()
 
-    return model
+    return model, config.device
 
 
 def get_available_experiments(logs_dir: Path) -> List[Tuple[str, Path]]:
@@ -571,11 +571,23 @@ def apply_noise_to_test_inputs(
     return noisy_test_examples
 
 
+def get_combination_augmentation_group(dataset, task_idx, combination):
+    """Get augmentation group for a specific combination."""
+    from scripts.visualization_utils import (
+        get_combination_augmentation_group as get_group,
+    )
+
+    return get_group(dataset, task_idx, combination)
+
+
 def calculate_accuracy_metrics(
     predictions: torch.Tensor, targets: torch.Tensor
 ) -> Dict[str, float]:
     """calculate accuracy metrics for predictions."""
     with torch.no_grad():
+        # Ensure both tensors are on the same device
+        targets = targets.to(predictions.device)
+
         if predictions.dim() == 2:
             predictions = predictions.unsqueeze(0)
         if targets.dim() == 2:
@@ -610,9 +622,13 @@ def evaluate_model_on_tasks(
     preserve_background=True,
     augmentation_seed=42,
     enable_counterfactuals=False,
+    counterfactual_Y=True,
+    counterfactual_X=True,
     counterfactual_transform="rotate_90",
     selected_task_indices=None,
     test_all_test_pairs=False,
+    enable_cycling=True,
+    device=None,
 ):
     """evaluate model on all tasks in dataset and return results.
 
@@ -627,14 +643,22 @@ def evaluate_model_on_tasks(
         augmentation_variants: Number of augmented versions per example
         preserve_background: Whether to preserve background color
         augmentation_seed: Random seed for augmentation
+        device: Device to run evaluation on (defaults to config.device)
     """
     if noise_config is None:
         noise_config = NoiseConfig()
 
+    if device is None:
+        device = config.device
+
     results = []
 
-    # Create augmented dataset if either color augmentation or counterfactuals are enabled
-    if enable_color_augmentation or enable_counterfactuals:
+    # Create augmented dataset if any augmentation options are enabled
+    if (
+        enable_color_augmentation
+        or enable_counterfactuals
+        or enable_cycling != config.use_cycling
+    ):
         # Create a copy of the config with both augmentations enabled if needed
         augmented_config = Config()
         augmented_config.__dict__.update(config.__dict__)  # Copy all config values
@@ -647,7 +671,12 @@ def evaluate_model_on_tasks(
 
         if enable_counterfactuals:
             augmented_config.enable_counterfactuals = True
+            augmented_config.counterfactual_Y = counterfactual_Y
+            augmented_config.counterfactual_X = counterfactual_X
             augmented_config.counterfactual_transform = counterfactual_transform
+
+        # Apply cycling setting
+        augmented_config.use_cycling = enable_cycling
 
         # Create augmented dataset with both augmentations
         task_indices = (
@@ -658,7 +687,9 @@ def evaluate_model_on_tasks(
         dataset = TaskSubset(
             task_indices=task_indices,
             config=augmented_config,
-            arc_agi1_dir=config.arc_agi1_dir,
+            arc_agi1_dir=str(
+                dataset.raw_data_dir
+            ),  # Use the original dataset's data directory
             holdout=True,
             use_first_combination_only=False,
         )
@@ -693,25 +724,29 @@ def evaluate_model_on_tasks(
             max_train = len(train_inputs)
 
             # Pad training inputs to consistent shape
-            all_train_inputs = torch.zeros([1, max_train, 1, 30, 30])
+            all_train_inputs = torch.zeros([1, max_train, 1, 30, 30], device=device)
             for j, train_input in enumerate(train_inputs):
-                all_train_inputs[0, j] = train_input
+                all_train_inputs[0, j] = train_input.to(device)
 
-            num_train = torch.tensor([max_train], dtype=torch.long)
+            num_train = torch.tensor([max_train], dtype=torch.long, device=device)
 
             task_results = []
 
             for combo in task_combinations:
                 # Extract combination data
                 combo_idx = combo["combination_idx"]
-                i, j = combo["pair_indices"]
-                is_counterfactual = combo["is_counterfactual"]
+                cycling_indices = combo["cycling_indices"]
+                i, j, k = cycling_indices
+                # Use the counterfactual_type directly from the combination data
+                counterfactual_type = combo.get("counterfactual_type", "original")
+                is_counterfactual = counterfactual_type != "original"
 
                 # Get the preprocessed data from the combination
                 support_examples = combo["support_examples"]
                 test_examples = combo["test_examples"]
                 num_test_examples = combo["num_test_examples"]
                 holdout_example = combo.get("holdout_example")
+                target_example = combo.get("target_example")
 
                 # Apply noise to training examples if requested
                 if (
@@ -733,6 +768,16 @@ def evaluate_model_on_tasks(
                         noise_config.noise_test_range,
                         noise_config.noise_test_ratio,
                     )
+
+                    # Also apply noise to target_example if it exists
+                    if target_example is not None:
+                        target_example["input"] = generate_noise_tensor(
+                            target_example["input"],
+                            noise_config.noise_test_type,
+                            noise_config.noise_test_std,
+                            noise_config.noise_test_range,
+                            noise_config.noise_test_ratio,
+                        )
 
                 # Determine model type and handle accordingly
                 is_patch_model = hasattr(model, "patch_tokenizer")
@@ -763,13 +808,21 @@ def evaluate_model_on_tasks(
                         ]  # [1, 3, 64, 64]
 
                         # Create rule latent inputs tensor [1, 2, 2, 3, 64, 64]
-                        rule_latent_inputs = torch.zeros([1, 2, 2, 3, 64, 64])
-                        rule_latent_inputs[0, 0, 0] = example1_input.squeeze(
-                            0
+                        rule_latent_inputs = torch.zeros(
+                            [1, 2, 2, 3, 64, 64], device=device
+                        )
+                        rule_latent_inputs[0, 0, 0] = example1_input.squeeze(0).to(
+                            device
                         )  # [3, 64, 64]
-                        rule_latent_inputs[0, 0, 1] = example1_output.squeeze(0)
-                        rule_latent_inputs[0, 1, 0] = example2_input.squeeze(0)
-                        rule_latent_inputs[0, 1, 1] = example2_output.squeeze(0)
+                        rule_latent_inputs[0, 0, 1] = example1_output.squeeze(0).to(
+                            device
+                        )
+                        rule_latent_inputs[0, 1, 0] = example2_input.squeeze(0).to(
+                            device
+                        )
+                        rule_latent_inputs[0, 1, 1] = example2_output.squeeze(0).to(
+                            device
+                        )
 
                         # Run model inference
                         outputs = model.forward_rule_latent_training(
@@ -804,25 +857,27 @@ def evaluate_model_on_tasks(
                         for test_idx in range(num_test_examples):
                             test_example = test_examples[test_idx]
                             # test_example["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
-                            target_input = test_example["input"].squeeze(
-                                1
+                            target_input = (
+                                test_example["input"].squeeze(1).to(device)
                             )  # [1, 30, 30]
-                            target_output = test_example["output"].unsqueeze(0)
+                            target_output = (
+                                test_example["output"].unsqueeze(0).to(device)
+                            )
 
                             if is_patch_model or is_transformer_model:
                                 # Patch model or Transformer model - use direct forward pass
                                 # Get support examples for this task
-                                support1_input = support_examples[0]["input"].squeeze(
-                                    1
+                                support1_input = (
+                                    support_examples[0]["input"].squeeze(1).to(device)
                                 )  # [1, 30, 30]
-                                support1_output = support_examples[0]["output"].squeeze(
-                                    1
+                                support1_output = (
+                                    support_examples[0]["output"].squeeze(1).to(device)
                                 )  # [1, 30, 30]
-                                support2_input = support_examples[1]["input"].squeeze(
-                                    1
+                                support2_input = (
+                                    support_examples[1]["input"].squeeze(1).to(device)
                                 )  # [1, 30, 30]
-                                support2_output = support_examples[1]["output"].squeeze(
-                                    1
+                                support2_output = (
+                                    support_examples[1]["output"].squeeze(1).to(device)
                                 )  # [1, 30, 30]
 
                                 # target_input is already [1, 30, 30], which is what the model expects
@@ -934,12 +989,19 @@ def evaluate_model_on_tasks(
                                     ),
                                 }
 
+                            # Get augmentation group for this combination
+                            augmentation_group = get_combination_augmentation_group(
+                                dataset, task_idx, combo
+                            )
+
                             task_results.append(
                                 {
                                     "combination_idx": combo_idx,
-                                    "pair_indices": (i, j),
+                                    "cycling_indices": (i, j, k),
                                     "is_counterfactual": is_counterfactual,
+                                    "counterfactual_type": counterfactual_type,
                                     "test_example_idx": test_idx,
+                                    "augmentation_group": augmentation_group,
                                     "perfect_accuracy": metrics["perfect_accuracy"],
                                     "pixel_accuracy": metrics["pixel_accuracy"],
                                     "near_miss_accuracy": metrics["near_miss_accuracy"],
@@ -952,78 +1014,85 @@ def evaluate_model_on_tasks(
                         # Skip the normal result creation since we created separate results above
                         continue
                 else:
-                    # Use first test example only (original behavior)
-                    test_example = test_examples[0] if test_examples else None
-                    if test_example:
-                        # test_example["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
-                        target_input = test_example["input"].squeeze(1)  # [1, 30, 30]
-                        target_output = test_example["output"].unsqueeze(0)
+                    # Use target_example from cycling format
+                    if target_example:
+                        # target_example["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
+                        target_input = (
+                            target_example["input"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
+                        target_output = (
+                            target_example["output"].squeeze(0).to(device)
+                        )  # [1, 30, 30]
+                    else:
+                        raise ValueError(
+                            "❌ target_example not found in cycling format - this should not happen"
+                        )
 
-                        if is_patch_model or is_transformer_model:
-                            # Patch model or Transformer model - use direct forward pass
-                            support1_input = support_examples[0]["input"].squeeze(
-                                1
-                            )  # [1, 30, 30]
-                            support1_output = support_examples[0]["output"].squeeze(
-                                1
-                            )  # [1, 30, 30]
-                            support2_input = support_examples[1]["input"].squeeze(
-                                1
-                            )  # [1, 30, 30]
-                            support2_output = support_examples[1]["output"].squeeze(
-                                1
-                            )  # [1, 30, 30]
+                    if is_patch_model or is_transformer_model:
+                        # Patch model or Transformer model - use direct forward pass
+                        support1_input = (
+                            support_examples[0]["input"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
+                        support1_output = (
+                            support_examples[0]["output"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
+                        support2_input = (
+                            support_examples[1]["input"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
+                        support2_output = (
+                            support_examples[1]["output"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
 
-                            # target_input is already [1, 30, 30], which is what the model expects
-                            if is_transformer_model:
-                                target_logits = forward_transformer_with_noise(
-                                    model,
-                                    support1_input,
-                                    support1_output,
-                                    support2_input,
-                                    support2_output,
-                                    target_input,
-                                    noise_config,
-                                )
-                            else:
-                                target_logits = model(
-                                    support1_input,
-                                    support1_output,
-                                    support2_input,
-                                    support2_output,
-                                    target_input,
-                                )
+                        # target_input is already [1, 30, 30], which is what the model expects
+                        if is_transformer_model:
+                            target_logits = forward_transformer_with_noise(
+                                model,
+                                support1_input,
+                                support1_output,
+                                support2_input,
+                                support2_output,
+                                target_input,
+                                noise_config,
+                            )
                         else:
-                            # ResNet model - use decoder with rule latents
-                            target_logits = model.decoder(
-                                outputs["rule_latents"][0:1],
+                            target_logits = model(
+                                support1_input,
+                                support1_output,
+                                support2_input,
+                                support2_output,
                                 target_input,
                             )
-                        predictions = torch.argmax(target_logits, dim=1).squeeze(0)
-                        metrics = calculate_accuracy_metrics(predictions, target_output)
                     else:
-                        metrics = {"accuracy": 0.0, "exact_match": 0.0}
-                        predictions = None
+                        # ResNet model - use decoder with rule latents
+                        target_logits = model.decoder(
+                            outputs["rule_latents"][0:1],
+                            target_input,
+                        )
+
+                    predictions = torch.argmax(target_logits, dim=1).squeeze(0)
+                    metrics = calculate_accuracy_metrics(predictions, target_output)
 
                 if evaluation_mode == "holdout" and holdout_example is not None:
                     # Evaluate on holdout example
                     # holdout_example["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
-                    target_input = holdout_example["input"].squeeze(1)  # [1, 30, 30]
-                    target_output = holdout_example["output"].unsqueeze(0)
+                    target_input = (
+                        holdout_example["input"].squeeze(1).to(device)
+                    )  # [1, 30, 30]
+                    target_output = holdout_example["output"].unsqueeze(0).to(device)
 
                     if is_patch_model or is_transformer_model:
                         # Patch model or Transformer model - use direct forward pass
-                        support1_input = support_examples[0]["input"].squeeze(
-                            1
+                        support1_input = (
+                            support_examples[0]["input"].squeeze(1).to(device)
                         )  # [1, 30, 30]
-                        support1_output = support_examples[0]["output"].squeeze(
-                            1
+                        support1_output = (
+                            support_examples[0]["output"].squeeze(1).to(device)
                         )  # [1, 30, 30]
-                        support2_input = support_examples[1]["input"].squeeze(
-                            1
+                        support2_input = (
+                            support_examples[1]["input"].squeeze(1).to(device)
                         )  # [1, 30, 30]
-                        support2_output = support_examples[1]["output"].squeeze(
-                            1
+                        support2_output = (
+                            support_examples[1]["output"].squeeze(1).to(device)
                         )  # [1, 30, 30]
 
                         # target_input is already [1, 30, 30], which is what the model expects
@@ -1054,25 +1123,30 @@ def evaluate_model_on_tasks(
                     predictions = torch.argmax(target_logits, dim=1).squeeze(0)
                     metrics = calculate_accuracy_metrics(predictions, target_output)
                 else:
-                    # Fallback to first test example
-                    test_example = test_examples[0]
-                    # test_example["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
-                    target_input = test_example["input"].squeeze(1)  # [1, 30, 30]
-                    target_output = test_example["output"].unsqueeze(0)
+                    # Use target_example from cycling format
+                    if target_example:
+                        target_input = target_example["input"].squeeze(1)  # [1, 30, 30]
+                        target_output = target_example["output"].squeeze(
+                            0
+                        )  # [1, 30, 30]
+                    else:
+                        raise ValueError(
+                            "❌ target_example not found in cycling format - this should not happen"
+                        )
 
                     if is_patch_model or is_transformer_model:
                         # Patch model or Transformer model - use direct forward pass
-                        support1_input = support_examples[0]["input"].squeeze(
-                            1
+                        support1_input = (
+                            support_examples[0]["input"].squeeze(1).to(device)
                         )  # [1, 30, 30]
-                        support1_output = support_examples[0]["output"].squeeze(
-                            1
+                        support1_output = (
+                            support_examples[0]["output"].squeeze(1).to(device)
                         )  # [1, 30, 30]
-                        support2_input = support_examples[1]["input"].squeeze(
-                            1
+                        support2_input = (
+                            support_examples[1]["input"].squeeze(1).to(device)
                         )  # [1, 30, 30]
-                        support2_output = support_examples[1]["output"].squeeze(
-                            1
+                        support2_output = (
+                            support_examples[1]["output"].squeeze(1).to(device)
                         )  # [1, 30, 30]
 
                         # target_input is already [1, 30, 30], which is what the model expects
@@ -1138,6 +1212,15 @@ def evaluate_model_on_tasks(
                         ],
                         "num_test_examples": num_test_examples,
                     }
+
+                    # Add target_example for cycling format visualization
+                    if target_example:
+                        sample_data["target_example"] = {
+                            "input": tensor_to_grayscale_numpy(target_example["input"]),
+                            "output": tensor_to_grayscale_numpy(
+                                target_example["output"]
+                            ),
+                        }
                 else:
                     # ResNet model - use RGB support examples
                     sample_data = {
@@ -1173,6 +1256,15 @@ def evaluate_model_on_tasks(
                         "num_test_examples": num_test_examples,
                     }
 
+                    # Add target_example for cycling format visualization
+                    if target_example:
+                        sample_data["target_example"] = {
+                            "input": tensor_to_grayscale_numpy(target_example["input"]),
+                            "output": tensor_to_grayscale_numpy(
+                                target_example["output"]
+                            ),
+                        }
+
                 # Add holdout data if available
                 if holdout_example is not None:
                     sample_data["holdout_example"] = {
@@ -1180,11 +1272,18 @@ def evaluate_model_on_tasks(
                         "output": tensor_to_grayscale_numpy(holdout_example["output"]),
                     }
 
+                # Get augmentation group for this combination
+                augmentation_group = get_combination_augmentation_group(
+                    dataset, task_idx, combo
+                )
+
                 task_results.append(
                     {
                         "combination_idx": combo_idx,
-                        "pair_indices": (i, j),
+                        "cycling_indices": (i, j, k),
                         "is_counterfactual": is_counterfactual,
+                        "counterfactual_type": counterfactual_type,
+                        "augmentation_group": augmentation_group,
                         "perfect_accuracy": metrics["perfect_accuracy"],
                         "pixel_accuracy": metrics["pixel_accuracy"],
                         "near_miss_accuracy": metrics["near_miss_accuracy"],
@@ -1202,8 +1301,14 @@ def evaluate_model_on_tasks(
                     "global_task_index": task_idx,
                     "task_id": dataset.tasks[task_idx]["task_id"],
                     "combination_idx": combo_result["combination_idx"],
-                    "pair_indices": combo_result["pair_indices"],
+                    "cycling_indices": combo_result["cycling_indices"],
                     "is_counterfactual": combo_result["is_counterfactual"],
+                    "counterfactual_type": combo_result.get(
+                        "counterfactual_type", "original"
+                    ),
+                    "augmentation_group": combo_result.get(
+                        "augmentation_group", "original"
+                    ),
                     "perfect_accuracy": combo_result["perfect_accuracy"],
                     "pixel_accuracy": combo_result["pixel_accuracy"],
                     "near_miss_accuracy": combo_result["near_miss_accuracy"],
@@ -1234,9 +1339,13 @@ def test_all_combinations(
     preserve_background=True,
     augmentation_seed=42,
     enable_counterfactuals=False,
+    counterfactual_Y=True,
+    counterfactual_X=True,
     counterfactual_transform="rotate_90",
     selected_task_indices=None,
     test_all_test_pairs=False,
+    enable_cycling=True,
+    device=None,
 ):
     """test all possible combinations of train examples for rule latent creation.
 
@@ -1252,17 +1361,25 @@ def test_all_combinations(
         preserve_background: Whether to preserve background color
         augmentation_seed: Random seed for augmentation
         test_all_test_pairs: Whether to evaluate on all test examples for each combination
+        device: Device to run evaluation on (defaults to config.device)
     """
     if noise_config is None:
         noise_config = NoiseConfig()
+
+    if device is None:
+        device = config.device
 
     # Set deterministic training for reproducible results
     config.set_deterministic_training()
 
     results = []
 
-    # Create augmented dataset if either color augmentation or counterfactuals are enabled
-    if enable_color_augmentation or enable_counterfactuals:
+    # Create augmented dataset if any augmentation options are enabled
+    if (
+        enable_color_augmentation
+        or enable_counterfactuals
+        or enable_cycling != config.use_cycling
+    ):
         # Create a copy of the config with both augmentations enabled if needed
         augmented_config = Config()
         augmented_config.__dict__.update(config.__dict__)  # Copy all config values
@@ -1275,7 +1392,12 @@ def test_all_combinations(
 
         if enable_counterfactuals:
             augmented_config.enable_counterfactuals = True
+            augmented_config.counterfactual_Y = counterfactual_Y
+            augmented_config.counterfactual_X = counterfactual_X
             augmented_config.counterfactual_transform = counterfactual_transform
+
+        # Apply cycling setting
+        augmented_config.use_cycling = enable_cycling
 
         # Create augmented dataset with both augmentations
         task_indices = (
@@ -1286,7 +1408,9 @@ def test_all_combinations(
         dataset = TaskSubset(
             task_indices=task_indices,
             config=augmented_config,
-            arc_agi1_dir=config.arc_agi1_dir,
+            arc_agi1_dir=str(
+                dataset.raw_data_dir
+            ),  # Use the original dataset's data directory
             holdout=True,
             use_first_combination_only=False,
         )
@@ -1320,14 +1444,18 @@ def test_all_combinations(
             for combo in task_combinations:
                 # Extract combination data
                 combo_idx = combo["combination_idx"]
-                i, j = combo["pair_indices"]
-                is_counterfactual = combo["is_counterfactual"]
+                cycling_indices = combo["cycling_indices"]
+                i, j, k = cycling_indices
+                # Use the counterfactual_type directly from the combination data
+                counterfactual_type = combo.get("counterfactual_type", "original")
+                is_counterfactual = counterfactual_type != "original"
 
                 # Get the preprocessed data from the combination
                 support_examples = combo["support_examples"]
                 test_examples = combo["test_examples"]
                 num_test_examples = combo["num_test_examples"]
                 holdout_example = combo.get("holdout_example")
+                target_example = combo.get("target_example")
 
                 # Apply noise to training examples if requested
                 if (
@@ -1349,6 +1477,16 @@ def test_all_combinations(
                         noise_config.noise_test_range,
                         noise_config.noise_test_ratio,
                     )
+
+                    # Also apply noise to target_example if it exists
+                    if target_example is not None:
+                        target_example["input"] = generate_noise_tensor(
+                            target_example["input"],
+                            noise_config.noise_test_type,
+                            noise_config.noise_test_std,
+                            noise_config.noise_test_range,
+                            noise_config.noise_test_ratio,
+                        )
 
                 # Determine model type and handle accordingly
                 is_patch_model = hasattr(model, "patch_tokenizer")
@@ -1409,23 +1547,23 @@ def test_all_combinations(
                         for test_idx, test_example in enumerate(test_examples):
                             if is_patch_model or is_transformer_model:
                                 # Patch model or Transformer model - use direct forward pass
-                                support1_input = support_examples[0]["input"].squeeze(
-                                    1
+                                support1_input = (
+                                    support_examples[0]["input"].squeeze(1).to(device)
                                 )  # [1, 30, 30]
-                                support1_output = support_examples[0]["output"].squeeze(
-                                    1
+                                support1_output = (
+                                    support_examples[0]["output"].squeeze(1).to(device)
                                 )  # [1, 30, 30]
-                                support2_input = support_examples[1]["input"].squeeze(
-                                    1
+                                support2_input = (
+                                    support_examples[1]["input"].squeeze(1).to(device)
                                 )  # [1, 30, 30]
-                                support2_output = support_examples[1]["output"].squeeze(
-                                    1
+                                support2_output = (
+                                    support_examples[1]["output"].squeeze(1).to(device)
                                 )  # [1, 30, 30]
 
                                 # Ensure test input is properly formatted for patch model
                                 # test_example["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
-                                test_input_clean = test_example["input"].squeeze(
-                                    1
+                                test_input_clean = (
+                                    test_example["input"].squeeze(1).to(device)
                                 )  # [1, 30, 30]
 
                                 if is_transformer_model:
@@ -1538,12 +1676,19 @@ def test_all_combinations(
                                     ),
                                 }
 
+                            # Get augmentation group for this combination
+                            augmentation_group = get_combination_augmentation_group(
+                                dataset, task_idx, combo
+                            )
+
                             task_results.append(
                                 {
                                     "combination_idx": combo_idx,
-                                    "pair_indices": (i, j),
+                                    "cycling_indices": (i, j, k),
                                     "is_counterfactual": is_counterfactual,
+                                    "counterfactual_type": counterfactual_type,
                                     "test_example_idx": test_idx,
+                                    "augmentation_group": augmentation_group,
                                     "perfect_accuracy": metrics["perfect_accuracy"],
                                     "pixel_accuracy": metrics["pixel_accuracy"],
                                     "near_miss_accuracy": metrics["near_miss_accuracy"],
@@ -1556,8 +1701,13 @@ def test_all_combinations(
                         # Skip the normal result creation since we created separate results above
                         continue
                     else:
-                        # Use first test example (original behavior)
-                        target = test_examples[0]
+                        # Use target_example from cycling format
+                        if target_example:
+                            target = target_example
+                        else:
+                            raise ValueError(
+                                "❌ target_example not found in cycling format - this should not happen"
+                            )
                         if is_patch_model or is_transformer_model:
                             # Patch model or Transformer model - use direct forward pass
                             support1_input = support_examples[0]["input"].squeeze(
@@ -1575,7 +1725,9 @@ def test_all_combinations(
 
                             # Ensure test input is properly formatted for patch model
                             # target["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
-                            test_input_clean = target["input"].squeeze(1)  # [1, 30, 30]
+                            test_input_clean = (
+                                target["input"].squeeze(1).to(device)
+                            )  # [1, 30, 30]
 
                             if is_transformer_model:
                                 logits = forward_transformer_with_noise(
@@ -1606,23 +1758,25 @@ def test_all_combinations(
                     target = holdout_example
                     if is_patch_model or is_transformer_model:
                         # Patch model or Transformer model - use direct forward pass
-                        support1_input = support_examples[0]["input"].squeeze(
-                            1
+                        support1_input = (
+                            support_examples[0]["input"].squeeze(1).to(device)
                         )  # [1, 30, 30]
-                        support1_output = support_examples[0]["output"].squeeze(
-                            1
+                        support1_output = (
+                            support_examples[0]["output"].squeeze(1).to(device)
                         )  # [1, 30, 30]
-                        support2_input = support_examples[1]["input"].squeeze(
-                            1
+                        support2_input = (
+                            support_examples[1]["input"].squeeze(1).to(device)
                         )  # [1, 30, 30]
-                        support2_output = support_examples[1]["output"].squeeze(
-                            1
+                        support2_output = (
+                            support_examples[1]["output"].squeeze(1).to(device)
                         )  # [1, 30, 30]
 
                         # Ensure test input is properly formatted for patch model
                         # target["input"] is [1, 1, 30, 30], we need [1, 30, 30]
                         # target["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
-                        test_input_clean = target["input"].squeeze(1)  # [1, 30, 30]
+                        test_input_clean = (
+                            target["input"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
 
                         if is_transformer_model:
                             logits = forward_transformer_with_noise(
@@ -1648,27 +1802,34 @@ def test_all_combinations(
                     predictions = torch.argmax(logits, dim=1).squeeze(0)
                     metrics = calculate_accuracy_metrics(predictions, target["output"])
                 else:
-                    # Fallback to first test example
-                    target = test_examples[0]
+                    # Use target_example from cycling format
+                    if target_example:
+                        target = target_example
+                    else:
+                        raise ValueError(
+                            "❌ target_example not found in cycling format - this should not happen"
+                        )
                     if is_patch_model or is_transformer_model:
                         # Patch model or Transformer model - use direct forward pass
-                        support1_input = support_examples[0]["input"].squeeze(
-                            1
+                        support1_input = (
+                            support_examples[0]["input"].squeeze(1).to(device)
                         )  # [1, 30, 30]
-                        support1_output = support_examples[0]["output"].squeeze(
-                            1
+                        support1_output = (
+                            support_examples[0]["output"].squeeze(1).to(device)
                         )  # [1, 30, 30]
-                        support2_input = support_examples[1]["input"].squeeze(
-                            1
+                        support2_input = (
+                            support_examples[1]["input"].squeeze(1).to(device)
                         )  # [1, 30, 30]
-                        support2_output = support_examples[1]["output"].squeeze(
-                            1
+                        support2_output = (
+                            support_examples[1]["output"].squeeze(1).to(device)
                         )  # [1, 30, 30]
 
                         # Ensure test input is properly formatted for patch model
                         # target["input"] is [1, 1, 30, 30], we need [1, 30, 30]
                         # target["input"] is [1, 1, 30, 30], we need [1, 30, 30] for the model
-                        test_input_clean = target["input"].squeeze(1)  # [1, 30, 30]
+                        test_input_clean = (
+                            target["input"].squeeze(1).to(device)
+                        )  # [1, 30, 30]
 
                         if is_transformer_model:
                             logits = forward_transformer_with_noise(
@@ -1754,6 +1915,13 @@ def test_all_combinations(
                     "num_test_examples": num_test_examples,
                 }
 
+                # Add target_example for cycling format visualization
+                if target_example:
+                    sample_data["target_example"] = {
+                        "input": tensor_to_grayscale_numpy(target_example["input"]),
+                        "output": tensor_to_grayscale_numpy(target_example["output"]),
+                    }
+
                 # Add holdout data if available
                 if holdout_example is not None:
                     sample_data["holdout_example"] = {
@@ -1761,11 +1929,18 @@ def test_all_combinations(
                         "output": tensor_to_grayscale_numpy(holdout_example["output"]),
                     }
 
+                # Get augmentation group for this combination
+                augmentation_group = get_combination_augmentation_group(
+                    dataset, task_idx, combo
+                )
+
                 task_results.append(
                     {
                         "combination_idx": combo_idx,
-                        "pair_indices": (i, j),
-                        "is_counterfactual": is_counterfactual,  # Add counterfactual flag
+                        "cycling_indices": (i, j, k),
+                        "is_counterfactual": is_counterfactual,
+                        "counterfactual_type": counterfactual_type,  # Add counterfactual flag
+                        "augmentation_group": augmentation_group,
                         "perfect_accuracy": metrics["perfect_accuracy"],
                         "pixel_accuracy": metrics["pixel_accuracy"],
                         "near_miss_accuracy": metrics["near_miss_accuracy"],
@@ -1783,8 +1958,14 @@ def test_all_combinations(
                         "global_task_index": global_task_index,
                         "task_id": task_data["task_id"],
                         "combination_idx": combo_result["combination_idx"],
-                        "pair_indices": combo_result["pair_indices"],
+                        "cycling_indices": combo_result["cycling_indices"],
                         "is_counterfactual": combo_result["is_counterfactual"],
+                        "counterfactual_type": combo_result.get(
+                            "counterfactual_type", "original"
+                        ),
+                        "augmentation_group": combo_result.get(
+                            "augmentation_group", "original"
+                        ),
                         "test_example_idx": combo_result.get(
                             "test_example_idx"
                         ),  # Add test example index
@@ -1952,7 +2133,9 @@ def main():
         # Create model with the loaded config
         model = create_model(config)
         model.load_state_dict(checkpoint["model_state_dict"])
+        model.to(config.device)
         model.eval()
+        device = config.device
         st.sidebar.success("✅ model loaded successfully")
 
     except Exception as e:
@@ -1961,6 +2144,7 @@ def main():
 
     config.use_color_relabeling = False
     config.enable_counterfactuals = False
+    config.use_cycling = True  # Default value, will be updated from sidebar
     dataset = create_dataset(
         config.arc_agi1_dir, config, holdout=True, use_first_combination_only=False
     )
@@ -2348,6 +2532,16 @@ def main():
             help="random seed for reproducible color relabeling",
         )
 
+    st.sidebar.subheader("cycling combinations")
+    enable_cycling = st.sidebar.checkbox(
+        "enable cycling",
+        value=True,
+        help="enable cycling combinations: (A,B)->T, (A,T)->B, (T,B)->A. Disable for simple (A,B)->T only.",
+    )
+
+    # Update config with cycling setting
+    config.use_cycling = enable_cycling
+
     st.sidebar.subheader("counterfactual analysis")
     enable_counterfactuals = st.sidebar.checkbox(
         "enable counterfactuals",
@@ -2355,13 +2549,25 @@ def main():
         help="include counterfactual (rotated) examples in evaluation",
     )
 
+    counterfactual_Y = True
+    counterfactual_X = True
     counterfactual_transform = "rotate_90"
     if enable_counterfactuals:
+        counterfactual_Y = st.sidebar.checkbox(
+            "counterfactual Y (output)",
+            value=True,
+            help="apply transformation to output (Y) - original behavior",
+        )
+        counterfactual_X = st.sidebar.checkbox(
+            "counterfactual X (input)",
+            value=True,
+            help="apply transformation to input (X) - new feature",
+        )
         counterfactual_transform = st.sidebar.selectbox(
             "counterfactual transform",
             ["rotate_90", "rotate_180", "rotate_270", "reflect_h", "reflect_v"],
             index=0,
-            help="type of transformation to apply to outputs",
+            help="type of transformation to apply",
         )
 
     # Update dataset based on options if needed
@@ -2472,9 +2678,13 @@ def main():
                 preserve_background,
                 augmentation_seed,
                 enable_counterfactuals,
+                counterfactual_Y,
+                counterfactual_X,
                 counterfactual_transform,
                 selected_task_indices=task_indices,
                 test_all_test_pairs=test_all_test_pairs,
+                enable_cycling=enable_cycling,
+                device=device,
             )
             st.session_state.combination_results = results
         else:
@@ -2534,9 +2744,13 @@ def main():
                 preserve_background,
                 augmentation_seed,
                 enable_counterfactuals,
+                counterfactual_Y,
+                counterfactual_X,
                 counterfactual_transform,
                 selected_task_indices=task_indices,
                 test_all_test_pairs=test_all_test_pairs,
+                enable_cycling=enable_cycling,
+                device=device,
             )
             st.session_state.evaluation_results = results
 
@@ -2544,6 +2758,7 @@ def main():
         st.session_state.evaluation_mode = evaluation_mode
         st.session_state.test_combinations = test_combinations
         st.session_state.test_all_test_pairs = test_all_test_pairs
+        st.session_state.enable_cycling = enable_cycling
         st.session_state.inject_noise = inject_noise
         st.session_state.noise_type = noise_type
         st.session_state.noise_std = noise_std
@@ -2579,6 +2794,8 @@ def main():
         st.session_state.preserve_background = preserve_background
         st.session_state.augmentation_seed = augmentation_seed
         st.session_state.enable_counterfactuals = enable_counterfactuals
+        st.session_state.counterfactual_Y = counterfactual_Y
+        st.session_state.counterfactual_X = counterfactual_X
         st.session_state.counterfactual_transform = counterfactual_transform
 
         progress_bar.empty()
@@ -2669,7 +2886,21 @@ def main():
             counterfactual_transform = st.session_state.get(
                 "counterfactual_transform", "rotate_90"
             )
-            counterfactual_info = f" (counterfactuals: {counterfactual_transform})"
+            counterfactual_Y = st.session_state.get("counterfactual_Y", True)
+            counterfactual_X = st.session_state.get("counterfactual_X", True)
+
+            counterfactual_types = []
+            if counterfactual_Y:
+                counterfactual_types.append("Y")
+            if counterfactual_X:
+                counterfactual_types.append("X")
+
+            if counterfactual_types:
+                counterfactual_info = f" (counterfactuals: {counterfactual_transform}, types: {', '.join(counterfactual_types)})"
+            else:
+                counterfactual_info = (
+                    f" (counterfactuals: {counterfactual_transform}, types: none)"
+                )
 
         # Add test pairs info if applicable
         test_pairs_info = ""
@@ -2685,24 +2916,30 @@ def main():
         for result in results:
             task_id_display = result["task_id"]
             if result.get("is_counterfactual", False):
-                task_id_display += " (counterfactual)"
+                counterfactual_type = result.get("counterfactual_type", "original")
+                task_id_display += f" (counterfactual {counterfactual_type})"
 
             # Add combination info if available
             combination_info = ""
             if "combination_idx" in result:
                 combination_info = f" - combo {result['combination_idx']}"
-                if "pair_indices" in result:
-                    combination_info += f" {result['pair_indices']}"
+                if "cycling_indices" in result:
+                    combination_info += f" {result['cycling_indices']}"
 
             # Add test example info if available
             test_example_info = ""
             if "test_example_idx" in result:
                 test_example_info = f" - test {result['test_example_idx']}"
 
+            # Add augmentation group info
+            augmentation_group = result.get("augmentation_group", "unknown")
+            group_display = f"[{augmentation_group}]"
+
             df_data.append(
                 {
                     "idx": result["global_task_index"],
                     "task_id": task_id_display + combination_info + test_example_info,
+                    "group": group_display,
                     "perfect": f"{result['perfect_accuracy']:.3f}",
                     "pixel": f"{result['pixel_accuracy']:.3f}",
                     "near_miss": f"{result['near_miss_accuracy']:.3f}",
@@ -2790,20 +3027,11 @@ def main():
                 )
                 st.pyplot(fig)
             else:
-                # Old format - extract from batch
-                batch = selected_task["batch"]
-                sample_idx = selected_task[
-                    "batch_sample_idx"
-                ]  # Use stored batch sample index
-
-                evaluation_mode = st.session_state.get("evaluation_mode", "test")
-                sample_data = extract_sample_from_batch(
-                    batch, sample_idx, evaluation_mode
+                # This should not happen in cycling format
+                st.error(
+                    "❌ Old format detected - this should not happen with cycling format"
                 )
-                fig = visualize_prediction_comparison(
-                    sample_data, selected_task["predictions"], evaluation_mode
-                )
-                st.pyplot(fig)
+                st.stop()
 
             # show detailed metrics
             st.subheader("📈 detailed metrics")
@@ -2881,7 +3109,21 @@ def main():
             counterfactual_transform = st.session_state.get(
                 "counterfactual_transform", "rotate_90"
             )
-            counterfactual_info = f" (counterfactuals: {counterfactual_transform})"
+            counterfactual_Y = st.session_state.get("counterfactual_Y", True)
+            counterfactual_X = st.session_state.get("counterfactual_X", True)
+
+            counterfactual_types = []
+            if counterfactual_Y:
+                counterfactual_types.append("Y")
+            if counterfactual_X:
+                counterfactual_types.append("X")
+
+            if counterfactual_types:
+                counterfactual_info = f" (counterfactuals: {counterfactual_transform}, types: {', '.join(counterfactual_types)})"
+            else:
+                counterfactual_info = (
+                    f" (counterfactuals: {counterfactual_transform}, types: none)"
+                )
 
         # Add test pairs info if applicable
         test_pairs_info = ""
@@ -2898,21 +3140,25 @@ def main():
 
         for result in results:
             # Build combination string
-            combination_str = (
-                f"({result['pair_indices'][0]}, {result['pair_indices'][1]})"
-            )
+            combination_str = f"({result['cycling_indices'][0]}, {result['cycling_indices'][1]}) -> {result['cycling_indices'][2]}"
             if result.get("is_counterfactual", False):
-                combination_str += " (counterfactual)"
+                counterfactual_type = result.get("counterfactual_type", "original")
+                combination_str += f" (counterfactual {counterfactual_type})"
 
             # Add test example info if available
             if "test_example_idx" in result:
                 combination_str += f" - test {result['test_example_idx']}"
+
+            # Add augmentation group info
+            augmentation_group = result.get("augmentation_group", "unknown")
+            group_display = f"[{augmentation_group}]"
 
             combo_df_data.append(
                 {
                     "idx": result["global_task_index"],  # Global task index
                     "task_id": result["task_id"],  # Task ID (filename)
                     "combination": combination_str,
+                    "group": group_display,
                     "perfect": f"{result['perfect_accuracy']:.3f}",
                     "pixel": f"{result['pixel_accuracy']:.3f}",
                     "near_miss": f"{result['near_miss_accuracy']:.3f}",
@@ -3060,14 +3306,14 @@ def main():
                 col1, col2 = st.columns(2)
                 with col1:
                     st.write(f"**Task ID:** {selected_task['task_id']}")
-                    combination_display = f"{selected_combo['pair_indices']}"
+                    combination_display = f"{selected_combo['cycling_indices']}"
                     if selected_combo.get("is_counterfactual", False):
                         combination_display += " (counterfactual)"
                     st.write(f"**Combination:** {combination_display}")
                     st.write(f"**Evaluation Mode:** {evaluation_mode}")
                 with col2:
                     st.write(
-                        f"**Training Examples Used:** {selected_combo['pair_indices'][0]} and {selected_combo['pair_indices'][1]}"
+                        f"**Training Examples Used:** {selected_combo['cycling_indices'][0]} and {selected_combo['cycling_indices'][1]} -> {selected_combo['cycling_indices'][2]}"
                     )
                     st.write(
                         f"**Status:** {'✅ perfect' if selected_combo['perfect_accuracy'] == 1.0 else '⚠️ partial' if selected_combo['pixel_accuracy'] > 0.5 else '❌ failed'}"

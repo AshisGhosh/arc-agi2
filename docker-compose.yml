@@ -24,6 +24,7 @@ services:
     ports:
       - "8502:8502"  # Streamlit dataset viewer
       - "8503:8503"  # Streamlit model predictions viewer
+      - "8504:8504"  # Streamlit detailed model analysis
     deploy:
       resources:
         reservations:

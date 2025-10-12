@@ -58,6 +58,119 @@ def convert_grayscale_to_rgb(support_examples, config):
     return rgb_examples
 
 
+def analyze_augmentation_groups(dataset, task_idx, combinations):
+    """Analyze which augmentation group each combination belongs to."""
+    task = dataset.tasks[task_idx]
+
+    # Get groups for different counterfactual types
+    groups_original = dataset._get_examples_by_augmentation_group(task, "original")
+    groups_y = (
+        dataset._get_examples_by_augmentation_group(task, "Y")
+        if dataset.config.enable_counterfactuals
+        else {}
+    )
+    groups_x = (
+        dataset._get_examples_by_augmentation_group(task, "X")
+        if dataset.config.enable_counterfactuals
+        else {}
+    )
+
+    group_counts = {
+        "original": 0,
+        "augmented": 0,
+        "counterfactual": 0,
+        "counterfactual_augmented": 0,
+        "mixed": 0,
+    }
+
+    original_count = 0
+    augmented_count = 0
+    counterfactual_count = 0
+    mixed_count = 0
+
+    for combo in combinations:
+        indices = combo["cycling_indices"]
+        i, j, k = indices
+        is_counterfactual = combo.get("is_counterfactual", False)
+        counterfactual_type = combo.get("counterfactual_type", "original")
+
+        # Determine which group this combination belongs to
+        if is_counterfactual:
+            if counterfactual_type == "Y":
+                groups = groups_y
+            elif counterfactual_type == "X":
+                groups = groups_x
+            else:
+                groups = groups_original
+        else:
+            groups = groups_original
+
+        # Calculate group boundaries (same logic as in dataset)
+        original_size = len(groups.get("original", []))
+        augmented_size = len(groups.get("augmented", []))
+
+        # Determine which group based on indices (same logic as in dataset)
+        # Check if any training example indices are in the augmented range
+        has_augmented_training = (
+            (i >= original_size and i < (original_size + augmented_size))
+            or (j >= original_size and j < (original_size + augmented_size))
+            or (k >= original_size and k < (original_size + augmented_size))
+        )
+
+        if has_augmented_training:
+            # This is an augmented group combination
+            group_found = "augmented"
+        else:
+            # This is an original group combination
+            group_found = "original"
+
+        if is_counterfactual:
+            if "augmented" in group_found:
+                group_counts["counterfactual_augmented"] += 1
+            else:
+                group_counts["counterfactual"] += 1
+            counterfactual_count += 1
+        else:
+            if "augmented" in group_found:
+                group_counts["augmented"] += 1
+                augmented_count += 1
+            else:
+                group_counts["original"] += 1
+                original_count += 1
+
+    return {
+        "group_counts": group_counts,
+        "original_count": original_count,
+        "augmented_count": augmented_count,
+        "counterfactual_count": counterfactual_count,
+        "mixed_count": mixed_count,
+    }
+
+
+def get_combination_group_info(dataset, task_idx, combination):
+    """Get augmentation group information for a specific combination."""
+    from visualization_utils import get_combination_augmentation_group
+
+    group_found = get_combination_augmentation_group(dataset, task_idx, combination)
+
+    # Get the groups for additional info
+    task = dataset.tasks[task_idx]
+    is_counterfactual = combination.get("is_counterfactual", False)
+    counterfactual_type = combination.get("counterfactual_type", "original")
+
+    if is_counterfactual:
+        if counterfactual_type == "Y":
+            groups = dataset._get_examples_by_augmentation_group(task, "Y")
+        elif counterfactual_type == "X":
+            groups = dataset._get_examples_by_augmentation_group(task, "X")
+        else:
+            groups = dataset._get_examples_by_augmentation_group(task, "original")
+    else:
+        groups = dataset._get_examples_by_augmentation_group(task, "original")
+
+    return group_found, groups
+
+
 def main():
     """main streamlit app."""
     st.title("🔍 arc dataset viewer")
@@ -142,6 +255,14 @@ def main():
             help="type of transformation to apply to outputs",
         )
 
+    # cycling options
+    st.sidebar.subheader("cycling combinations")
+    enable_cycling = st.sidebar.checkbox(
+        "enable cycling",
+        value=True,
+        help="enable cycling combinations: (A,B)->T, (A,T)->B, (T,B)->A. Disable for simple (A,B)->T only.",
+    )
+
     # load dataset
     try:
         config = Config()
@@ -155,6 +276,7 @@ def main():
         config.random_seed = augmentation_seed
         config.enable_counterfactuals = enable_counterfactuals
         config.counterfactual_transform = counterfactual_transform
+        config.use_cycling = enable_cycling
 
         with st.spinner(f"loading {dataset_choice} dataset..."):
             try:
@@ -163,7 +285,9 @@ def main():
                         config.arc_agi1_dir, config, holdout=holdout_mode
                     )
                 else:
-                    dataset = create_dataset(config.processed_dir, config)
+                    dataset = create_dataset(
+                        config.processed_dir, config, holdout=holdout_mode
+                    )
             except Exception as e:
                 st.error(f"❌ error during dataset initialization: {e}")
                 st.error(f"error type: {type(e).__name__}")
@@ -332,12 +456,67 @@ def main():
             st.write(f"counterfactual: {counterfactual_count}")
             st.write(f"original: {len(combinations) - counterfactual_count}")
 
+            # Show test augmentation info
+            if enable_color_augmentation:
+                st.write("**test augmentation**")
+                st.write("✅ test examples augmented")
+                st.write("(consistent with training)")
+
         with col3:
             st.write("**augmentation status**")
             st.write(f"color relabeling: {'✅' if enable_color_augmentation else '❌'}")
             st.write(f"counterfactuals: {'✅' if enable_counterfactuals else '❌'}")
+            st.write(f"cycling: {'✅' if enable_cycling else '❌'}")
             if enable_color_augmentation:
                 st.write(f"variants: {augmentation_variants}")
+
+            # Show cycling info
+            if enable_cycling:
+                st.write("**cycling patterns**")
+                st.write("✅ (A,B)->T, (A,T)->B, (T,B)->A")
+            else:
+                st.write("**simple patterns**")
+                st.write("✅ (A,B)->T only")
+
+            # Show augmentation group separation info
+            if enable_color_augmentation:
+                st.write("**group separation**")
+                st.write("✅ groups properly separated")
+                st.write("(no mixing within combinations)")
+
+    # augmentation group analysis
+    if enable_color_augmentation and combinations:
+        st.subheader("🔀 augmentation group analysis")
+
+        # Analyze combinations by group
+        group_analysis = analyze_augmentation_groups(
+            dataset, actual_task_idx, combinations
+        )
+
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            st.metric("original group", group_analysis["original_count"])
+        with col2:
+            st.metric("augmented group", group_analysis["augmented_count"])
+        with col3:
+            st.metric("counterfactual group", group_analysis["counterfactual_count"])
+        with col4:
+            st.metric("mixed groups", group_analysis["mixed_count"])
+
+        # Show group separation status
+        if group_analysis["mixed_count"] == 0:
+            st.success("✅ Perfect group separation - no mixing detected!")
+        else:
+            st.error(
+                f"⚠️ Found {group_analysis['mixed_count']} combinations with mixed groups"
+            )
+
+        # Show group breakdown
+        st.write("**Group breakdown:**")
+        for group_name, count in group_analysis["group_counts"].items():
+            if count > 0:
+                st.write(f"- {group_name}: {count} combinations")
 
     # combination selection
     if combinations:
@@ -346,11 +525,38 @@ def main():
         # create combination options
         combo_options = []
         for i, combo in enumerate(combinations):
-            pair_indices = combo["pair_indices"]
+            # Cycling format with cycling_indices
+            indices = combo["cycling_indices"]
+
+            # Show different patterns based on cycling setting
+            if enable_cycling:
+                # Show the actual cycling pattern
+                if indices[2] < 0:  # Test example as target
+                    indices_str = f"({indices[0]}, {indices[1]}) -> T{abs(indices[2])}"
+                elif indices[1] < 0:  # Test example as support
+                    indices_str = f"({indices[0]}, T{abs(indices[1])}) -> {indices[2]}"
+                elif indices[0] < 0:  # Test example as first support
+                    indices_str = f"(T{abs(indices[0])}, {indices[1]}) -> {indices[2]}"
+                else:
+                    indices_str = f"({indices[0]}, {indices[1]}) -> {indices[2]}"
+            else:
+                # Simple pattern only
+                indices_str = f"({indices[0]}, {indices[1]}) -> T{abs(indices[2]) if indices[2] < 0 else indices[2]}"
+
             is_counterfactual = combo.get("is_counterfactual", False)
             counterfactual_marker = " (counterfactual)" if is_counterfactual else ""
+
+            # Get group information for this combination
+            if enable_color_augmentation:
+                group_found, _ = get_combination_group_info(
+                    dataset, actual_task_idx, combo
+                )
+                group_marker = f" [{group_found}]"
+            else:
+                group_marker = ""
+
             combo_options.append(
-                f"combination {combo['combination_idx']}: {pair_indices}{counterfactual_marker}"
+                f"combination {combo['combination_idx']}: {indices_str}{counterfactual_marker}{group_marker}"
             )
 
         selected_combo_idx = st.selectbox(
@@ -397,14 +603,56 @@ def main():
         with col1:
             st.write("**combination info**")
             st.write(f"combination index: {selected_combo['combination_idx']}")
-            st.write(f"pair indices: {selected_combo['pair_indices']}")
+
+            # Display cycling indices
+            cycling_indices = selected_combo["cycling_indices"]
+
+            # Show pattern based on cycling setting
+            if enable_cycling:
+                if cycling_indices[2] < 0:  # Test example as target
+                    pattern_str = f"({cycling_indices[0]}, {cycling_indices[1]}) -> T{abs(cycling_indices[2])}"
+                    pattern_desc = "format: (support1, support2) -> test_target"
+                elif cycling_indices[1] < 0:  # Test example as support
+                    pattern_str = f"({cycling_indices[0]}, T{abs(cycling_indices[1])}) -> {cycling_indices[2]}"
+                    pattern_desc = "format: (support1, test_target) -> support2"
+                elif cycling_indices[0] < 0:  # Test example as first support
+                    pattern_str = f"(T{abs(cycling_indices[0])}, {cycling_indices[1]}) -> {cycling_indices[2]}"
+                    pattern_desc = "format: (test_target, support2) -> support1"
+                else:
+                    pattern_str = f"({cycling_indices[0]}, {cycling_indices[1]}) -> {cycling_indices[2]}"
+                    pattern_desc = "format: (support1, support2) -> target"
+            else:
+                pattern_str = f"({cycling_indices[0]}, {cycling_indices[1]}) -> T{abs(cycling_indices[2]) if cycling_indices[2] < 0 else cycling_indices[2]}"
+                pattern_desc = "format: (support1, support2) -> test_target (simple)"
+
+            st.write(f"pattern: {pattern_str}")
+            st.write(pattern_desc)
+
             st.write(
                 f"is counterfactual: {'✅' if selected_combo.get('is_counterfactual', False) else '❌'}"
             )
 
+            # Show augmentation group information
+            if enable_color_augmentation:
+                group_found, groups = get_combination_group_info(
+                    dataset, actual_task_idx, selected_combo
+                )
+                st.write(f"**augmentation group: {group_found}**")
+
+                # Show group sizes
+                st.write("**group sizes:**")
+                for group_name, group_examples in groups.items():
+                    if len(group_examples) > 0:
+                        st.write(f"- {group_name}: {len(group_examples)} examples")
+
         with col2:
             st.write("**data structure**")
             st.write("support examples: 2")
+
+            # Cycling format
+            st.write("target example: 1 (cycling)")
+            st.write("format: support1 + support2 -> target")
+
             st.write(f"test examples: {task_data.get('num_test_examples', 1)}")
             if task_data.get("holdout_example") is not None:
                 st.write("holdout example: 1")
@@ -424,6 +672,17 @@ def main():
                 )
             else:
                 st.write("❌ no holdout data")
+
+            # Show group separation status
+            if enable_color_augmentation:
+                st.write("**group separation**")
+                group_found, _ = get_combination_group_info(
+                    dataset, actual_task_idx, selected_combo
+                )
+                if group_found == "mixed":
+                    st.write("⚠️ mixed groups")
+                else:
+                    st.write(f"✅ {group_found} group")
 
         # test examples display
         st.subheader("🧪 test examples")
@@ -467,6 +726,41 @@ def main():
                             plt.close(fig)
         else:
             st.write("❌ no test examples available")
+
+        # target example display (for cycling format)
+        if "target_example" in task_data:
+            st.subheader("🎯 target example (cycling)")
+            st.write(
+                "This is the target that the model should predict using the two support examples above."
+            )
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.write("**target input**")
+                target_input_np = tensor_to_grayscale_numpy(
+                    task_data["target_example"]["input"]
+                )
+                rgb_target_input = apply_arc_color_palette(target_input_np)
+                fig, ax = plt.subplots(1, 1, figsize=(4, 4))
+                ax.imshow(rgb_target_input)
+                ax.set_title("target input", fontsize=12)
+                ax.axis("off")
+                st.pyplot(fig)
+                plt.close(fig)
+
+            with col2:
+                st.write("**target output**")
+                target_output_np = tensor_to_grayscale_numpy(
+                    task_data["target_example"]["output"]
+                )
+                rgb_target_output = apply_arc_color_palette(target_output_np)
+                fig, ax = plt.subplots(1, 1, figsize=(4, 4))
+                ax.imshow(rgb_target_output)
+                ax.set_title("target output", fontsize=12)
+                ax.axis("off")
+                st.pyplot(fig)
+                plt.close(fig)
 
         # holdout vs test comparison
         if has_holdout and holdout_mode and dataset_choice == "arc_agi1":
@@ -561,6 +855,16 @@ def main():
             st.write(f"- data type: {test_img.dtype}")
             st.write(f"- value range: [{test_img.min():.0f}, {test_img.max():.0f}]")
             st.write(f"- number of test examples: {num_test_examples}")
+
+            # Add target example stats if available
+            if "target_example" in task_data:
+                st.write("**target image (cycling)**")
+                target_img = task_data["target_example"]["input"]
+                st.write(f"- shape: {target_img.shape}")
+                st.write(f"- data type: {target_img.dtype}")
+                st.write(
+                    f"- value range: [{target_img.min():.0f}, {target_img.max():.0f}]"
+                )
 
         with col3:
             if has_holdout:

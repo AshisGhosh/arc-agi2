@@ -5,12 +5,11 @@ This module provides the ResNetARCDataset class that handles
 combination-based training for ResNet models.
 """
 
-import itertools
 import copy
 import torch
 from typing import List, Dict, Any, Tuple
 
-from .base_dataset import BaseARCDataset
+from .base_dataset import BaseARCDataset, ExampleRetriever
 from .augmentation_setup import setup_color_augmentation, get_augmentation_group
 from .counterfactuals import setup_counterfactuals
 
@@ -58,68 +57,6 @@ class ResNetARCDataset(BaseARCDataset):
         self.combinations = self._generate_combinations()
         self._create_combination_mapping()
 
-    def _generate_combinations(self) -> List[List[Tuple[int, int]]]:
-        """Generate all possible 2-combinations for rule latent creation."""
-        combinations = []
-
-        for task_idx, task in enumerate(self.tasks):
-            # Get original examples (already preserved in setup_color_augmentation)
-            original_examples = task["train"]
-
-            # Calculate total examples (including augmented if available)
-            if self.config.use_color_relabeling and "augmented_train" in task:
-                total_examples = len(original_examples) + len(task["augmented_train"])
-            else:
-                total_examples = len(original_examples)
-
-            # Generate combinations from all examples
-            if total_examples >= 2:
-                # For holdout mode, exclude the last original example from combinations
-                if self.holdout and len(original_examples) > 2:
-                    # Only use the first (len(original_examples) - 1) examples for combinations
-                    # This excludes the holdout example
-                    max_original_idx = len(original_examples) - 1
-                    if self.config.use_color_relabeling and "augmented_train" in task:
-                        # Augmented examples come after original examples
-                        max_idx = max_original_idx + len(task["augmented_train"])
-                    else:
-                        max_idx = max_original_idx
-
-                    # Generate combinations only from non-holdout examples
-                    task_combinations = list(itertools.combinations(range(max_idx), 2))
-                else:
-                    # Use all available examples for combinations
-                    task_combinations = list(
-                        itertools.combinations(range(total_examples), 2)
-                    )
-
-                # Add counterfactual combinations if enabled
-                if self.config.enable_counterfactuals:
-                    # Add counterfactual combinations
-                    # Mark them with a flag to indicate they're counterfactual
-                    counterfactual_combinations = [
-                        (combo[0], combo[1], True) for combo in task_combinations
-                    ]
-                    # Mark original combinations as not counterfactual
-                    original_combinations = [
-                        (combo[0], combo[1], False) for combo in task_combinations
-                    ]
-                    # Combine both
-                    task_combinations = (
-                        original_combinations + counterfactual_combinations
-                    )
-                else:
-                    # Original behavior - mark all as not counterfactual
-                    task_combinations = [
-                        (combo[0], combo[1], False) for combo in task_combinations
-                    ]
-
-                combinations.append(task_combinations)
-            else:
-                combinations.append([])
-
-        return combinations
-
     def _create_combination_mapping(self):
         """Create mapping from linear index to (task_idx, combination_idx) pairs."""
         self.combination_mapping = []
@@ -142,93 +79,117 @@ class ResNetARCDataset(BaseARCDataset):
         """Return total number of combinations across all valid tasks."""
         return len(self.combination_mapping)
 
-    def _get_combination_info(self, idx: int) -> Tuple[int, int, Tuple[int, int], bool]:
-        """Get task index, combination index, pair indices, and counterfactual flag."""
+    def _get_combination_info(
+        self, idx: int
+    ) -> Tuple[int, int, Tuple[int, int, int], str]:
+        """Get task index, combination index, cycling indices, and counterfactual type."""
         task_idx, combination_idx = self.combination_mapping[idx]
         task_combinations = self.combinations[task_idx]
-        pair_indices = task_combinations[combination_idx]
+        combination = task_combinations[combination_idx]
 
         # Check if this is a counterfactual combination
-        if len(pair_indices) == 3:  # (i, j, is_counterfactual)
-            i, j, is_counterfactual = pair_indices
+        if len(combination) == 4:  # (i, j, k, counterfactual_type)
+            i, j, k, counterfactual_type = combination
         else:
-            i, j = pair_indices
-            is_counterfactual = False
+            i, j, k = combination
+            counterfactual_type = "original"
 
-        return task_idx, combination_idx, (i, j), is_counterfactual
+        return task_idx, combination_idx, (i, j, k), counterfactual_type
 
-    def _get_all_examples(
-        self, task: Dict[str, Any], is_counterfactual: bool
-    ) -> List[Dict[str, Any]]:
-        """Get all available examples (original + augmented + counterfactual if applicable)."""
-        # Start with training examples, excluding holdout if holdout mode is enabled
-        if self.holdout and len(task["train"]) > 2:
-            # Exclude the last training example (holdout) from rule latent creation
-            all_examples = task["train"][:-1]
-        else:
-            all_examples = task["train"]
+    def _get_raw_example_by_index(
+        self,
+        all_examples: List[Dict[str, Any]],
+        idx: int,
+        counterfactual_type: str,
+        group_name: str,
+        task_idx: int,
+    ) -> Dict[str, Any]:
+        """Get raw example by index, handling both training and test examples."""
+        # Check if idx is a test example (negative index)
+        if idx < 0:
+            # This is a test example, get it from the task's test examples
+            task = self.tasks[task_idx]
+            test_idx = -(idx + 1)  # Convert -1 to 0, -2 to 1, etc.
 
-        if self.config.use_color_relabeling and "augmented_train" in task:
-            all_examples = all_examples + task["augmented_train"]
-
-        if is_counterfactual:
-            all_examples = all_examples + task["counterfactual_train"]
+            # Determine which test examples to use based on the group
             if (
-                self.config.use_color_relabeling
-                and "counterfactual_augmented_train" in task
+                group_name == "augmented"
+                and self.config.use_color_relabeling
+                and "augmented_test" in task
             ):
-                all_examples = all_examples + task["counterfactual_augmented_train"]
+                test_examples = task["augmented_test"]
+            else:
+                test_examples = task.get("test", [])
 
-        return all_examples
+            if test_idx < len(test_examples):
+                return test_examples[test_idx]
+            else:
+                # Fallback to first test example if index is out of range
+                return test_examples[0]
+        else:
+            # This is a training example (positive index)
+            # all_examples already contains the correct group's examples with adjusted indices
+            return all_examples[idx]
 
     def _create_support_examples(
         self,
         all_examples: List[Dict[str, Any]],
         i: int,
         j: int,
-        is_counterfactual: bool,
+        k: int,
+        counterfactual_type: str,
+        group_name: str = None,
+        task_idx: int = None,
     ) -> List[Dict[str, torch.Tensor]]:
         """Create support examples from examples i and j (always grayscale grid format)."""
-        if is_counterfactual:
-            # For counterfactual combinations, create counterfactual versions
-            ex1 = copy.deepcopy(all_examples[i])
-            ex2 = copy.deepcopy(all_examples[j])
+        # Get the actual examples for i and j, handling test examples
+        ex1 = self._get_example_by_index(
+            all_examples, i, counterfactual_type, group_name, task_idx
+        )
+        ex2 = self._get_example_by_index(
+            all_examples, j, counterfactual_type, group_name, task_idx
+        )
 
-            # Preprocess with counterfactual transformation (grayscale grid format)
-            ex1_processed = self._preprocess_grid(ex1, apply_counterfactual=True)
-            ex2_processed = self._preprocess_grid(ex2, apply_counterfactual=True)
-
-            return [ex1_processed, ex2_processed]
-        else:
-            # For non-counterfactual combinations, use original examples (grayscale grid format)
-            return [
-                self._preprocess_grid(all_examples[i]),
-                self._preprocess_grid(all_examples[j]),
-            ]
+        return [ex1, ex2]
 
     def _create_support_examples_rgb(
         self,
         all_examples: List[Dict[str, Any]],
         i: int,
         j: int,
-        is_counterfactual: bool,
+        k: int,
+        counterfactual_type: str,
+        group_name: str,
+        task_idx: int,
     ) -> List[Dict[str, torch.Tensor]]:
         """Create RGB support examples from examples i and j (for ResNet encoder)."""
-        if is_counterfactual:
+        # Get the actual examples for i and j, handling test examples
+        ex1_raw = self._get_raw_example_by_index(
+            all_examples, i, counterfactual_type, group_name, task_idx
+        )
+        ex2_raw = self._get_raw_example_by_index(
+            all_examples, j, counterfactual_type, group_name, task_idx
+        )
+
+        if counterfactual_type != "original":
             # For counterfactual combinations, create counterfactual versions
-            ex1 = copy.deepcopy(all_examples[i])
-            ex2 = copy.deepcopy(all_examples[j])
+            ex1 = copy.deepcopy(ex1_raw)
+            ex2 = copy.deepcopy(ex2_raw)
 
             # Preprocess with counterfactual transformation (RGB format)
-            ex1_processed = self._preprocess_rgb(ex1, apply_counterfactual=True)
-            ex2_processed = self._preprocess_rgb(ex2, apply_counterfactual=True)
+            ex1_processed = self._preprocess_rgb(
+                ex1, apply_counterfactual=True, counterfactual_type=counterfactual_type
+            )
+            ex2_processed = self._preprocess_rgb(
+                ex2, apply_counterfactual=True, counterfactual_type=counterfactual_type
+            )
 
             return [ex1_processed, ex2_processed]
         else:
             # For non-counterfactual combinations, use original examples (RGB format)
             return [
-                self._preprocess_rgb(all_examples[i]),
-                self._preprocess_rgb(all_examples[j]),
+                self._preprocess_rgb(ex1_raw),
+                self._preprocess_rgb(ex2_raw),
             ]
 
     def _create_support_targets(
@@ -236,17 +197,22 @@ class ResNetARCDataset(BaseARCDataset):
         all_examples: List[Dict[str, Any]],
         i: int,
         j: int,
-        is_counterfactual: bool,
+        k: int,
+        counterfactual_type: str,
     ) -> List[Dict[str, torch.Tensor]]:
         """Create support targets (ARC format) from examples i and j for decoder."""
-        if is_counterfactual:
+        if counterfactual_type != "original":
             # For counterfactual combinations, create counterfactual versions
             ex1 = copy.deepcopy(all_examples[i])
             ex2 = copy.deepcopy(all_examples[j])
 
             # Preprocess with counterfactual transformation for decoder
-            ex1_processed = self._preprocess_rgb(ex1, apply_counterfactual=True)
-            ex2_processed = self._preprocess_rgb(ex2, apply_counterfactual=True)
+            ex1_processed = self._preprocess_rgb(
+                ex1, apply_counterfactual=True, counterfactual_type=counterfactual_type
+            )
+            ex2_processed = self._preprocess_rgb(
+                ex2, apply_counterfactual=True, counterfactual_type=counterfactual_type
+            )
 
             return [ex1_processed, ex2_processed]
         else:
@@ -257,80 +223,150 @@ class ResNetARCDataset(BaseARCDataset):
             ]
 
     def _get_test_examples(
-        self, task: Dict[str, Any], is_counterfactual: bool
+        self, task: Dict[str, Any], counterfactual_type: str
     ) -> List[Dict[str, torch.Tensor]]:
         """Get all test examples (grayscale grid format)."""
         if (
-            is_counterfactual
+            counterfactual_type == "Y"
             and task.get("counterfactual_test")
             and len(task["counterfactual_test"]) > 0
         ):
             test_examples = []
             for test_example in task["counterfactual_test"]:
                 test_examples.append(
-                    self._preprocess_grid(test_example, apply_counterfactual=True)
+                    self._preprocess_grid(
+                        test_example, apply_counterfactual=True, counterfactual_type="Y"
+                    )
+                )
+            return test_examples
+        elif (
+            counterfactual_type == "X"
+            and task.get("counterfactual_X_test")
+            and len(task["counterfactual_X_test"]) > 0
+        ):
+            test_examples = []
+            for test_example in task["counterfactual_X_test"]:
+                test_examples.append(
+                    self._preprocess_grid(
+                        test_example, apply_counterfactual=True, counterfactual_type="X"
+                    )
                 )
             return test_examples
         else:
             test_examples = []
-            for test_example in task["test"]:
-                test_examples.append(self._preprocess_grid(test_example))
+            # Use augmented test examples if available and color augmentation is enabled
+            if self.config.use_color_relabeling and "augmented_test" in task:
+                for test_example in task["augmented_test"]:
+                    test_examples.append(self._preprocess_grid(test_example))
+            else:
+                # Fall back to original test examples
+                for test_example in task["test"]:
+                    test_examples.append(self._preprocess_grid(test_example))
             return test_examples
 
     def _get_holdout_example(
-        self, task: Dict[str, Any], is_counterfactual: bool
+        self, task: Dict[str, Any], counterfactual_type: str
     ) -> Dict[str, torch.Tensor]:
         """Get holdout example if available (grayscale grid format)."""
         if not self.holdout or len(task["train"]) <= 2:
             return None
 
-        if is_counterfactual and len(task.get("counterfactual_train", [])) > 2:
+        if counterfactual_type == "Y" and len(task.get("counterfactual_train", [])) > 2:
             return self._preprocess_grid(
-                task["counterfactual_train"][-1], apply_counterfactual=True
+                task["counterfactual_train"][-1],
+                apply_counterfactual=True,
+                counterfactual_type="Y",
+            )
+        elif (
+            counterfactual_type == "X"
+            and len(task.get("counterfactual_X_train", [])) > 2
+        ):
+            return self._preprocess_grid(
+                task["counterfactual_X_train"][-1],
+                apply_counterfactual=True,
+                counterfactual_type="X",
             )
         else:
             return self._preprocess_grid(task["train"][-1])
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        """Get sample by index - combination data for ResNet model."""
+        """Get sample by index - cycling combination data for ResNet model."""
         # Get combination information
-        task_idx, combination_idx, (i, j), is_counterfactual = (
+        task_idx, combination_idx, (i, j, k), counterfactual_type = (
             self._get_combination_info(idx)
         )
         task = self.tasks[task_idx]
 
-        # Get all available examples
-        all_examples = self._get_all_examples(task, is_counterfactual)
+        # Create example retriever for unified data access
+        retriever = ExampleRetriever(self)
 
-        # Create support examples (2 examples for encoder - grayscale grid format)
-        support_examples = self._create_support_examples(
-            all_examples, i, j, is_counterfactual
+        # Determine group name using the retriever
+        group_name = retriever.determine_group_name(task_idx, i, j, counterfactual_type)
+
+        # Determine augmentation group for regularization (using original indices)
+        is_counterfactual = counterfactual_type != "original"
+        augmentation_group = get_augmentation_group(
+            task, is_counterfactual, i, j, counterfactual_type
         )
 
-        # Create RGB support examples (2 examples for ResNet encoder - RGB format)
-        support_examples_rgb = self._create_support_examples_rgb(
-            all_examples, i, j, is_counterfactual
-        )
+        # Create support examples using the retriever
+        support_examples = [
+            retriever.get_example(task_idx, i, group_name, counterfactual_type),
+            retriever.get_example(task_idx, j, group_name, counterfactual_type),
+        ]
 
-        # Create support targets (2 examples for decoder)
-        support_targets = self._create_support_targets(
-            all_examples, i, j, is_counterfactual
+        # Create RGB support examples using the retriever
+        support_examples_rgb = [
+            self._preprocess_rgb(
+                retriever.get_raw_example(task_idx, i, group_name, counterfactual_type)
+            ),
+            self._preprocess_rgb(
+                retriever.get_raw_example(task_idx, j, group_name, counterfactual_type)
+            ),
+        ]
+
+        # Create support targets using the retriever
+        support_targets = [
+            retriever.get_example(task_idx, i, group_name, counterfactual_type),
+            retriever.get_example(task_idx, j, group_name, counterfactual_type),
+        ]
+
+        # Create target example using the retriever
+        # For cycling combinations, determine the correct target based on the pattern
+        if self.config.use_cycling:
+            # Determine which cycling pattern this is based on the indices
+            if k < 0:  # Pattern 1: (A, B) -> T (test as target)
+                target_idx = k
+            elif (
+                j < 0
+            ):  # Pattern 2: (A, T) -> B (k is the target, which is a training example)
+                target_idx = k
+            elif (
+                i < 0
+            ):  # Pattern 3: (T, B) -> A (k is the target, which is a training example)
+                target_idx = k
+            else:  # Fallback: use k as target
+                target_idx = k
+        else:
+            # Simple pattern: always use k as target
+            target_idx = k
+
+        target_example = retriever.get_example(
+            task_idx, target_idx, group_name, counterfactual_type
         )
 
         # Create test examples (all of them)
-        test_examples = self._get_test_examples(task, is_counterfactual)
+        test_examples = self._get_test_examples(task, counterfactual_type)
 
         # Create holdout example (if available)
-        holdout_example = self._get_holdout_example(task, is_counterfactual)
-
-        # Determine augmentation group for regularization
-        augmentation_group = get_augmentation_group(task, is_counterfactual, i, j)
+        holdout_example = self._get_holdout_example(task, counterfactual_type)
 
         return {
-            # Core data - only what's needed for this combination
+            # Core data - cycling format
             "support_examples": support_examples,  # 2 examples for encoder (grayscale grid format)
             "support_examples_rgb": support_examples_rgb,  # 2 examples for ResNet encoder (RGB format)
             "support_targets": support_targets,  # 2 examples for decoder (ARC format)
+            "target_example": target_example,  # Target example for cycling (grayscale grid format)
             "test_examples": test_examples,  # All test examples
             "num_test_examples": len(test_examples),  # Number of test examples
             "holdout_example": holdout_example,  # Optional holdout
@@ -339,7 +375,7 @@ class ResNetARCDataset(BaseARCDataset):
             "task_id": task["task_id"],  # Top-level task ID
             "is_counterfactual": is_counterfactual,  # Top-level flag
             "combination_idx": combination_idx,  # Top-level combination index
-            "pair_indices": (i, j),  # Top-level pair indices
+            "cycling_indices": (i, j, k),  # Top-level cycling indices
             "total_combinations": len(self.combinations[task_idx]),  # Top-level count
             "augmentation_group": augmentation_group,  # Augmentation group for regularization
         }
@@ -355,10 +391,12 @@ class ResNetARCDataset(BaseARCDataset):
         counterfactual_combinations = []
 
         for combo_idx, combo in enumerate(task_combinations):
-            if len(combo) == 3:
-                i, j, is_counterfactual = combo
+            if len(combo) == 4:
+                i, j, k, counterfactual_type = combo
+                is_counterfactual = counterfactual_type != "original"
             else:
-                i, j = combo
+                i, j, k = combo
+                counterfactual_type = "original"
                 is_counterfactual = False
 
             # Get the data for this combination
@@ -373,10 +411,12 @@ class ResNetARCDataset(BaseARCDataset):
 
                 clean_data = {
                     "combination_idx": combo_idx,
-                    "pair_indices": (i, j),
+                    "cycling_indices": (i, j, k),
                     "is_counterfactual": is_counterfactual,
+                    "counterfactual_type": counterfactual_type,
                     "support_examples": combination_data["support_examples"],
                     "support_examples_rgb": combination_data["support_examples_rgb"],
+                    "target_example": combination_data["target_example"],
                     "test_examples": combination_data["test_examples"],
                     "num_test_examples": combination_data["num_test_examples"],
                     "holdout_example": combination_data["holdout_example"],

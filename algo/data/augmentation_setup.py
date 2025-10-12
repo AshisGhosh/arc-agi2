@@ -20,23 +20,39 @@ def setup_color_augmentation(tasks: List[Dict[str, Any]], config) -> None:
     """
     for task_idx, task in enumerate(tasks):
         # Get original examples and preserve them
-        original_examples = task["train"]
-        task["original_train"] = copy.deepcopy(original_examples)
+        original_train_examples = task["train"]
+        original_test_examples = task["test"]
+        task["original_train"] = copy.deepcopy(original_train_examples)
+        task["original_test"] = copy.deepcopy(original_test_examples)
 
         # Generate augmented examples if enabled
         if config.use_color_relabeling:
-            augmented_examples = generate_augmented_examples(
-                original_examples,
+            # Augment training examples
+            augmented_train_examples = generate_augmented_examples(
+                original_train_examples,
                 num_variants=config.augmentation_variants,
                 preserve_background=config.preserve_background,
                 seed=config.random_seed + task_idx,  # Different seed per task
             )
-            # Store augmented examples in task
-            task["augmented_train"] = augmented_examples
+            task["augmented_train"] = augmented_train_examples
+
+            # Augment test examples with the SAME color permutation as training
+            # This ensures consistency between training and test augmentation
+            augmented_test_examples = generate_augmented_examples(
+                original_test_examples,
+                num_variants=config.augmentation_variants,
+                preserve_background=config.preserve_background,
+                seed=config.random_seed + task_idx,  # Same seed as training
+            )
+            task["augmented_test"] = augmented_test_examples
 
 
 def get_augmentation_group(
-    task: Dict[str, Any], is_counterfactual: bool, i: int, j: int
+    task: Dict[str, Any],
+    is_counterfactual: bool,
+    i: int,
+    j: int,
+    counterfactual_type: str = "original",
 ) -> int:
     """
     Get augmentation group ID for regularization.
@@ -44,42 +60,73 @@ def get_augmentation_group(
     Groups:
     0: original examples (no augmentation)
     1: color-relabeled examples only
-    2: counterfactual examples only
-    3: counterfactual + color-relabeled examples
+    2: X counterfactual examples only
+    3: Y counterfactual examples only
+    4: X counterfactual + color-relabeled examples
+    5: Y counterfactual + color-relabeled examples
 
     Args:
         task: Task dictionary
         is_counterfactual: Whether this is a counterfactual combination
         i, j: Pair indices for the combination
+        counterfactual_type: Type of counterfactual ("original", "X", "Y")
 
     Returns:
-        Augmentation group ID (0-3)
+        Augmentation group ID (0-5)
     """
     # determine if this combination uses augmented examples
     is_augmented = False
 
     if is_counterfactual:
         # for counterfactual, check if we're using counterfactual augmented examples
-        if (
-            task.get("counterfactual_augmented_train")
-            and i >= len(task["counterfactual_train"])
-            and j >= len(task["counterfactual_train"])
-        ):
-            is_augmented = True
+        if counterfactual_type == "X":
+            if (
+                task.get("counterfactual_X_augmented_train")
+                and i >= len(task["counterfactual_X_train"])
+                and j >= len(task["counterfactual_X_train"])
+            ):
+                is_augmented = True
+        elif counterfactual_type == "Y":
+            if (
+                task.get("counterfactual_augmented_train")
+                and i >= len(task["counterfactual_train"])
+                and j >= len(task["counterfactual_train"])
+            ):
+                is_augmented = True
     else:
         # for regular, check if we're using augmented examples
-        if (
-            task.get("augmented_train")
-            and i >= len(task["train"])
-            and j >= len(task["train"])
-        ):
-            is_augmented = True
+        # With our new logic, augmented combinations have indices that fall in the augmented range
+        if task.get("augmented_train"):
+            # Account for holdout exclusion - original group excludes last training example
+            original_size = len(task["train"])
+            if len(task["train"]) > 2:  # If holdout is enabled
+                original_size = len(task["train"]) - 1  # Exclude holdout
+            augmented_size = len(task["augmented_train"])
+
+            # Check if indices are in the augmented range (after offset)
+            if (
+                i >= original_size
+                and i < (original_size + augmented_size)
+                and j >= original_size
+                and j < (original_size + augmented_size)
+            ):
+                is_augmented = True
 
     # determine group
     if is_counterfactual and is_augmented:
-        return 3  # counterfactual + color
+        if counterfactual_type == "X":
+            return 4  # X counterfactual + color
+        elif counterfactual_type == "Y":
+            return 5  # Y counterfactual + color
+        else:
+            return 3  # fallback for unknown counterfactual type
     elif is_counterfactual:
-        return 2  # counterfactual only
+        if counterfactual_type == "X":
+            return 2  # X counterfactual only
+        elif counterfactual_type == "Y":
+            return 3  # Y counterfactual only
+        else:
+            return 2  # fallback for unknown counterfactual type
     elif is_augmented:
         return 1  # color only
     else:
