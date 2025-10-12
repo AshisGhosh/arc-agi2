@@ -31,6 +31,11 @@ from scripts.visualization_utils import (
     apply_arc_color_palette,
     tensor_to_grayscale_numpy,
 )
+from scripts.attention_analysis_utils import (
+    plot_attention_heatmap,
+    plot_attention_entropy_analysis,
+    analyze_attention_patterns,
+)
 
 
 # set page config
@@ -234,10 +239,21 @@ class DetailedModelAnalyzer:
 
         return consistency_loss, loss_components
 
-    def run_detailed_forward_pass(self, sample_data, noise_config=None):
+    def run_detailed_forward_pass(
+        self, sample_data, noise_config=None, enable_attention_monitoring=False
+    ):
         """run detailed forward pass with intermediate output capture."""
         if noise_config is None:
             noise_config = NoiseConfig()
+
+        # enable attention monitoring if requested and model supports it
+        if enable_attention_monitoring and hasattr(
+            self.model, "enable_attention_monitoring"
+        ):
+            self.model.enable_attention_monitoring(True)
+            # clear any previous attention data
+            if hasattr(self.model, "clear_attention_data"):
+                self.model.clear_attention_data()
 
         # extract inputs (already in correct shape from view_model_predictions.py format)
         support1_input = sample_data["support1_input"].to(self.device)
@@ -888,6 +904,14 @@ def main():
     )
     # analyze all combinations for selected tasks
 
+    # attention monitoring configuration
+    st.sidebar.header("attention monitoring")
+    enable_attention_monitoring = st.sidebar.checkbox(
+        "enable attention monitoring",
+        value=False,
+        help="capture and analyze attention patterns in transformer models",
+    )
+
     # noise configuration
     st.sidebar.header("noise analysis")
     enable_noise = st.sidebar.checkbox("enable noise analysis", value=False)
@@ -922,7 +946,9 @@ def main():
         st.session_state.analysis_config = {
             "noise_config": noise_config,
             "enable_noise": enable_noise,
+            "enable_attention_monitoring": enable_attention_monitoring,
         }
+        st.session_state.enable_attention_monitoring = enable_attention_monitoring
 
         progress_bar = st.progress(0)
         status_text = st.empty()
@@ -1067,8 +1093,26 @@ def main():
 
                     # run detailed forward pass
                     result = analyzer.run_detailed_forward_pass(
-                        sample_data, noise_config
+                        sample_data, noise_config, enable_attention_monitoring
                     )
+
+                    # add attention analysis if monitoring was enabled
+                    if enable_attention_monitoring and hasattr(
+                        model, "get_attention_analysis"
+                    ):
+                        try:
+                            attention_analysis = model.get_attention_analysis()
+                            result["attention_analysis"] = attention_analysis
+                            # debug: print attention analysis status (only on error)
+                            if "error" in attention_analysis:
+                                print(
+                                    f"attention analysis error: {attention_analysis['error']}"
+                                )
+                        except Exception as e:
+                            print(f"warning: could not get attention analysis: {e}")
+                            result["attention_analysis"] = None
+                    else:
+                        result["attention_analysis"] = None
 
                     # add metadata
                     result.update(
@@ -1190,6 +1234,83 @@ def main():
             height=400,
         )
         st.plotly_chart(fig_acc, use_container_width=True)
+
+        # attention analysis (for transformer models with attention monitoring)
+        enable_attention_monitoring = st.session_state.get(
+            "enable_attention_monitoring", False
+        )
+
+        # show attention monitoring status (simplified)
+        attention_results_count = sum(
+            1
+            for r in results
+            if r.get("attention_analysis")
+            and "error" not in r.get("attention_analysis", {})
+        )
+        if enable_attention_monitoring:
+            st.info(
+                f"👁️ attention monitoring: {attention_results_count}/{len(results)} samples captured"
+            )
+
+        if enable_attention_monitoring and any(
+            r.get("attention_analysis") for r in results
+        ):
+            st.subheader("👁️ attention analysis")
+
+            # collect attention data from all results
+            all_attention_data = []
+            for result in results:
+                if (
+                    result.get("attention_analysis")
+                    and "error" not in result["attention_analysis"]
+                ):
+                    all_attention_data.append(result["attention_analysis"])
+
+            if all_attention_data:
+                # create combined attention analysis by averaging across samples
+                combined_analysis = {}
+                for key in all_attention_data[0].keys():
+                    # average the metrics across all samples
+                    avg_entropy = np.mean(
+                        [data[key]["avg_entropy"] for data in all_attention_data]
+                    )
+                    avg_sparsity = np.mean(
+                        [data[key]["sparsity"] for data in all_attention_data]
+                    )
+                    avg_max_attn = np.mean(
+                        [data[key]["max_attention"] for data in all_attention_data]
+                    )
+                    avg_head_var = np.mean(
+                        [data[key]["head_variance"] for data in all_attention_data]
+                    )
+
+                    combined_analysis[key] = {
+                        "layer": all_attention_data[0][key]["layer"],
+                        "type": all_attention_data[0][key]["type"],
+                        "avg_entropy": avg_entropy,
+                        "sparsity": avg_sparsity,
+                        "max_attention": avg_max_attn,
+                        "head_variance": avg_head_var,
+                        "seq_len": all_attention_data[0][key]["seq_len"],
+                        "num_heads": all_attention_data[0][key]["num_heads"],
+                    }
+
+                # plot attention entropy analysis
+                try:
+                    fig_entropy = plot_attention_entropy_analysis(combined_analysis)
+                    st.plotly_chart(fig_entropy, use_container_width=True)
+                except Exception as e:
+                    st.warning(f"could not create attention entropy plot: {e}")
+
+            else:
+                st.info("no attention data available for visualization")
+        elif enable_attention_monitoring:
+            st.warning(
+                "⚠️ attention monitoring is enabled but no attention data was captured. this might indicate:"
+            )
+            st.write("- the model is not a transformer model")
+            st.write("- attention monitoring failed during forward pass")
+            st.write("- check the terminal output for debug messages")
 
         # intermediate outputs analysis (for transformer models)
         if "rule_tokens" in results[0]:
@@ -1385,6 +1506,105 @@ def main():
                 height=400,
             )
             st.plotly_chart(logits_fig, use_container_width=True)
+
+            # attention visualization (for transformer models with attention monitoring)
+            enable_attention_monitoring = st.session_state.get(
+                "enable_attention_monitoring", False
+            )
+            if (
+                enable_attention_monitoring
+                and selected_result.get("attention_analysis")
+                and "error" not in selected_result["attention_analysis"]
+            ):
+                st.subheader("👁️ attention visualization")
+
+                attention_analysis = selected_result["attention_analysis"]
+
+                # attention summary
+                st.write("**attention pattern summary:**")
+                for key, data in attention_analysis.items():
+                    attn_type = data["type"]
+                    layer = data["layer"]
+                    entropy = data["avg_entropy"]
+                    sparsity = data["sparsity"]
+                    max_attn = data["max_attention"]
+                    head_var = data["head_variance"]
+
+                    st.write(f"**{attn_type} layer {layer}:**")
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("entropy", f"{entropy:.3f}")
+                    with col2:
+                        st.metric("sparsity", f"{sparsity:.3f}")
+                    with col3:
+                        st.metric("max attention", f"{max_attn:.3f}")
+                    with col4:
+                        st.metric("head variance", f"{head_var:.3f}")
+
+                # attention heatmaps for each layer
+                st.write("**attention heatmaps:**")
+                for layer_idx in range(model.num_decoder_layers):
+                    st.write(f"**layer {layer_idx}:**")
+
+                    try:
+                        vis_data = model.get_attention_visualization_data(
+                            layer_idx, head_idx=0
+                        )
+
+                        col1, col2 = st.columns(2)
+
+                        with col1:
+                            if "self_attention" in vis_data:
+                                st.write("**self-attention:**")
+                                fig_self = plot_attention_heatmap(
+                                    vis_data["self_attention"],
+                                    f"self-attention layer {layer_idx}",
+                                )
+                                st.plotly_chart(fig_self, use_container_width=True)
+
+                        with col2:
+                            if "cross_attention" in vis_data:
+                                st.write("**cross-attention:**")
+                                fig_cross = plot_attention_heatmap(
+                                    vis_data["cross_attention"],
+                                    f"cross-attention layer {layer_idx}",
+                                )
+                                st.plotly_chart(fig_cross, use_container_width=True)
+
+                        # spatial analysis
+                        if "self_attention" in vis_data:
+                            spatial_analysis = analyze_attention_patterns(
+                                vis_data["self_attention"]
+                            )
+                            st.write("**spatial analysis (self-attention):**")
+                            if spatial_analysis["analysis_type"] == "self_attention":
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    st.metric(
+                                        "local attention ratio",
+                                        f"{spatial_analysis['local_attention_ratio']:.3f}",
+                                    )
+                                with col2:
+                                    st.metric(
+                                        "center attention ratio",
+                                        f"{spatial_analysis['center_attention_ratio']:.3f}",
+                                    )
+
+                        if "cross_attention" in vis_data:
+                            spatial_analysis = analyze_attention_patterns(
+                                vis_data["cross_attention"]
+                            )
+                            st.write("**spatial analysis (cross-attention):**")
+                            if spatial_analysis["analysis_type"] == "cross_attention":
+                                st.metric(
+                                    "center patch attention ratio",
+                                    f"{spatial_analysis['center_patch_attention_ratio']:.3f}",
+                                )
+
+                    except Exception as e:
+                        st.warning(
+                            f"could not visualize attention for layer {layer_idx}: {e}"
+                        )
 
             # intermediate outputs (for transformer models)
             if selected_result.get("rule_tokens") is not None:

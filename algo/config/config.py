@@ -50,21 +50,23 @@ class Config:
     # =============================================================================
     # Model architecture
     d_model: int = 256  # Model dimension
-    num_rule_tokens: int = 2  # Number of rule tokens from PMA
+    num_rule_tokens: int = 4  # Number of rule tokens from PMA
     num_encoder_layers: int = 8  # Number of transformer encoder layers
-    num_decoder_layers: int = 4  # Number of self and cross-attention transformer decoder layers, 3x per layer: self-attn, cross-attn, ff
+    num_decoder_layers: int = 8  # Number of self and cross-attention transformer decoder layers, 3x per layer: self-attn, cross-attn, ff
     num_heads: int = 8  # Number of attention heads for transformer
     patch_size: int = 3  # Patch size for transformer input processing
     num_cls_tokens: int = 4  # Number of CLS tokens from pairwise encoder
 
     # Rule bottleneck (optional compression)
-    use_rule_bottleneck: bool = False  # Enable rule token bottleneck compression
+    use_rule_bottleneck: bool = True  # Enable rule token bottleneck compression
     rule_bottleneck_dim: int = 8  # Compressed dimension for rule tokens
 
     # Auxiliary loss weights
     support_reconstruction_weight: float = 0.5  # Weight for support reconstruction loss
     cls_regularization_weight: float = 0.0  # Weight for CLS regularization loss
-    rule_token_consistency_weight: float = 0.0  # Weight for rule token consistency loss
+    rule_token_consistency_weight: float = (
+        0.01  # Weight for rule token consistency loss
+    )
     contrastive_temperature: float = 0.07  # Temperature for contrastive learning
     cls_l2_weight: float = 0.01  # Weight for L2 regularization in CLS loss
 
